@@ -48,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--low-disk-mode",
         action=BooleanOptionalAction,
         default=True,
-        help="低磁盘模式，启用时按实体顺序解包并减少峰值占用",
+        help="低磁盘模式：模拟目录按实体流式处理并清理；真实游戏目录自动回退批量处理",
     )
     parser.add_argument(
         "--enable-pack",

@@ -30,7 +30,7 @@ class PipelineConfig:
         baidu_pan_refresh_token: 百度开放平台 refresh token。
         local_bin_dir: 本地 bin 输入目录（写入 `manifest/<version>/bin_input`）。
         unpack_workers: 解包并发线程数。
-        low_disk_mode: 低磁盘模式；启用时按实体顺序解包以降低峰值空间占用。
+        low_disk_mode: 低磁盘模式；模拟目录下启用“按实体流式解包/打包/上传/清理”以降低峰值空间占用。
         enable_pack: 是否在解包后执行 7z 打包阶段。
         pack_output_dir: 打包产物目录；为空时默认 `output/packages/<version>/`。
         pack_password: 打包密码；为空时不启用密码。

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -323,7 +324,9 @@ def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
     )
 
     assert manifest_file == package_root / "upload_manifest.json"
-    assert fake_client.download_calls == [("upload_manifest.json", package_root / ".remote_upload_manifest.json")]
+    assert fake_client.download_calls == [
+        ("upload_manifest.json", package_root / ".remote_upload_manifest.json")
+    ]
     assert fake_client.upload_calls == []
     payload = json.loads(manifest_file.read_text(encoding="utf-8"))
     assert payload["entry_count"] == 1
@@ -454,3 +457,164 @@ def test_cleanup_simulated_runtime_files_should_remove_wads_and_downloads(
     assert not map_wad.exists()
     assert other_file.exists()
     assert not runtime_download_dir.exists()
+
+
+def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """流式模式应按实体单包上传，并及时清理 WAD/音频/压缩包。"""
+
+    output_path = tmp_path / "output"
+    runtime_game_path = tmp_path / "mini_game"
+    champion_wad = runtime_game_path / "DATA" / "FINAL" / "Champions" / "Annie.wad.client"
+    map_wad = (
+        runtime_game_path / "DATA" / "FINAL" / "Maps" / "Shipping" / "Map11" / "Map11.wad.client"
+    )
+    champion_wad.parent.mkdir(parents=True, exist_ok=True)
+    map_wad.parent.mkdir(parents=True, exist_ok=True)
+    champion_wad.write_bytes(b"champion-wad")
+    map_wad.write_bytes(b"map-wad")
+
+    unpack_calls: list[tuple[tuple[int, ...], tuple[int, ...], int]] = []
+    pack_calls: list[tuple[Path, Path, str, Path | None]] = []
+    upload_calls: list[tuple[str, ...]] = []
+
+    def _fake_resolve_runtime_wad_paths(
+        data_file_base: Path,
+        region: str,
+        champion_ids: tuple[int, ...],
+        map_ids: tuple[int, ...],
+        include_root_wad: bool = True,
+    ) -> tuple[str, ...]:
+        del data_file_base, region, include_root_wad
+        if champion_ids:
+            return ("Game/DATA/FINAL/Champions/Annie.wad.client",)
+        if map_ids:
+            return ("Game/DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",)
+        return tuple()
+
+    def _fake_run_unpack(
+        champion_ids: tuple[int, ...],
+        map_ids: tuple[int, ...],
+        max_workers: int,
+    ) -> None:
+        unpack_calls.append((champion_ids, map_ids, max_workers))
+        if champion_ids:
+            entity_id = champion_ids[0]
+            target = "champions"
+            entity_name = f"{entity_id}·Annie"
+        else:
+            entity_id = map_ids[0]
+            target = "maps"
+            entity_name = f"{entity_id}·Map11"
+        audio_dir = output_path / "audios" / "16.4" / target / entity_name
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        (audio_dir / "voice.wav").write_bytes(b"wav")
+        report_dir = output_path / "reports" / "16.4" / target
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / f"_{entity_id}_metadata.yaml").write_text("meta", encoding="utf-8")
+
+    def _fake_pack_champion(
+        champion_dir: Path,
+        output_path: Path,
+        *,
+        archive_name: str | None = None,
+        report_file: Path | None = None,
+        password: str | None = None,
+        encrypt_filenames: bool = True,
+        extra_files: tuple[Path, ...] = tuple(),
+        compression_level: int = 0,
+        seven_zip_executable: str | None = None,
+    ) -> Path:
+        del password, encrypt_filenames, extra_files, compression_level, seven_zip_executable
+        assert champion_dir.is_dir()
+        output_path.mkdir(parents=True, exist_ok=True)
+        archive_path = output_path / str(archive_name)
+        archive_path.write_bytes(b"7z")
+        pack_calls.append((champion_dir, output_path, str(archive_name), report_file))
+        return archive_path
+
+    def _fake_upload_archives_and_manifest(
+        config: PipelineConfig,
+        game_version: str,
+        archives: tuple[Path, ...],
+    ) -> Path:
+        del config, game_version
+        upload_calls.append(tuple(path.name for path in archives))
+        manifest_file = output_path / "packages" / "16.4" / "upload_manifest.json"
+        manifest_file.parent.mkdir(parents=True, exist_ok=True)
+        manifest_file.write_text("{}", encoding="utf-8")
+        return manifest_file
+
+    monkeypatch.setattr(pipeline, "resolve_runtime_wad_paths", _fake_resolve_runtime_wad_paths)
+    monkeypatch.setattr(pipeline, "run_unpack", _fake_run_unpack)
+    monkeypatch.setattr(pipeline, "pack_champion", _fake_pack_champion)
+    monkeypatch.setattr(
+        pipeline, "_upload_archives_and_manifest", _fake_upload_archives_and_manifest
+    )
+    monkeypatch.setattr(pipeline, "_resolve_pack_extra_files", lambda config: tuple())
+    monkeypatch.setattr(pipeline, "_resolve_pack_archive_type", lambda config: "VO")
+    monkeypatch.setattr(pipeline, "check_disk_space", lambda path, required_bytes: True)
+
+    config = PipelineConfig(
+        output_path=output_path,
+        game_region="zh_CN",
+        pack_password=None,
+        pack_encrypt_filenames=True,
+    )
+    manifest_file = pipeline._run_streaming_unpack_pack_upload(
+        config=config,
+        game_version="16.4",
+        data_file_base=output_path / "manifest" / "16.4" / "data",
+        targets=SimpleNamespace(champion_ids=(1,), map_ids=(11,)),
+        runtime_game_path=runtime_game_path,
+        runtime_wad_paths=(
+            "Game/DATA/FINAL/Champions/Annie.wad.client",
+            "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
+        ),
+        include_root_wad=True,
+        unpack_workers=2,
+    )
+
+    assert manifest_file == output_path / "packages" / "16.4" / "upload_manifest.json"
+    assert unpack_calls == [
+        ((1,), tuple(), 2),
+        (tuple(), (11,), 2),
+    ]
+    assert [item[2] for item in pack_calls] == ["1·Annie-16.4-VO.7z", "11·Map11-16.4-VO.7z"]
+    assert upload_calls == [("1·Annie-16.4-VO.7z",), ("11·Map11-16.4-VO.7z",)]
+    assert not champion_wad.exists()
+    assert not map_wad.exists()
+    assert not (output_path / "audios" / "16.4" / "champions" / "1·Annie").exists()
+    assert not (output_path / "audios" / "16.4" / "maps" / "11·Map11").exists()
+    assert not (output_path / "packages" / "16.4" / "champions" / "1·Annie-16.4-VO.7z").exists()
+    assert not (output_path / "packages" / "16.4" / "maps" / "11·Map11-16.4-VO.7z").exists()
+
+
+def test_should_enable_streaming_mode_should_disable_for_real_game_path(tmp_path: Path) -> None:
+    """真实游戏目录场景应关闭流式模式。"""
+
+    config = PipelineConfig(output_path=tmp_path / "output", low_disk_mode=True)
+    targets = SimpleNamespace(champion_ids=(1,), map_ids=tuple())
+    assert (
+        pipeline._should_enable_streaming_mode(
+            config=config,
+            runtime_is_simulated=False,
+            targets=targets,
+        )
+        is False
+    )
+
+
+def test_resolve_effective_unpack_workers_should_expand_for_real_game_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实目录场景应提升解包并发到 CPU 核心数。"""
+
+    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 8)
+    effective = pipeline._resolve_effective_unpack_workers(
+        configured_workers=2,
+        runtime_is_simulated=False,
+    )
+    assert effective == 8

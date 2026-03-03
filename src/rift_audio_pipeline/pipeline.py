@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 import hashlib
 import json
+import os
 from pathlib import Path
+from queue import Empty
+from queue import Full
+from queue import Queue
 import shutil
+import threading
 
 from loguru import logger
 
@@ -20,7 +26,6 @@ from rift_audio_pipeline.audio_processor import resolve_runtime_wad_paths
 from rift_audio_pipeline.audio_processor import run_bin_updater
 from rift_audio_pipeline.audio_processor import run_data_updater
 from rift_audio_pipeline.audio_processor import run_unpack
-from rift_audio_pipeline.audio_processor import run_unpack_by_entity
 from rift_audio_pipeline.baidu.sdk import ensure_official_sdk_path
 from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
@@ -30,6 +35,7 @@ from rift_audio_pipeline.bin_extractor import seed_bin_input_from_directory
 from rift_audio_pipeline.config import PipelineConfig
 from rift_audio_pipeline.game_dir_builder import build_simulated_dir
 from rift_audio_pipeline.game_dir_builder import check_local_game_path
+from rift_audio_pipeline.game_dir_builder import check_disk_space
 from rift_audio_pipeline.game_dir_builder import cleanup_lcu_data_wads
 from rift_audio_pipeline.game_dir_builder import cleanup_updater_inputs
 from rift_audio_pipeline.game_dir_builder import write_content_metadata
@@ -43,11 +49,34 @@ from rift_audio_pipeline.manifest_ops import extract_changed_entities_from_wad_p
 from rift_audio_pipeline.manifest_ops import filter_wad_changes_by_bin_voice_paths
 from rift_audio_pipeline.manifest_ops import save_local_state
 from rift_audio_pipeline.packer import pack_all
+from rift_audio_pipeline.packer import pack_champion
 
 DEFAULT_BUNDLED_PACK_EXTRA_DIR = Path(__file__).resolve().parent / "pack_extra"
 DEFAULT_PACK_EXTRA_FILES = ("食用说明.txt", "license.txt")
 UPLOAD_MANIFEST_FILE_NAME = "upload_manifest.json"
 UPLOAD_MANIFEST_SCHEMA_VERSION = 2
+STREAMING_UPLOAD_QUEUE_SIZE = 1
+STREAMING_DISK_SPACE_MULTIPLIER = 3
+STREAMING_MIN_REQUIRED_BYTES = 512 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamingEntityTask:
+    """低磁盘流式模式中的单实体任务。"""
+
+    target: str
+    entity_id: int
+    champion_ids: tuple[int, ...]
+    map_ids: tuple[int, ...]
+    runtime_wad_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PackedEntityArtifact:
+    """单实体打包结果。"""
+
+    task: _StreamingEntityTask
+    archive_path: Path
 
 
 def run_pipeline(config: PipelineConfig) -> int:
@@ -173,7 +202,9 @@ def run_pipeline(config: PipelineConfig) -> int:
         logger.info("dry-run 启用：仅做更新判定，不执行后续任务。")
         return 0
     if not config.enable_pack or not config.enable_upload:
-        logger.error("检测到版本更新，但当前流程要求必须启用打包与上传：--enable-pack --enable-upload")
+        logger.error(
+            "检测到版本更新，但当前流程要求必须启用打包与上传：--enable-pack --enable-upload"
+        )
         return 1
 
     runtime_game_path, runtime_is_simulated = _resolve_runtime_game_path(
@@ -266,6 +297,7 @@ def run_pipeline(config: PipelineConfig) -> int:
     if config.low_disk_mode and not (targets.champion_ids or targets.map_ids):
         targets = resolve_all_processing_targets(data_file_base=data_file_base)
 
+    runtime_wad_paths: tuple[str, ...] = tuple()
     if runtime_is_simulated:
         runtime_wad_targets = targets
         if not (runtime_wad_targets.champion_ids or runtime_wad_targets.map_ids):
@@ -305,6 +337,16 @@ def run_pipeline(config: PipelineConfig) -> int:
             len(game_wads),
         )
 
+    streaming_mode = _should_enable_streaming_mode(
+        config=config,
+        runtime_is_simulated=runtime_is_simulated,
+        targets=targets,
+    )
+    upload_manifest: Path | None = None
+    effective_unpack_workers = _resolve_effective_unpack_workers(
+        configured_workers=config.unpack_workers,
+        runtime_is_simulated=runtime_is_simulated,
+    )
     try:
         run_bin_updater(
             champion_ids=targets.champion_ids,
@@ -323,23 +365,22 @@ def run_pipeline(config: PipelineConfig) -> int:
                 removed_bin_files,
             )
 
-        if config.low_disk_mode and (targets.champion_ids or targets.map_ids):
-            logger.info(
-                "低磁盘模式启用：按实体顺序解包（champions={}, maps={}, workers={}）",
-                len(targets.champion_ids),
-                len(targets.map_ids),
-                config.unpack_workers,
-            )
-            run_unpack_by_entity(
-                champion_ids=targets.champion_ids,
-                map_ids=targets.map_ids,
-                max_workers=config.unpack_workers,
+        if streaming_mode:
+            upload_manifest = _run_streaming_unpack_pack_upload(
+                config=config,
+                game_version=latest.game_version,
+                data_file_base=data_file_base,
+                targets=targets,
+                runtime_game_path=runtime_game_path,
+                runtime_wad_paths=runtime_wad_paths,
+                include_root_wad=secondary_filter_result is None,
+                unpack_workers=effective_unpack_workers,
             )
         else:
             run_unpack(
                 champion_ids=targets.champion_ids,
                 map_ids=targets.map_ids,
-                max_workers=config.unpack_workers,
+                max_workers=effective_unpack_workers,
             )
         if runtime_is_simulated:
             removed_runtime_wads, removed_download_cache = _cleanup_simulated_runtime_files(
@@ -355,32 +396,520 @@ def run_pipeline(config: PipelineConfig) -> int:
         logger.error("解包阶段失败，error={}", error)
         return 1
 
-    try:
-        archives = _pack_unpacked_outputs(config=config, game_version=latest.game_version)
-    except Exception as error:  # noqa: BLE001
-        logger.error("打包阶段失败，error={}", error)
-        return 1
-    logger.info("打包阶段执行完成：archive_count={}", len(archives))
-    removed_audio_files = _cleanup_version_audio_outputs(
-        version_audio_dir=config.output_path / "audios" / latest.game_version
-    )
-    logger.info("打包后已清理音频目录文件：removed_count={}", removed_audio_files)
-    try:
-        upload_manifest = _upload_archives_and_manifest(
-            config=config,
-            game_version=latest.game_version,
-            archives=archives,
+    if streaming_mode:
+        if upload_manifest is not None:
+            logger.info("上传阶段执行完成：manifest_file={}", upload_manifest)
+    else:
+        try:
+            archives = _pack_unpacked_outputs(config=config, game_version=latest.game_version)
+        except Exception as error:  # noqa: BLE001
+            logger.error("打包阶段失败，error={}", error)
+            return 1
+        logger.info("打包阶段执行完成：archive_count={}", len(archives))
+        removed_audio_files = _cleanup_version_audio_outputs(
+            version_audio_dir=config.output_path / "audios" / latest.game_version
         )
-    except Exception as error:  # noqa: BLE001
-        logger.error("上传阶段失败，error={}", error)
-        return 1
-    if upload_manifest is not None:
-        logger.info("上传阶段执行完成：manifest_file={}", upload_manifest)
+        logger.info("打包后已清理音频目录文件：removed_count={}", removed_audio_files)
+        try:
+            upload_manifest = _upload_archives_and_manifest(
+                config=config,
+                game_version=latest.game_version,
+                archives=archives,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.error("上传阶段失败，error={}", error)
+            return 1
+        if upload_manifest is not None:
+            logger.info("上传阶段执行完成：manifest_file={}", upload_manifest)
 
     saved_state = build_local_state(latest_versions=latest)
     saved_file = save_local_state(state=saved_state, state_file=DEFAULT_LOCAL_STATE_FILE)
     logger.info("解包阶段执行完成，已同步状态文件：{}", saved_file)
     return 0
+
+
+def _should_enable_streaming_mode(
+    config: PipelineConfig,
+    runtime_is_simulated: bool,
+    targets: object,
+) -> bool:
+    """判定是否启用低磁盘流式模式。"""
+
+    has_targets = bool(
+        getattr(targets, "champion_ids", tuple()) or getattr(targets, "map_ids", tuple())
+    )
+    if not (config.low_disk_mode and has_targets):
+        return False
+    if runtime_is_simulated:
+        return True
+    logger.info("检测到真实游戏目录，跳过低磁盘流式模式并切换为批量处理。")
+    return False
+
+
+def _resolve_effective_unpack_workers(
+    configured_workers: int,
+    runtime_is_simulated: bool,
+) -> int:
+    """解析本次运行实际生效的解包并发数。"""
+
+    if runtime_is_simulated:
+        return configured_workers
+
+    cpu_workers = max(1, os.cpu_count() or configured_workers)
+    effective_workers = max(configured_workers, cpu_workers)
+    if effective_workers != configured_workers:
+        logger.info(
+            "检测到真实游戏目录，解包并发自动提升：configured={}, effective={}",
+            configured_workers,
+            effective_workers,
+        )
+    return effective_workers
+
+
+def _run_streaming_unpack_pack_upload(
+    config: PipelineConfig,
+    game_version: str,
+    data_file_base: Path,
+    targets: object,
+    runtime_game_path: Path,
+    runtime_wad_paths: tuple[str, ...],
+    include_root_wad: bool,
+    unpack_workers: int,
+) -> Path | None:
+    """执行实体级流式流水线：解包 -> 打包 -> 上传 -> 清理。"""
+
+    tasks = _build_streaming_entity_tasks(
+        data_file_base=data_file_base,
+        region=config.game_region,
+        targets=targets,
+        runtime_wad_paths=runtime_wad_paths,
+        include_root_wad=include_root_wad,
+    )
+    if not tasks:
+        logger.warning("低磁盘流式模式跳过：无可处理实体。")
+        return None
+
+    logger.info(
+        "低磁盘流式模式启用：entity_count={}, upload_queue_size={}, unpack_workers={}",
+        len(tasks),
+        STREAMING_UPLOAD_QUEUE_SIZE,
+        unpack_workers,
+    )
+    extra_files = _resolve_pack_extra_files(config=config)
+    archive_audio_type = _resolve_pack_archive_type(config=config)
+    if extra_files:
+        logger.info("打包附加文件已启用：{}", ", ".join(str(item) for item in extra_files))
+    if archive_audio_type is not None:
+        logger.info("打包命名类型后缀：{}", archive_audio_type)
+
+    upload_errors: list[Exception] = []
+    upload_queue: Queue[_PackedEntityArtifact | None] = Queue(maxsize=STREAMING_UPLOAD_QUEUE_SIZE)
+    upload_manifest_holder: list[Path | None] = [None]
+    upload_thread = threading.Thread(
+        name="streaming-upload-worker",
+        target=_run_streaming_upload_worker,
+        kwargs={
+            "config": config,
+            "game_version": game_version,
+            "upload_queue": upload_queue,
+            "upload_errors": upload_errors,
+            "upload_manifest_holder": upload_manifest_holder,
+        },
+        daemon=True,
+    )
+    upload_thread.start()
+    sentinel_enqueued = False
+
+    try:
+        for task in tasks:
+            if upload_errors:
+                raise RuntimeError("流式上传线程执行失败，已停止后续实体处理。") from upload_errors[
+                    0
+                ]
+
+            _ensure_streaming_disk_space(
+                config=config,
+                game_version=game_version,
+                runtime_game_path=runtime_game_path,
+                task=task,
+            )
+            run_unpack(
+                champion_ids=task.champion_ids,
+                map_ids=task.map_ids,
+                max_workers=unpack_workers,
+            )
+            artifact, entity_audio_dir, report_file = _pack_single_streaming_entity(
+                config=config,
+                game_version=game_version,
+                task=task,
+                extra_files=extra_files,
+                archive_audio_type=archive_audio_type,
+            )
+            removed_wad_count = _cleanup_task_runtime_wads(
+                runtime_game_path=runtime_game_path,
+                runtime_wad_paths=task.runtime_wad_paths,
+            )
+            removed_audio_files = _cleanup_entity_audio_output(
+                entity_audio_dir=entity_audio_dir,
+                report_file=report_file,
+            )
+            logger.info(
+                "流式任务完成并入队上传：target={}, entity_id={}, removed_wad_count={}, removed_audio_count={}, archive={}",
+                task.target,
+                task.entity_id,
+                removed_wad_count,
+                removed_audio_files,
+                artifact.archive_path,
+            )
+            _enqueue_streaming_upload_job(
+                upload_queue=upload_queue,
+                upload_errors=upload_errors,
+                artifact=artifact,
+            )
+
+        _enqueue_streaming_upload_job(
+            upload_queue=upload_queue,
+            upload_errors=upload_errors,
+            artifact=None,
+        )
+        sentinel_enqueued = True
+        if not upload_errors:
+            upload_queue.join()
+        if upload_errors:
+            raise RuntimeError("流式上传线程执行失败，流水线终止。") from upload_errors[0]
+    finally:
+        if upload_thread.is_alive() and (upload_errors or not sentinel_enqueued):
+            _drain_streaming_upload_queue(upload_queue=upload_queue)
+        upload_thread.join(timeout=5)
+    return upload_manifest_holder[0]
+
+
+def _build_streaming_entity_tasks(
+    data_file_base: Path,
+    region: str,
+    targets: object,
+    runtime_wad_paths: tuple[str, ...],
+    include_root_wad: bool,
+) -> tuple[_StreamingEntityTask, ...]:
+    """构建流式模式所需的实体任务集合。"""
+
+    runtime_wad_index = {item.casefold(): item for item in runtime_wad_paths}
+    tasks: list[_StreamingEntityTask] = []
+    champion_ids = tuple(int(item) for item in getattr(targets, "champion_ids", tuple()))
+    map_ids = tuple(int(item) for item in getattr(targets, "map_ids", tuple()))
+
+    for champion_id in champion_ids:
+        task_runtime_paths = resolve_runtime_wad_paths(
+            data_file_base=data_file_base,
+            region=region,
+            champion_ids=(champion_id,),
+            map_ids=tuple(),
+            include_root_wad=include_root_wad,
+        )
+        filtered_paths = tuple(
+            runtime_wad_index.get(path.casefold(), path) for path in task_runtime_paths
+        )
+        tasks.append(
+            _StreamingEntityTask(
+                target="champions",
+                entity_id=champion_id,
+                champion_ids=(champion_id,),
+                map_ids=tuple(),
+                runtime_wad_paths=filtered_paths,
+            )
+        )
+    for map_id in map_ids:
+        task_runtime_paths = resolve_runtime_wad_paths(
+            data_file_base=data_file_base,
+            region=region,
+            champion_ids=tuple(),
+            map_ids=(map_id,),
+            include_root_wad=include_root_wad,
+        )
+        filtered_paths = tuple(
+            runtime_wad_index.get(path.casefold(), path) for path in task_runtime_paths
+        )
+        tasks.append(
+            _StreamingEntityTask(
+                target="maps",
+                entity_id=map_id,
+                champion_ids=tuple(),
+                map_ids=(map_id,),
+                runtime_wad_paths=filtered_paths,
+            )
+        )
+    return tuple(tasks)
+
+
+def _run_streaming_upload_worker(
+    config: PipelineConfig,
+    game_version: str,
+    upload_queue: Queue[_PackedEntityArtifact | None],
+    upload_errors: list[Exception],
+    upload_manifest_holder: list[Path | None],
+) -> None:
+    """消费流式打包产物并执行上传与压缩包清理。"""
+
+    while True:
+        artifact = upload_queue.get()
+        try:
+            if artifact is None:
+                return
+            manifest_file = _upload_archives_and_manifest(
+                config=config,
+                game_version=game_version,
+                archives=(artifact.archive_path,),
+            )
+            if manifest_file is not None:
+                upload_manifest_holder[0] = manifest_file
+            _cleanup_uploaded_archive(artifact.archive_path)
+            logger.info(
+                "流式上传完成并清理压缩包：target={}, entity_id={}, archive={}",
+                artifact.task.target,
+                artifact.task.entity_id,
+                artifact.archive_path,
+            )
+        except Exception as error:  # noqa: BLE001
+            upload_errors.append(error)
+            return
+        finally:
+            upload_queue.task_done()
+
+
+def _enqueue_streaming_upload_job(
+    upload_queue: Queue[_PackedEntityArtifact | None],
+    upload_errors: list[Exception],
+    artifact: _PackedEntityArtifact | None,
+) -> None:
+    """将实体打包产物安全入队，避免上传线程异常导致阻塞。"""
+
+    while True:
+        if upload_errors:
+            raise RuntimeError("流式上传线程异常，已停止入队。") from upload_errors[0]
+        try:
+            upload_queue.put(artifact, timeout=0.2)
+            return
+        except Full:
+            continue
+
+
+def _drain_streaming_upload_queue(upload_queue: Queue[_PackedEntityArtifact | None]) -> None:
+    """在异常场景下尝试终止上传线程并释放队列阻塞。"""
+
+    while True:
+        try:
+            upload_queue.put_nowait(None)
+            return
+        except Full:
+            try:
+                upload_queue.get_nowait()
+                upload_queue.task_done()
+            except Empty:
+                continue
+
+
+def _ensure_streaming_disk_space(
+    config: PipelineConfig,
+    game_version: str,
+    runtime_game_path: Path,
+    task: _StreamingEntityTask,
+) -> None:
+    """在流式任务启动前执行磁盘空间检查。"""
+
+    required_bytes = _estimate_streaming_required_bytes(
+        runtime_game_path=runtime_game_path,
+        task=task,
+    )
+    package_root = _resolve_package_output_root(config=config, game_version=game_version)
+    probe_dirs = tuple(
+        {
+            runtime_game_path.expanduser().resolve(),
+            config.output_path.expanduser().resolve(),
+            package_root.expanduser().resolve(),
+        }
+    )
+    for probe in probe_dirs:
+        probe.mkdir(parents=True, exist_ok=True)
+        if check_disk_space(path=probe, required_bytes=required_bytes):
+            continue
+        raise RuntimeError(
+            "流式任务磁盘空间不足："
+            f"target={task.target}, entity_id={task.entity_id}, path={probe}, required_bytes={required_bytes}"
+        )
+
+
+def _estimate_streaming_required_bytes(
+    runtime_game_path: Path,
+    task: _StreamingEntityTask,
+) -> int:
+    """估算当前实体任务执行所需的最小可用磁盘空间。"""
+
+    wad_total_bytes = 0
+    for runtime_wad_path in task.runtime_wad_paths:
+        wad_file = _resolve_runtime_wad_file(
+            runtime_game_path=runtime_game_path,
+            runtime_wad_path=runtime_wad_path,
+        )
+        if wad_file is None or not wad_file.is_file():
+            continue
+        wad_total_bytes += wad_file.stat().st_size
+    estimated = wad_total_bytes * STREAMING_DISK_SPACE_MULTIPLIER
+    return max(STREAMING_MIN_REQUIRED_BYTES, estimated)
+
+
+def _resolve_runtime_wad_file(runtime_game_path: Path, runtime_wad_path: str) -> Path | None:
+    """将运行时 WAD 路径转换为本地文件路径。"""
+
+    normalized = runtime_wad_path.strip().replace("\\", "/")
+    if not normalized:
+        return None
+    relative_path = normalized.removeprefix("Game/")
+    if relative_path.startswith("/"):
+        return None
+    relative = Path(relative_path)
+    if any(part == ".." for part in relative.parts):
+        return None
+    return runtime_game_path / relative
+
+
+def _pack_single_streaming_entity(
+    config: PipelineConfig,
+    game_version: str,
+    task: _StreamingEntityTask,
+    extra_files: tuple[Path, ...],
+    archive_audio_type: str | None,
+) -> tuple[_PackedEntityArtifact, Path, Path | None]:
+    """打包单实体输出并返回产物信息。"""
+
+    entity_audio_dir = _resolve_entity_audio_directory(
+        output_path=config.output_path,
+        game_version=game_version,
+        task=task,
+    )
+    report_file = (
+        config.output_path
+        / "reports"
+        / game_version
+        / task.target
+        / f"_{task.entity_id}_metadata.yaml"
+    )
+    normalized_report_file = report_file if report_file.is_file() else None
+    archive_name = _build_entity_archive_name(
+        directory_name=entity_audio_dir.name,
+        game_version=game_version,
+        audio_type=archive_audio_type,
+    )
+    archive_path = pack_champion(
+        champion_dir=entity_audio_dir,
+        output_path=_resolve_package_output_root(config=config, game_version=game_version)
+        / task.target,
+        archive_name=archive_name,
+        report_file=normalized_report_file,
+        password=config.pack_password,
+        encrypt_filenames=config.pack_encrypt_filenames,
+        extra_files=extra_files,
+    )
+    return (
+        _PackedEntityArtifact(task=task, archive_path=archive_path),
+        entity_audio_dir,
+        normalized_report_file,
+    )
+
+
+def _resolve_entity_audio_directory(
+    output_path: Path,
+    game_version: str,
+    task: _StreamingEntityTask,
+) -> Path:
+    """定位当前实体对应的解包输出目录。"""
+
+    target_root = output_path / "audios" / game_version / task.target
+    if not target_root.is_dir():
+        raise FileNotFoundError(f"流式打包失败：目录不存在：{target_root}")
+
+    matched_dirs = tuple(
+        item
+        for item in target_root.iterdir()
+        if item.is_dir() and _extract_entity_id_from_directory_name(item.name) == task.entity_id
+    )
+    if not matched_dirs:
+        raise FileNotFoundError(
+            "流式打包失败：未找到实体输出目录，"
+            f"target={task.target}, entity_id={task.entity_id}, root={target_root}"
+        )
+    if len(matched_dirs) > 1:
+        raise RuntimeError(
+            "流式打包失败：实体输出目录冲突，"
+            f"target={task.target}, entity_id={task.entity_id}, matched={matched_dirs}"
+        )
+    return matched_dirs[0]
+
+
+def _extract_entity_id_from_directory_name(directory_name: str) -> int | None:
+    """从目录名中解析实体 ID。"""
+
+    prefix = directory_name.split("·", maxsplit=1)[0].strip()
+    if prefix.isdigit():
+        return int(prefix)
+    return None
+
+
+def _build_entity_archive_name(
+    directory_name: str,
+    game_version: str,
+    audio_type: str | None,
+) -> str:
+    """构建单实体压缩包名称，规则与批量打包保持一致。"""
+
+    parts = [directory_name]
+    if game_version.strip():
+        parts.append(game_version.strip())
+    if isinstance(audio_type, str) and audio_type.strip():
+        parts.append(audio_type.strip())
+    return f"{'-'.join(parts)}.7z"
+
+
+def _cleanup_task_runtime_wads(
+    runtime_game_path: Path,
+    runtime_wad_paths: tuple[str, ...],
+) -> int:
+    """清理单实体关联的运行时 WAD 文件。"""
+
+    removed_count = 0
+    for runtime_wad_path in runtime_wad_paths:
+        wad_file = _resolve_runtime_wad_file(
+            runtime_game_path=runtime_game_path,
+            runtime_wad_path=runtime_wad_path,
+        )
+        if wad_file is None or not wad_file.is_file():
+            continue
+        wad_file.unlink()
+        removed_count += 1
+    return removed_count
+
+
+def _cleanup_entity_audio_output(
+    entity_audio_dir: Path,
+    report_file: Path | None,
+) -> int:
+    """清理单实体解包目录与对应报告文件。"""
+
+    removed_files = 0
+    if entity_audio_dir.is_dir():
+        for item in entity_audio_dir.rglob("*"):
+            if item.is_file():
+                removed_files += 1
+        shutil.rmtree(entity_audio_dir, ignore_errors=True)
+    if report_file is not None and report_file.is_file():
+        report_file.unlink()
+        removed_files += 1
+    return removed_files
+
+
+def _cleanup_uploaded_archive(archive_path: Path) -> None:
+    """在上传成功后删除本地压缩包。"""
+
+    archive_path.unlink(missing_ok=True)
 
 
 def _resolve_runtime_game_path(
