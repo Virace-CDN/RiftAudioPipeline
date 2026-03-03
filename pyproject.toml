@@ -14,7 +14,7 @@ dependencies = [
     "python-dateutil==2.9.0.post0",
     "riotmanifest==2.0.0",
     "urllib3==2.6.3",
-    "lol-audio-unpack @ git+https://github.com/Virace/lol_extract_voice.git@0f8fa40c15fc4212b2b0d492ccfa9ef436470f81",
+    "lol-audio-unpack @ git+https://github.com/Virace/lol_extract_voice.git@v3-test",
 ]
 
 [project.scripts]

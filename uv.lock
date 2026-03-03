@@ -411,7 +411,7 @@ wheels = [
 [[package]]
 name = "lol-audio-unpack"
 version = "3.5.1.dev0+test"
-source = { git = "https://github.com/Virace/lol_extract_voice.git?rev=0f8fa40c15fc4212b2b0d492ccfa9ef436470f81#0f8fa40c15fc4212b2b0d492ccfa9ef436470f81" }
+source = { git = "https://github.com/Virace/lol_extract_voice.git?rev=v3-test#0f8fa40c15fc4212b2b0d492ccfa9ef436470f81" }
 dependencies = [
     { name = "alive-progress" },
     { name = "league-tools" },
@@ -739,7 +739,7 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
     { name = "loguru", specifier = "==0.7.3" },
-    { name = "lol-audio-unpack", git = "https://github.com/Virace/lol_extract_voice.git?rev=0f8fa40c15fc4212b2b0d492ccfa9ef436470f81" },
+    { name = "lol-audio-unpack", git = "https://github.com/Virace/lol_extract_voice.git?rev=v3-test" },
     { name = "python-dateutil", specifier = "==2.9.0.post0" },
     { name = "riotmanifest", specifier = "==2.0.0" },
     { name = "urllib3", specifier = "==2.6.3" },
