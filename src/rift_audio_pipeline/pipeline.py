@@ -7,6 +7,7 @@ from datetime import timezone
 import hashlib
 import json
 from pathlib import Path
+import shutil
 
 from loguru import logger
 
@@ -347,6 +348,16 @@ def run_pipeline(config: PipelineConfig) -> int:
                 return 1
             if upload_manifest is not None:
                 logger.info("上传阶段执行完成：manifest_file={}", upload_manifest)
+                if runtime_is_simulated:
+                    removed_runtime_wads, removed_download_cache = _cleanup_simulated_runtime_files(
+                        runtime_game_path=runtime_game_path,
+                        runtime_download_dir=runtime_download_dir,
+                    )
+                    logger.info(
+                        "模拟目录临时文件清理完成：runtime_wad_count={}, download_cache_count={}",
+                        removed_runtime_wads,
+                        removed_download_cache,
+                    )
 
     saved_state = build_local_state(latest_versions=latest)
     saved_file = save_local_state(state=saved_state, state_file=DEFAULT_LOCAL_STATE_FILE)
@@ -519,6 +530,35 @@ def _calculate_sha256(file_path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _cleanup_simulated_runtime_files(
+    runtime_game_path: Path,
+    runtime_download_dir: Path,
+) -> tuple[int, int]:
+    """清理模拟目录下临时 WAD 与下载缓存。"""
+
+    runtime_wad_dirs = (
+        runtime_game_path / "Game" / "DATA" / "FINAL" / "Champions",
+        runtime_game_path / "Game" / "DATA" / "FINAL" / "Maps" / "Shipping",
+    )
+    removed_runtime_wads = 0
+    for directory in runtime_wad_dirs:
+        if not directory.is_dir():
+            continue
+        for item in directory.rglob("*"):
+            if item.is_file() and item.name.casefold().endswith(".wad.client"):
+                item.unlink()
+                removed_runtime_wads += 1
+
+    removed_download_cache = 0
+    if runtime_download_dir.exists():
+        for item in runtime_download_dir.rglob("*"):
+            if item.is_file():
+                removed_download_cache += 1
+        shutil.rmtree(runtime_download_dir, ignore_errors=True)
+
+    return removed_runtime_wads, removed_download_cache
 
 
 def _merge_runtime_wad_paths(*groups: tuple[str, ...]) -> tuple[str, ...]:

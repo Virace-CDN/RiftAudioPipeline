@@ -166,3 +166,46 @@ def test_upload_archives_and_manifest_should_raise_when_credentials_missing(
             game_version="16.4",
             archives=(archive,),
         )
+
+
+def test_cleanup_simulated_runtime_files_should_remove_wads_and_downloads(
+    tmp_path: Path,
+) -> None:
+    """应清理模拟目录中的 WAD 与下载缓存文件。"""
+
+    runtime_game_path = tmp_path / "mini_game"
+    champion_wad = runtime_game_path / "Game" / "DATA" / "FINAL" / "Champions" / "Annie.wad.client"
+    map_wad = (
+        runtime_game_path
+        / "Game"
+        / "DATA"
+        / "FINAL"
+        / "Maps"
+        / "Shipping"
+        / "Map11"
+        / "Map11.wad.client"
+    )
+    other_file = runtime_game_path / "Game" / "DATA" / "FINAL" / "Champions" / "keep.txt"
+    champion_wad.parent.mkdir(parents=True, exist_ok=True)
+    map_wad.parent.mkdir(parents=True, exist_ok=True)
+    champion_wad.write_bytes(b"1")
+    map_wad.write_bytes(b"2")
+    other_file.write_text("x", encoding="utf-8")
+
+    runtime_download_dir = tmp_path / "downloads" / "16.4" / "zh_CN"
+    (runtime_download_dir / "game").mkdir(parents=True, exist_ok=True)
+    (runtime_download_dir / "lcu").mkdir(parents=True, exist_ok=True)
+    (runtime_download_dir / "game" / "a.bin").write_bytes(b"a")
+    (runtime_download_dir / "lcu" / "b.bin").write_bytes(b"b")
+
+    removed_wads, removed_downloads = pipeline._cleanup_simulated_runtime_files(
+        runtime_game_path=runtime_game_path,
+        runtime_download_dir=runtime_download_dir,
+    )
+
+    assert removed_wads == 2
+    assert removed_downloads == 2
+    assert not champion_wad.exists()
+    assert not map_wad.exists()
+    assert other_file.exists()
+    assert not runtime_download_dir.exists()
