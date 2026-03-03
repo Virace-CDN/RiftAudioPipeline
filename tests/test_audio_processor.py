@@ -14,6 +14,7 @@ import pytest
 import rift_audio_pipeline.audio_processor as audio_processor
 from rift_audio_pipeline.audio_processor import resolve_processing_targets
 from rift_audio_pipeline.audio_processor import resolve_all_processing_targets
+from rift_audio_pipeline.audio_processor import resolve_runtime_wad_paths
 from rift_audio_pipeline.audio_processor import run_bin_updater
 from rift_audio_pipeline.audio_processor import run_data_updater
 from rift_audio_pipeline.audio_processor import run_unpack
@@ -242,3 +243,96 @@ def test_run_unpack_by_entity_should_split_into_single_targets(
         {"champion_ids": (2,), "map_ids": tuple(), "max_workers": 2},
         {"champion_ids": tuple(), "map_ids": (11,), "max_workers": 2},
     ]
+
+
+def test_resolve_runtime_wad_paths_should_resolve_target_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """应按目标实体 ID 解析根/区域 WAD 路径。"""
+
+    monkeypatch.setattr(
+        manager_utils,
+        "read_data",
+        lambda _: {
+            "champions": {
+                "1": {
+                    "wad": {
+                        "root": "Game/DATA/FINAL/Champions/Annie.wad.client",
+                        "zh_CN": "DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+                    }
+                },
+                "2": {
+                    "wad": {
+                        "root": "Game/DATA/FINAL/Champions/Zac.wad.client",
+                        "zh_CN": "Game/DATA/FINAL/Champions/Zac.zh_CN.wad.client",
+                    }
+                },
+            },
+            "maps": {
+                "11": {
+                    "wad": {
+                        "root": "DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
+                        "zh_CN": "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
+                    }
+                }
+            },
+        },
+    )
+
+    wad_paths = resolve_runtime_wad_paths(
+        data_file_base=tmp_path / "manifest" / "16.4" / "data",
+        region="zh_CN",
+        champion_ids=(1,),
+        map_ids=(11,),
+    )
+    assert set(wad_paths) == {
+        "Game/DATA/FINAL/Champions/Annie.wad.client",
+        "Game/DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+        "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
+        "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
+    }
+
+
+def test_resolve_runtime_wad_paths_should_return_all_when_targets_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """目标为空时应返回全量实体路径并忽略非法值。"""
+
+    monkeypatch.setattr(
+        manager_utils,
+        "read_data",
+        lambda _: {
+            "champions": {
+                "1": {
+                    "wad": {
+                        "root": "DATA/FINAL/Champions/Annie.wad.client",
+                        "zh_CN": "Game/DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+                    }
+                },
+                "2": {"wad": {"root": "bad/path.txt"}},
+            },
+            "maps": {
+                "11": {
+                    "wad": {
+                        "root": "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
+                        "zh_CN": "DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
+                    }
+                }
+            },
+        },
+    )
+
+    wad_paths = resolve_runtime_wad_paths(
+        data_file_base=tmp_path / "manifest" / "16.4" / "data",
+        region="zh_CN",
+        champion_ids=tuple(),
+        map_ids=tuple(),
+    )
+    assert set(wad_paths) == {
+        "Game/DATA/FINAL/Champions/Annie.wad.client",
+        "Game/DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+        "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
+        "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
+    }

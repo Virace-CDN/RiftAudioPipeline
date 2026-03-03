@@ -654,6 +654,65 @@ def filter_wad_changes_by_bin_voice_paths(
     return result
 
 
+def extract_bin_payloads_from_filter_decisions(
+    manifest_url: str,
+    decisions: Sequence[WadVoiceFilterDecision],
+) -> dict[str, bytes]:
+    """从二次筛选结果中提取可复用的 BIN 原始数据。
+
+    Args:
+        manifest_url: 用于提取 BIN 的 GAME manifest URL。
+        decisions: 二次筛选决策集合。
+
+    Returns:
+        以 BIN 相对路径为 key、原始字节为 value 的映射。
+    """
+
+    root_to_bin_paths: dict[str, set[str]] = {}
+    for decision in decisions:
+        if not decision.should_unpack:
+            continue
+        if not decision.root_wad_path:
+            continue
+        root_wad_path = _normalize_manifest_path(decision.root_wad_path)
+        if not root_wad_path:
+            continue
+        for raw_bin_path in decision.matched_bin_paths:
+            normalized_bin_path = _normalize_manifest_path(raw_bin_path)
+            if not normalized_bin_path:
+                continue
+            root_to_bin_paths.setdefault(root_wad_path, set()).add(normalized_bin_path)
+
+    if not root_to_bin_paths:
+        return {}
+
+    manifest = PatcherManifest(file=manifest_url, path="")
+    file_index = _build_manifest_file_index(manifest)
+    payloads_by_key: dict[str, tuple[str, bytes]] = {}
+
+    with WADExtractor(manifest) as extractor:
+        for root_wad_path in sorted(root_to_bin_paths, key=str.casefold):
+            if root_wad_path.casefold() not in file_index:
+                continue
+            bin_paths = tuple(sorted(root_to_bin_paths[root_wad_path], key=str.casefold))
+            extracted = _extract_existing_bin_raws(
+                extractor=extractor,
+                root_wad_path=root_wad_path,
+                candidate_bin_paths=bin_paths,
+            )
+            for bin_path, raw in extracted.items():
+                lowered = bin_path.casefold()
+                if lowered in payloads_by_key:
+                    continue
+                payloads_by_key[lowered] = (bin_path, raw)
+
+    ordered: dict[str, bytes] = {}
+    for lowered_key in sorted(payloads_by_key):
+        original_path, raw = payloads_by_key[lowered_key]
+        ordered[original_path] = raw
+    return ordered
+
+
 def _build_wad_voice_filter_decision(
     old_extractor: WADExtractor,
     new_extractor: WADExtractor,

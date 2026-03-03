@@ -23,6 +23,7 @@ from rift_audio_pipeline.manifest_ops import build_local_state
 from rift_audio_pipeline.manifest_ops import compare_major_minor
 from rift_audio_pipeline.manifest_ops import evaluate_update_need
 from rift_audio_pipeline.manifest_ops import extract_changed_entities_from_wad_paths
+from rift_audio_pipeline.manifest_ops import extract_bin_payloads_from_filter_decisions
 from rift_audio_pipeline.manifest_ops import filter_wad_changes_by_bin_voice_paths
 from rift_audio_pipeline.manifest_ops import get_changed_entities
 from rift_audio_pipeline.manifest_ops import get_manifest_wad_changes
@@ -604,3 +605,117 @@ def test_filter_wad_changes_by_bin_voice_paths_should_read_cache_before_recomput
     )
 
     assert actual == expected
+
+
+def test_extract_bin_payloads_from_filter_decisions_should_collect_unpack_bins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """应仅提取需解包决策的 BIN，并对重复路径去重。"""
+
+    class _FakeFile:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class _FakeManifest:
+        def __init__(self, file: str, path: str) -> None:
+            self.file = file
+            self.path = path
+            self.files = {
+                "annie": _FakeFile("DATA/FINAL/Champions/Annie.wad.client"),
+                "map11": _FakeFile("DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client"),
+            }
+
+    class _FakeExtractor:
+        def __init__(self, manifest: _FakeManifest) -> None:
+            self.manifest = manifest
+
+        def __enter__(self) -> _FakeExtractor:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_val: BaseException | None,
+            exc_tb: Any | None,
+        ) -> None:
+            return None
+
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def _fake_extract_existing_bin_raws(
+        extractor: _FakeExtractor,
+        root_wad_path: str,
+        candidate_bin_paths: tuple[str, ...],
+    ) -> dict[str, bytes]:
+        del extractor
+        calls.append((root_wad_path, candidate_bin_paths))
+        if "Annie" in root_wad_path:
+            return {"data/characters/annie/skins/skin0.bin": b"annie-bin"}
+        return {
+            "data/maps/shipping/map11/map11.bin": b"map-bin",
+            "data/characters/annie/skins/skin0.bin": b"duplicate-should-be-ignored",
+        }
+
+    monkeypatch.setattr(manifest_ops, "PatcherManifest", _FakeManifest)
+    monkeypatch.setattr(manifest_ops, "WADExtractor", _FakeExtractor)
+    monkeypatch.setattr(manifest_ops, "_extract_existing_bin_raws", _fake_extract_existing_bin_raws)
+
+    payloads = extract_bin_payloads_from_filter_decisions(
+        manifest_url="https://example.test/game.manifest",
+        decisions=(
+            WadVoiceFilterDecision(
+                region_wad_path="DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+                root_wad_path="DATA/FINAL/Champions/Annie.wad.client",
+                entity_type="champion",
+                matched_bin_paths=("data/characters/annie/skins/skin0.bin",),
+                audio_paths=tuple(),
+                event_paths=tuple(),
+                path_statuses=tuple(),
+                changed_audio_paths=tuple(),
+                changed_event_paths=tuple(),
+                should_unpack=True,
+                skip_reason=None,
+            ),
+            WadVoiceFilterDecision(
+                region_wad_path="DATA/FINAL/Champions/Zac.zh_CN.wad.client",
+                root_wad_path="DATA/FINAL/Champions/Zac.wad.client",
+                entity_type="champion",
+                matched_bin_paths=("data/characters/zac/skins/skin0.bin",),
+                audio_paths=tuple(),
+                event_paths=tuple(),
+                path_statuses=tuple(),
+                changed_audio_paths=tuple(),
+                changed_event_paths=tuple(),
+                should_unpack=False,
+                skip_reason="仅 vo_events 变更",
+            ),
+            WadVoiceFilterDecision(
+                region_wad_path="DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
+                root_wad_path="DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
+                entity_type="map",
+                matched_bin_paths=("data/maps/shipping/map11/map11.bin",),
+                audio_paths=tuple(),
+                event_paths=tuple(),
+                path_statuses=tuple(),
+                changed_audio_paths=tuple(),
+                changed_event_paths=tuple(),
+                should_unpack=True,
+                skip_reason=None,
+            ),
+        ),
+    )
+
+    assert calls == [
+        (
+            "DATA/FINAL/Champions/Annie.wad.client",
+            ("data/characters/annie/skins/skin0.bin",),
+        ),
+        (
+            "DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
+            ("data/maps/shipping/map11/map11.bin",),
+        ),
+    ]
+    assert payloads == {
+        "data/characters/annie/skins/skin0.bin": b"annie-bin",
+        "data/maps/shipping/map11/map11.bin": b"map-bin",
+    }

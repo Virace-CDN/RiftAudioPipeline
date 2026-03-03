@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,6 +117,65 @@ def resolve_all_processing_targets(data_file_base: Path) -> AudioProcessingTarge
         champion_ids=tuple(champion_ids),
         map_ids=tuple(map_ids),
     )
+
+
+def resolve_runtime_wad_paths(
+    data_file_base: Path,
+    region: str,
+    champion_ids: Sequence[int],
+    map_ids: Sequence[int],
+) -> tuple[str, ...]:
+    """从 `data` 文件解析目标实体对应的运行时 WAD 路径。
+
+    规则：
+    - 当 `champion_ids` 与 `map_ids` 同时为空时，按全量模式返回全部英雄与地图路径。
+    - 否则仅返回指定 ID 的路径。
+    - 路径统一转换为运行时格式（以 `Game/` 开头）。
+
+    Args:
+        data_file_base: `data` 文件基础路径（不带后缀）。
+        region: 语言区域（例如 `zh_CN`）。
+        champion_ids: 英雄 ID 集合。
+        map_ids: 地图 ID 集合。
+
+    Returns:
+        去重并排序后的运行时 WAD 路径集合。
+    """
+
+    from lol_audio_unpack.manager.utils import read_data
+
+    payload = read_data(data_file_base)
+    champions_raw = payload.get("champions", {})
+    maps_raw = payload.get("maps", {})
+    full_scan = not champion_ids and not map_ids
+
+    champion_id_set = {str(item) for item in champion_ids}
+    map_id_set = {str(item) for item in map_ids}
+    runtime_paths: dict[str, str] = {}
+
+    if isinstance(champions_raw, Mapping):
+        for champion_id, champion_data in champions_raw.items():
+            if not full_scan and str(champion_id) not in champion_id_set:
+                continue
+            wad_paths = _extract_runtime_wad_paths_from_payload(
+                payload_item=champion_data,
+                region=region,
+            )
+            for path in wad_paths:
+                runtime_paths.setdefault(path.casefold(), path)
+
+    if isinstance(maps_raw, Mapping):
+        for map_id, map_data in maps_raw.items():
+            if not full_scan and str(map_id) not in map_id_set:
+                continue
+            wad_paths = _extract_runtime_wad_paths_from_payload(
+                payload_item=map_data,
+                region=region,
+            )
+            for path in wad_paths:
+                runtime_paths.setdefault(path.casefold(), path)
+
+    return tuple(sorted(runtime_paths.values(), key=str.casefold))
 
 
 def run_bin_updater(
@@ -238,6 +298,46 @@ def _initialize_unpack_config(game_path: Path, output_path: Path, region: str) -
             "GAME_REGION": region,
         },
     )
+
+
+def _extract_runtime_wad_paths_from_payload(
+    payload_item: object,
+    region: str,
+) -> tuple[str, ...]:
+    """从 `data` 条目提取根 WAD 与区域 WAD 运行时路径。"""
+
+    if not isinstance(payload_item, Mapping):
+        return tuple()
+    wad_raw = payload_item.get("wad")
+    if not isinstance(wad_raw, Mapping):
+        return tuple()
+
+    candidates = [
+        wad_raw.get("root"),
+        wad_raw.get(region),
+    ]
+    normalized: dict[str, str] = {}
+    for item in candidates:
+        if not isinstance(item, str):
+            continue
+        path = _normalize_runtime_wad_path(item)
+        if path is None:
+            continue
+        normalized.setdefault(path.casefold(), path)
+    return tuple(sorted(normalized.values(), key=str.casefold))
+
+
+def _normalize_runtime_wad_path(path: str) -> str | None:
+    """标准化运行时 WAD 路径。"""
+
+    normalized = path.strip().replace("\\", "/")
+    if not normalized:
+        return None
+    if normalized.startswith("Game/"):
+        return normalized
+    if normalized.startswith("DATA/"):
+        return f"Game/{normalized}"
+    return None
 
 
 def _reset_singleton_instance(target_cls: type[object]) -> None:

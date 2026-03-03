@@ -6,14 +6,19 @@ from pathlib import Path
 
 from loguru import logger
 
+from rift_audio_pipeline.asset_downloader import download_game_content_metadata
+from rift_audio_pipeline.asset_downloader import download_game_wads_by_runtime_paths
+from rift_audio_pipeline.asset_downloader import download_lcu_data_wads
 from rift_audio_pipeline.audio_processor import resolve_processing_targets
 from rift_audio_pipeline.audio_processor import resolve_all_processing_targets
+from rift_audio_pipeline.audio_processor import resolve_runtime_wad_paths
 from rift_audio_pipeline.audio_processor import run_bin_updater
 from rift_audio_pipeline.audio_processor import run_data_updater
 from rift_audio_pipeline.audio_processor import run_unpack
 from rift_audio_pipeline.audio_processor import run_unpack_by_entity
 from rift_audio_pipeline.baidu.sdk import ensure_official_sdk_path
 from rift_audio_pipeline.bin_extractor import seed_bin_input_from_directory
+from rift_audio_pipeline.bin_extractor import write_many_to_bin_input
 from rift_audio_pipeline.config import PipelineConfig
 from rift_audio_pipeline.game_dir_builder import build_simulated_dir
 from rift_audio_pipeline.game_dir_builder import check_local_game_path
@@ -26,6 +31,7 @@ from rift_audio_pipeline.manifest_ops import DEFAULT_LOCAL_STATE_FILE
 from rift_audio_pipeline.manifest_ops import build_voice_filter_result_cache_path
 from rift_audio_pipeline.manifest_ops import build_local_state
 from rift_audio_pipeline.manifest_ops import evaluate_update_need
+from rift_audio_pipeline.manifest_ops import extract_bin_payloads_from_filter_decisions
 from rift_audio_pipeline.manifest_ops import extract_changed_entities_from_wad_paths
 from rift_audio_pipeline.manifest_ops import filter_wad_changes_by_bin_voice_paths
 from rift_audio_pipeline.manifest_ops import save_local_state
@@ -76,6 +82,7 @@ def run_pipeline(config: PipelineConfig) -> int:
             logger.info("无需更新：reason={}，已同步状态文件：{}", decision.reason, saved_file)
         return 0
 
+    secondary_filter_result = None
     secondary_unpack_paths: tuple[str, ...] | None = None
     if decision.reason == DECISION_REASON_FIRST_RUN:
         logger.info("检测到首次启动（无历史状态），将进入首次全量更新流程。")
@@ -121,6 +128,7 @@ def run_pipeline(config: PipelineConfig) -> int:
             logger.info("WAD 二次筛选缓存文件：{}", filter_cache_file)
             if secondary_filter.unpack_paths:
                 logger.info("需解包 WAD：{}", ", ".join(secondary_filter.unpack_paths))
+                secondary_filter_result = secondary_filter
                 secondary_unpack_paths = secondary_filter.unpack_paths
             if secondary_filter.skipped_paths:
                 logger.info("可跳过 WAD：{}", ", ".join(secondary_filter.skipped_paths))
@@ -148,6 +156,33 @@ def run_pipeline(config: PipelineConfig) -> int:
         logger.error("游戏目录不完整，无法执行后续流程：{}", runtime_game_path)
         return 1
 
+    runtime_download_dir = _build_runtime_download_dir(
+        runtime_game_path=runtime_game_path,
+        game_version=latest.game_version,
+        region=config.game_region,
+    )
+    if runtime_is_simulated:
+        try:
+            metadata_file = download_game_content_metadata(
+                game_manifest_url=latest.game_manifest_url,
+                download_dir=runtime_download_dir / "game",
+                game_path=runtime_game_path,
+            )
+            lcu_wads = download_lcu_data_wads(
+                lcu_manifest_url=latest.lcu_manifest_url,
+                download_dir=runtime_download_dir / "lcu",
+                game_path=runtime_game_path,
+                region=config.game_region,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.error("最小游戏目录基础资源下载失败，error={}", error)
+            return 1
+        logger.info(
+            "最小游戏目录基础资源下载完成：metadata={}, lcu_wad_count={}",
+            metadata_file,
+            len(lcu_wads),
+        )
+
     try:
         data_file_base = run_data_updater(
             game_path=runtime_game_path,
@@ -158,6 +193,26 @@ def run_pipeline(config: PipelineConfig) -> int:
     except Exception as error:  # noqa: BLE001
         logger.error("DataUpdater 执行失败，error={}", error)
         return 1
+
+    if secondary_filter_result is not None:
+        try:
+            auto_bin_payloads = extract_bin_payloads_from_filter_decisions(
+                manifest_url=latest.game_manifest_url,
+                decisions=secondary_filter_result.decisions,
+            )
+            written_auto_bins = write_many_to_bin_input(
+                version_dir=data_file_base.parent,
+                bin_payloads=auto_bin_payloads,
+                enable_local_bin=True,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.error("二次筛选 BIN 自动复用写入失败，error={}", error)
+            return 1
+        logger.info(
+            "二次筛选 BIN 自动复用完成：matched_count={}, written_count={}",
+            len(auto_bin_payloads),
+            len(written_auto_bins),
+        )
 
     if config.local_bin_dir is not None:
         try:
@@ -187,6 +242,43 @@ def run_pipeline(config: PipelineConfig) -> int:
     )
     if config.low_disk_mode and not (targets.champion_ids or targets.map_ids):
         targets = resolve_all_processing_targets(data_file_base=data_file_base)
+
+    if runtime_is_simulated:
+        runtime_wad_targets = targets
+        if not (runtime_wad_targets.champion_ids or runtime_wad_targets.map_ids):
+            runtime_wad_targets = resolve_all_processing_targets(data_file_base=data_file_base)
+        runtime_wad_paths = resolve_runtime_wad_paths(
+            data_file_base=data_file_base,
+            region=config.game_region,
+            champion_ids=runtime_wad_targets.champion_ids,
+            map_ids=runtime_wad_targets.map_ids,
+        )
+        if secondary_unpack_paths is not None:
+            runtime_wad_paths = _merge_runtime_wad_paths(
+                runtime_wad_paths,
+                _build_runtime_wad_paths_from_manifest_paths(
+                    manifest_paths=secondary_unpack_paths,
+                    region=config.game_region,
+                ),
+            )
+        if not runtime_wad_paths:
+            logger.error("未解析到可下载的 GAME WAD 路径，无法继续模拟目录解包。")
+            return 1
+        try:
+            game_wads = download_game_wads_by_runtime_paths(
+                game_manifest_url=latest.game_manifest_url,
+                download_dir=runtime_download_dir / "game",
+                game_path=runtime_game_path,
+                runtime_wad_paths=runtime_wad_paths,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.error("最小游戏目录 GAME WAD 下载失败，error={}", error)
+            return 1
+        logger.info(
+            "最小游戏目录 GAME WAD 下载完成：target_count={}, staged_count={}",
+            len(runtime_wad_paths),
+            len(game_wads),
+        )
 
     try:
         run_bin_updater(
@@ -255,3 +347,55 @@ def _resolve_runtime_game_path(
     write_content_metadata(game_path=simulated_dir, version=latest_game_version)
     logger.info("未提供本地游戏目录，已构建最小游戏目录：{}", simulated_dir)
     return simulated_dir, True
+
+
+def _build_runtime_download_dir(
+    runtime_game_path: Path,
+    game_version: str,
+    region: str,
+) -> Path:
+    """构建运行时下载缓存目录。"""
+
+    return runtime_game_path.parent / "downloads" / game_version / region
+
+
+def _merge_runtime_wad_paths(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    """合并运行时 WAD 路径并去重排序。"""
+
+    deduped: dict[str, str] = {}
+    for group in groups:
+        for path in group:
+            normalized = path.strip().replace("\\", "/")
+            if not normalized:
+                continue
+            deduped.setdefault(normalized.casefold(), normalized)
+    return tuple(sorted(deduped.values(), key=str.casefold))
+
+
+def _build_runtime_wad_paths_from_manifest_paths(
+    manifest_paths: tuple[str, ...],
+    region: str,
+) -> tuple[str, ...]:
+    """将 manifest WAD 路径转换为运行时根/区域路径集合。"""
+
+    runtime_paths: dict[str, str] = {}
+    region_suffix = f".{region}.wad.client"
+    for raw_path in manifest_paths:
+        normalized = raw_path.strip().replace("\\", "/")
+        if not normalized:
+            continue
+        if normalized.startswith("Game/"):
+            normalized = normalized.removeprefix("Game/")
+        if not normalized.startswith("DATA/"):
+            continue
+
+        region_runtime_path = f"Game/{normalized}"
+        runtime_paths.setdefault(region_runtime_path.casefold(), region_runtime_path)
+
+        lowered = normalized.casefold()
+        if lowered.endswith(region_suffix.casefold()):
+            root_manifest_path = f"{normalized[: len(normalized) - len(region_suffix)]}.wad.client"
+            root_runtime_path = f"Game/{root_manifest_path}"
+            runtime_paths.setdefault(root_runtime_path.casefold(), root_runtime_path)
+
+    return tuple(sorted(runtime_paths.values(), key=str.casefold))
