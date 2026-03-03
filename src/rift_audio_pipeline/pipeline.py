@@ -54,6 +54,7 @@ from rift_audio_pipeline.packer import pack_champion
 DEFAULT_BUNDLED_PACK_EXTRA_DIR = Path(__file__).resolve().parent / "pack_extra"
 DEFAULT_PACK_EXTRA_FILES = ("食用说明.txt", "license.txt")
 UPLOAD_MANIFEST_FILE_NAME = "upload_manifest.json"
+UPLOAD_MANIFEST_TEXT_FILE_NAME = "upload_manifest_readable.txt"
 UPLOAD_MANIFEST_SCHEMA_VERSION = 2
 RESOURCE_TYPE_BUCKETS = ("VO", "SFX", "MUSIC")
 OLD_RESOURCE_BUCKET = "OLD"
@@ -370,6 +371,7 @@ def run_pipeline(config: PipelineConfig) -> int:
         runtime_is_simulated=runtime_is_simulated,
         targets=targets,
     )
+    allow_missing_remote_index = decision.reason == DECISION_REASON_FIRST_RUN
     upload_manifest: Path | None = None
     effective_unpack_workers = _resolve_effective_unpack_workers(
         configured_workers=config.unpack_workers,
@@ -403,6 +405,7 @@ def run_pipeline(config: PipelineConfig) -> int:
                 runtime_wad_paths=runtime_wad_paths,
                 include_root_wad=secondary_filter_result is None,
                 unpack_workers=effective_unpack_workers,
+                allow_missing_remote_index=allow_missing_remote_index,
             )
         else:
             run_unpack(
@@ -443,6 +446,7 @@ def run_pipeline(config: PipelineConfig) -> int:
                 config=config,
                 game_version=latest.game_version,
                 archives=archives,
+                allow_missing_remote_index=allow_missing_remote_index,
             )
         except Exception as error:  # noqa: BLE001
             logger.error("上传阶段失败，error={}", error)
@@ -503,6 +507,7 @@ def _run_streaming_unpack_pack_upload(
     runtime_wad_paths: tuple[str, ...],
     include_root_wad: bool,
     unpack_workers: int,
+    allow_missing_remote_index: bool,
 ) -> Path | None:
     """执行实体级流式流水线：解包 -> 打包 -> 上传 -> 清理。"""
 
@@ -542,6 +547,7 @@ def _run_streaming_unpack_pack_upload(
             "upload_queue": upload_queue,
             "upload_errors": upload_errors,
             "upload_manifest_holder": upload_manifest_holder,
+            "allow_missing_remote_index": allow_missing_remote_index,
         },
         daemon=True,
     )
@@ -675,6 +681,7 @@ def _run_streaming_upload_worker(
     upload_queue: Queue[_PackedEntityArtifact | None],
     upload_errors: list[Exception],
     upload_manifest_holder: list[Path | None],
+    allow_missing_remote_index: bool,
 ) -> None:
     """消费流式打包产物并执行上传与压缩包清理。"""
 
@@ -687,6 +694,7 @@ def _run_streaming_upload_worker(
                 config=config,
                 game_version=game_version,
                 archives=(artifact.archive_path,),
+                allow_missing_remote_index=allow_missing_remote_index,
             )
             if manifest_file is not None:
                 upload_manifest_holder[0] = manifest_file
@@ -1034,6 +1042,7 @@ def _upload_archives_and_manifest(
     config: PipelineConfig,
     game_version: str,
     archives: tuple[Path, ...],
+    allow_missing_remote_index: bool = True,
 ) -> Path | None:
     """将打包产物上传到百度网盘，并同步本次上传清单。"""
 
@@ -1048,6 +1057,7 @@ def _upload_archives_and_manifest(
 
     package_root = _resolve_package_output_root(config=config, game_version=game_version)
     manifest_file = package_root / UPLOAD_MANIFEST_FILE_NAME
+    readable_manifest_file = package_root / UPLOAD_MANIFEST_TEXT_FILE_NAME
     run_entries: list[dict[str, object]] = []
     has_index_changes = False
 
@@ -1063,8 +1073,13 @@ def _upload_archives_and_manifest(
         token_store=token_store,
     )
     try:
-        remote_index = _load_remote_upload_manifest_index(client=client, package_root=package_root)
+        remote_index = _load_remote_upload_manifest_index(
+            client=client,
+            package_root=package_root,
+            allow_missing_remote_index=allow_missing_remote_index,
+        )
         executed_at = _current_utc_timestamp()
+        _initialize_remote_upload_layout(client=client)
         default_resource_type = _resolve_default_upload_resource_type(config=config)
         for archive in archives:
             if not archive.is_file():
@@ -1072,7 +1087,6 @@ def _upload_archives_and_manifest(
 
             upload_layout = _build_archive_upload_layout(
                 archive=archive,
-                game_version=game_version,
                 remote_dir=config.baidu_pan_remote_dir,
                 default_resource_type=default_resource_type,
             )
@@ -1135,6 +1149,7 @@ def _upload_archives_and_manifest(
             remote_index[remote_path.casefold()] = {
                 "remote_path": remote_path,
                 "remote_name": remote_name,
+                "bucket": upload_layout.resource_type,
                 "game_version": game_version,
                 "target_group": upload_layout.target_group,
                 "resource_type": upload_layout.resource_type,
@@ -1169,8 +1184,21 @@ def _upload_archives_and_manifest(
             json.dumps(manifest_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        readable_manifest_file.write_text(
+            _build_readable_upload_manifest_content(
+                index=remote_index,
+                game_version=game_version,
+                executed_at=executed_at,
+                remote_dir=config.baidu_pan_remote_dir,
+            ),
+            encoding="utf-8",
+        )
         if has_index_changes:
             client.upload_file(local_path=manifest_file, remote_path=UPLOAD_MANIFEST_FILE_NAME)
+            client.upload_file(
+                local_path=readable_manifest_file,
+                remote_path=UPLOAD_MANIFEST_TEXT_FILE_NAME,
+            )
         else:
             logger.info("远端索引无变化，跳过索引文件回传。")
         return manifest_file
@@ -1241,7 +1269,6 @@ def _resolve_default_upload_resource_type(config: PipelineConfig) -> str:
 
 def _build_archive_upload_layout(
     archive: Path,
-    game_version: str,
     remote_dir: str,
     default_resource_type: str,
 ) -> _ArchiveUploadLayout:
@@ -1455,6 +1482,75 @@ def _ensure_remote_directory(client: BaiduPanClient, relative_dir: str) -> None:
         client.create_directory(dir_path=current)
 
 
+def _initialize_remote_upload_layout(client: BaiduPanClient) -> None:
+    """初始化远端目录结构。"""
+
+    for resource_type in RESOURCE_TYPE_BUCKETS:
+        for target_group in RESOURCE_TARGET_GROUPS:
+            _ensure_remote_directory(client=client, relative_dir=f"{resource_type}/{target_group}")
+    for target_group in RESOURCE_TARGET_GROUPS:
+        _ensure_remote_directory(
+            client=client, relative_dir=f"{OLD_RESOURCE_BUCKET}/{target_group}"
+        )
+
+
+def _build_readable_upload_manifest_content(
+    index: dict[str, dict[str, object]],
+    game_version: str,
+    executed_at: str,
+    remote_dir: str,
+) -> str:
+    """构建给人类阅读和搜索的上传索引文本。"""
+
+    active_lines: list[str] = []
+    archived_lines: list[str] = []
+    for entry in sorted(
+        index.values(),
+        key=lambda item: str(item.get("remote_path", "")).casefold(),
+    ):
+        metadata = _resolve_index_entry_metadata(entry=entry, remote_dir=remote_dir)
+        bucket = (
+            OLD_RESOURCE_BUCKET if metadata.is_old_bucket else (metadata.resource_type or "UNKNOWN")
+        )
+        group = metadata.target_group or "unknown"
+        entity_key = metadata.entity_key or metadata.remote_name
+        version = metadata.game_version or "unknown"
+        line = (
+            f"- {bucket}/{group} | {metadata.remote_name} | version={version} | "
+            f"entity={entity_key} | path={metadata.remote_path}"
+        )
+        if metadata.is_old_bucket:
+            archived_lines.append(line)
+        else:
+            active_lines.append(line)
+
+    lines: list[str] = [
+        "# RiftAudioPipeline 网盘索引（可读版）",
+        "",
+        f"更新时间(UTC): {executed_at}",
+        f"当前运行版本: {game_version}",
+        f"总条目数: {len(index)}",
+        "",
+        "## 在线资源",
+    ]
+    if active_lines:
+        lines.extend(active_lines)
+    else:
+        lines.append("- （无）")
+    lines.extend(
+        (
+            "",
+            "## OLD 归档资源",
+        )
+    )
+    if archived_lines:
+        lines.extend(archived_lines)
+    else:
+        lines.append("- （无）")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _calculate_sha256(file_path: Path) -> str:
     """计算文件 SHA256。"""
 
@@ -1468,6 +1564,7 @@ def _calculate_sha256(file_path: Path) -> str:
 def _load_remote_upload_manifest_index(
     client: BaiduPanClient,
     package_root: Path,
+    allow_missing_remote_index: bool,
 ) -> dict[str, dict[str, object]]:
     """读取远端上传索引并构建内存查询表。
 
@@ -1480,6 +1577,7 @@ def _load_remote_upload_manifest_index(
 
     Raises:
         ValueError: 远端索引不是合法 JSON 或缺少 `entries` 列表。
+        RuntimeError: 不允许缺失索引时，远端未找到索引文件。
     """
 
     temp_file = package_root / ".remote_upload_manifest.json"
@@ -1487,6 +1585,11 @@ def _load_remote_upload_manifest_index(
         try:
             client.download_file(remote_path=UPLOAD_MANIFEST_FILE_NAME, local_path=temp_file)
         except FileNotFoundError:
+            if not allow_missing_remote_index:
+                raise RuntimeError(
+                    "上传阶段终止：远端缺少上传索引 upload_manifest.json，"
+                    "当前为差异更新流程，可能存在文件被手工移动或索引丢失，请先修复索引。"
+                )
             logger.info("远端索引不存在，将创建新索引：{}", UPLOAD_MANIFEST_FILE_NAME)
             return {}
 

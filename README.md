@@ -75,3 +75,12 @@ uv run rift-baidu-oauth refresh-token --dev-config .dev.baidu
 - `BaiduPanClient` 默认仅允许在配置的工作目录内执行常规操作（列表、创建、上传、下载、复制、重命名、删除）。
 - 若路径超出工作目录，会给出“超限提示”并拒绝执行。
 - 仅 `move_path` 允许将工作目录内产物移动到外部目录，并产生超限告警，便于最终发布落地。
+
+## 上传目录与索引规则
+
+- 上传目录按资源类型与目标分组组织：`VO|SFX|MUSIC/<champions|maps>/`。
+- 同实体同类型存在旧版本时，旧文件会自动归档到：`OLD/<champions|maps>/`。
+- 每次索引有变化时会回传两份索引文件：
+  - `upload_manifest.json`：机器可读索引（幂等校验基线）。
+  - `upload_manifest_readable.txt`：人类可读索引（便于网盘内检索与排查）。
+- 首次执行可接受远端索引缺失并自动初始化目录与索引；差异更新流程若远端缺失 `upload_manifest.json` 会直接终止，避免在索引失真状态继续上传。

@@ -273,6 +273,12 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
     assert manifest_file == package_root / "upload_manifest.json"
     assert manifest_file.exists()
     payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    readable_manifest_file = package_root / "upload_manifest_readable.txt"
+    assert readable_manifest_file.exists()
+    readable_content = readable_manifest_file.read_text(encoding="utf-8")
+    assert "## 在线资源" in readable_content
+    assert "## OLD 归档资源" in readable_content
+    assert "VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z" in readable_content
     assert payload["entry_count"] == 2
     assert payload["last_run"]["archive_count"] == 2
     assert payload["last_run"]["uploaded_count"] == 2
@@ -285,6 +291,7 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
         (first_archive, "VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z"),
         (second_archive, "VO/champions/154·zac·生化魔人·扎克-16.4-VO.7z"),
         (manifest_file, "upload_manifest.json"),
+        (package_root / "upload_manifest_readable.txt", "upload_manifest_readable.txt"),
     ]
     assert fake_client.move_calls == []
 
@@ -525,6 +532,7 @@ def test_upload_archives_and_manifest_should_archive_old_version_before_upload(
     assert fake_client.upload_calls == [
         (archive, "VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z"),
         (manifest_file, "upload_manifest.json"),
+        (package_root / "upload_manifest_readable.txt", "upload_manifest_readable.txt"),
     ]
     payload = json.loads(manifest_file.read_text(encoding="utf-8"))
     index_by_name = {entry["remote_name"]: entry for entry in payload["entries"]}
@@ -651,6 +659,53 @@ def test_upload_archives_and_manifest_should_raise_when_credentials_missing(
         )
 
 
+def test_upload_archives_and_manifest_should_fail_when_index_missing_in_diff_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """差异更新场景缺少远端索引时应终止上传。"""
+
+    class _FakeClient:
+        def __init__(self, credentials, remote_dir, token_store) -> None:
+            del credentials, remote_dir, token_store
+
+        def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
+            del local_path
+            raise FileNotFoundError(remote_path)
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "output"
+    archive = output_path / "packages" / "16.4" / "champions" / "1·annie·黑暗之女·安妮-16.4-VO.7z"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"a")
+
+    fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
+    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "BaiduPanClient",
+        lambda credentials, remote_dir, token_store: fake_client,
+    )
+
+    config = PipelineConfig(
+        output_path=output_path,
+        baidu_pan_remote_dir="/apps/test",
+        baidu_pan_app_key="app",
+        baidu_pan_secret_key="secret",
+        baidu_pan_refresh_token="refresh",
+        enable_upload=True,
+    )
+    with pytest.raises(RuntimeError, match="远端缺少上传索引"):
+        pipeline._upload_archives_and_manifest(
+            config=config,
+            game_version="16.4",
+            archives=(archive,),
+            allow_missing_remote_index=False,
+        )
+
+
 def test_cleanup_simulated_runtime_files_should_remove_wads_and_downloads(
     tmp_path: Path,
 ) -> None:
@@ -774,8 +829,9 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
         config: PipelineConfig,
         game_version: str,
         archives: tuple[Path, ...],
+        allow_missing_remote_index: bool = True,
     ) -> Path:
-        del config, game_version
+        del allow_missing_remote_index, config, game_version
         upload_calls.append(tuple(path.name for path in archives))
         manifest_file = output_path / "packages" / "16.4" / "upload_manifest.json"
         manifest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -810,6 +866,7 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
         ),
         include_root_wad=True,
         unpack_workers=2,
+        allow_missing_remote_index=True,
     )
 
     assert manifest_file == output_path / "packages" / "16.4" / "upload_manifest.json"
