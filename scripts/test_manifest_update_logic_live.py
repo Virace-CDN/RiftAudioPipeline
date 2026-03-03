@@ -23,8 +23,7 @@ from rift_audio_pipeline.manifest_ops import evaluate_update_need_with_latest
 from rift_audio_pipeline.manifest_ops import filter_wad_changes_by_bin_voice_paths
 
 GITHUB_API_BASE = (
-    "https://api.github.com/repos/Morilli/riot-manifests/contents/"
-    "LoL/EUW1/windows/lol-game-client"
+    "https://api.github.com/repos/Morilli/riot-manifests/contents/LoL/EUW1/windows/lol-game-client"
 )
 TEST_REGION = "zh_CN"
 LIVE_OUTPUT_DIR = Path("output/live_manifest_tests")
@@ -87,7 +86,9 @@ def _build_previous_state(version: str, manifest_url: str) -> LocalRunState:
         game_manifest_url=manifest_url,
         lcu_version="16.3",
         lcu_manifest_url="https://example.invalid/lcu-old.manifest",
-        checked_at=datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        checked_at=datetime.now(tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
     )
 
 
@@ -168,12 +169,17 @@ def main() -> int:
         }
         results.append(result)
 
-        if case.expected_should_update is not None and decision.should_update != case.expected_should_update:
+        if (
+            case.expected_should_update is not None
+            and decision.should_update != case.expected_should_update
+        ):
             failed.append(
                 f"{case.name}: should_update 期望 {case.expected_should_update}，实际 {decision.should_update}"
             )
         if case.expected_reason is not None and decision.reason != case.expected_reason:
-            failed.append(f"{case.name}: reason 期望 {case.expected_reason}，实际 {decision.reason}")
+            failed.append(
+                f"{case.name}: reason 期望 {case.expected_reason}，实际 {decision.reason}"
+            )
 
     print("=== 历史 manifest 来源（Morilli）===")
     print(json.dumps(manifest_urls, ensure_ascii=False, indent=2))

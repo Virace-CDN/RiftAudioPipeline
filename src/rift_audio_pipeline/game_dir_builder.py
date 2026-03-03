@@ -88,10 +88,40 @@ def stage_wad_file(
         ValueError: 目标相对路径不合法时抛出。
     """
 
-    if not source_wad_file.is_file():
-        raise FileNotFoundError(f"源 WAD 文件不存在：{source_wad_file}")
-    relative_path = _normalize_relative_game_path(relative_wad_path)
-    target_file = game_path / relative_path
+    return stage_runtime_file(
+        game_path=game_path,
+        relative_path=relative_wad_path,
+        source_file=source_wad_file,
+        strategy=strategy,
+    )
+
+
+def stage_runtime_file(
+    game_path: Path,
+    relative_path: str,
+    source_file: Path,
+    strategy: Literal["hardlink", "copy"] = "hardlink",
+) -> Path:
+    """将任意运行时文件按相对路径落地到游戏目录。
+
+    Args:
+        game_path: 游戏根目录路径。
+        relative_path: 相对于游戏根目录的目标路径。
+        source_file: 本地源文件路径。
+        strategy: 写入策略。`hardlink` 失败时自动回退复制。
+
+    Returns:
+        落地后的目标文件路径。
+
+    Raises:
+        FileNotFoundError: 源文件不存在时抛出。
+        ValueError: 目标相对路径不合法时抛出。
+    """
+
+    if not source_file.is_file():
+        raise FileNotFoundError(f"源文件不存在：{source_file}")
+    normalized_path = _normalize_relative_game_path(relative_path)
+    target_file = game_path / normalized_path
     target_file.parent.mkdir(parents=True, exist_ok=True)
 
     if target_file.exists():
@@ -99,13 +129,13 @@ def stage_wad_file(
 
     if strategy == "hardlink":
         try:
-            target_file.hardlink_to(source_wad_file)
+            target_file.hardlink_to(source_file)
             return target_file
         except OSError:
-            shutil.copy2(source_wad_file, target_file)
+            shutil.copy2(source_file, target_file)
             return target_file
 
-    shutil.copy2(source_wad_file, target_file)
+    shutil.copy2(source_file, target_file)
     return target_file
 
 
