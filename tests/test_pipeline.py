@@ -185,6 +185,8 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
             del credentials, token_store
             self.remote_dir = remote_dir
             self.upload_calls: list[tuple[Path, str]] = []
+            self.download_calls: list[tuple[str, Path]] = []
+            self.get_path_calls: list[str] = []
 
         def upload_file(
             self, local_path: Path, remote_path: str, rtype: int = 3
@@ -192,6 +194,14 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
             del rtype
             self.upload_calls.append((local_path, remote_path))
             return {"path": remote_path, "errno": 0}
+
+        def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
+            self.download_calls.append((remote_path, local_path))
+            raise FileNotFoundError(remote_path)
+
+        def get_path_entry(self, remote_path: str) -> dict[str, object]:
+            self.get_path_calls.append(remote_path)
+            raise FileNotFoundError(remote_path)
 
         def close(self) -> None:
             return None
@@ -229,16 +239,156 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
     assert manifest_file == package_root / "upload_manifest.json"
     assert manifest_file.exists()
     payload = json.loads(manifest_file.read_text(encoding="utf-8"))
-    assert payload["archive_count"] == 2
-    assert [entry["local_path"] for entry in payload["entries"]] == [
-        str(first_archive),
-        str(second_archive),
-    ]
+    assert payload["entry_count"] == 2
+    assert payload["last_run"]["archive_count"] == 2
+    assert payload["last_run"]["uploaded_count"] == 2
+    assert payload["last_run"]["skipped_count"] == 0
+    assert [entry["remote_name"] for entry in payload["entries"]] == ["Annie.7z", "Zac.7z"]
     assert fake_client.upload_calls == [
-        (first_archive, "package_16.4_Annie.7z"),
-        (second_archive, "package_16.4_Zac.7z"),
-        (manifest_file, "upload_manifest_16.4.json"),
+        (first_archive, "Annie.7z"),
+        (second_archive, "Zac.7z"),
+        (manifest_file, "upload_manifest.json"),
     ]
+
+
+def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """远端索引命中同文件时应跳过上传。"""
+
+    class _FakeClient:
+        def __init__(self, credentials, remote_dir, token_store) -> None:
+            del credentials, token_store
+            self.remote_dir = remote_dir
+            self.upload_calls: list[tuple[Path, str]] = []
+            self.download_calls: list[tuple[str, Path]] = []
+
+        def upload_file(
+            self, local_path: Path, remote_path: str, rtype: int = 3
+        ) -> dict[str, object]:
+            del rtype
+            self.upload_calls.append((local_path, remote_path))
+            return {"path": remote_path, "errno": 0}
+
+        def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
+            self.download_calls.append((remote_path, local_path))
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_text(json.dumps(remote_manifest_payload), encoding="utf-8")
+            return {"path": remote_path}
+
+        def get_path_entry(self, remote_path: str) -> dict[str, object]:
+            raise AssertionError(f"不应查询远端目录：{remote_path}")
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "output"
+    package_root = output_path / "packages" / "16.4"
+    package_root.mkdir(parents=True, exist_ok=True)
+    archive = package_root / "Annie.7z"
+    archive.write_bytes(b"annie-audio")
+    remote_manifest_payload = {
+        "schema_version": 2,
+        "entries": [
+            {
+                "remote_path": "/apps/test/Annie.7z",
+                "remote_name": "Annie.7z",
+                "game_version": "16.4",
+                "uploaded_at": "2026-03-04T00:00:00Z",
+            }
+        ],
+    }
+
+    fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
+    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "BaiduPanClient",
+        lambda credentials, remote_dir, token_store: fake_client,
+    )
+
+    config = PipelineConfig(
+        output_path=output_path,
+        baidu_pan_remote_dir="/apps/test",
+        baidu_pan_app_key="app",
+        baidu_pan_secret_key="secret",
+        baidu_pan_refresh_token="refresh",
+        enable_upload=True,
+    )
+    manifest_file = pipeline._upload_archives_and_manifest(
+        config=config,
+        game_version="16.4",
+        archives=(archive,),
+    )
+
+    assert manifest_file == package_root / "upload_manifest.json"
+    assert fake_client.download_calls == [("upload_manifest.json", package_root / ".remote_upload_manifest.json")]
+    assert fake_client.upload_calls == []
+    payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    assert payload["entry_count"] == 1
+    assert payload["last_run"]["uploaded_count"] == 0
+    assert payload["last_run"]["skipped_count"] == 1
+
+
+def test_upload_archives_and_manifest_should_fail_when_remote_file_exists_without_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """远端存在同名文件但索引缺失时应终止上传。"""
+
+    class _FakeClient:
+        def __init__(self, credentials, remote_dir, token_store) -> None:
+            del credentials, token_store
+            self.remote_dir = remote_dir
+            self.upload_calls: list[tuple[Path, str]] = []
+
+        def upload_file(
+            self, local_path: Path, remote_path: str, rtype: int = 3
+        ) -> dict[str, object]:
+            del rtype
+            self.upload_calls.append((local_path, remote_path))
+            return {"path": remote_path, "errno": 0}
+
+        def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
+            del local_path
+            raise FileNotFoundError(remote_path)
+
+        def get_path_entry(self, remote_path: str) -> dict[str, object]:
+            return {"path": f"/apps/test/{remote_path}", "isdir": 0}
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "output"
+    package_root = output_path / "packages" / "16.4"
+    package_root.mkdir(parents=True, exist_ok=True)
+    archive = package_root / "Annie.7z"
+    archive.write_bytes(b"a")
+
+    fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
+    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "BaiduPanClient",
+        lambda credentials, remote_dir, token_store: fake_client,
+    )
+
+    config = PipelineConfig(
+        output_path=output_path,
+        baidu_pan_remote_dir="/apps/test",
+        baidu_pan_app_key="app",
+        baidu_pan_secret_key="secret",
+        baidu_pan_refresh_token="refresh",
+        enable_upload=True,
+    )
+    with pytest.raises(RuntimeError, match="索引缺失"):
+        pipeline._upload_archives_and_manifest(
+            config=config,
+            game_version="16.4",
+            archives=(archive,),
+        )
+    assert fake_client.upload_calls == []
 
 
 def test_upload_archives_and_manifest_should_raise_when_credentials_missing(

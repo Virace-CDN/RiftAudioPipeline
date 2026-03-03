@@ -47,6 +47,8 @@ from rift_audio_pipeline.packer import pack_all
 
 DEFAULT_BUNDLED_PACK_EXTRA_DIR = Path(__file__).resolve().parent / "pack_extra"
 DEFAULT_PACK_EXTRA_FILES = ("食用说明.txt", "license.txt")
+UPLOAD_MANIFEST_FILE_NAME = "upload_manifest.json"
+UPLOAD_MANIFEST_SCHEMA_VERSION = 2
 
 
 def run_pipeline(config: PipelineConfig) -> int:
@@ -475,8 +477,9 @@ def _upload_archives_and_manifest(
         raise ValueError("上传阶段缺少百度凭据，请配置 app_key/secret_key/refresh_token")
 
     package_root = _resolve_package_output_root(config=config, game_version=game_version)
-    manifest_file = package_root / "upload_manifest.json"
-    uploaded_entries: list[dict[str, object]] = []
+    manifest_file = package_root / UPLOAD_MANIFEST_FILE_NAME
+    run_entries: list[dict[str, object]] = []
+    has_index_changes = False
 
     credentials = BaiduCredentials(
         app_key=config.baidu_pan_app_key,
@@ -490,40 +493,88 @@ def _upload_archives_and_manifest(
         token_store=token_store,
     )
     try:
+        remote_index = _load_remote_upload_manifest_index(client=client, package_root=package_root)
+        executed_at = _current_utc_timestamp()
         for archive in archives:
             if not archive.is_file():
                 raise FileNotFoundError(f"上传失败：压缩包不存在：{archive}")
+
             remote_name = _build_remote_archive_name(
                 game_version=game_version,
                 archive_name=archive.name,
             )
+            remote_path = _join_remote_file_path(
+                remote_dir=config.baidu_pan_remote_dir,
+                remote_name=remote_name,
+            )
+            existing_entry = remote_index.get(remote_path.casefold())
+            if existing_entry is not None:
+                if _is_same_index_entry(
+                    entry=existing_entry,
+                    expected_remote_name=remote_name,
+                    expected_game_version=game_version,
+                ):
+                    logger.info("远端索引命中同文件，跳过上传：{}", remote_path)
+                    run_entries.append(
+                        {
+                            "local_path": str(archive),
+                            "remote_path": remote_path,
+                            "remote_name": remote_name,
+                            "game_version": game_version,
+                            "status": "skipped",
+                        }
+                    )
+                    continue
+                raise RuntimeError(
+                    "上传阶段终止：远端索引存在同路径但版本不一致文件，"
+                    f"remote_path={remote_path}, expected_game_version={game_version}"
+                )
+
+            if _remote_file_exists(client=client, remote_path=remote_name):
+                raise RuntimeError(
+                    "上传阶段终止：检测到远端已存在同名文件但索引缺失，"
+                    f"remote_path={remote_path}。请先修复远端索引后再重试。"
+                )
+
+            file_size = archive.stat().st_size
+            file_sha256 = _calculate_sha256(archive)
             response = client.upload_file(local_path=archive, remote_path=remote_name)
-            uploaded_entries.append(
+            has_index_changes = True
+            remote_index[remote_path.casefold()] = {
+                "remote_path": remote_path,
+                "remote_name": remote_name,
+                "game_version": game_version,
+                "size": file_size,
+                "sha256": file_sha256,
+                "uploaded_at": executed_at,
+            }
+            run_entries.append(
                 {
                     "local_path": str(archive),
-                    "remote_path": f"{config.baidu_pan_remote_dir.rstrip('/')}/{remote_name}",
-                    "size": archive.stat().st_size,
-                    "sha256": _calculate_sha256(archive),
+                    "remote_path": remote_path,
+                    "remote_name": remote_name,
+                    "size": file_size,
+                    "sha256": file_sha256,
+                    "status": "uploaded",
                     "response": response,
                 }
             )
 
-        manifest_payload = {
-            "schema_version": 1,
-            "game_version": game_version,
-            "created_at": datetime.now(tz=timezone.utc)
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z"),
-            "archive_count": len(uploaded_entries),
-            "entries": uploaded_entries,
-        }
+        manifest_payload = _build_upload_manifest_payload(
+            game_version=game_version,
+            index=remote_index,
+            run_entries=run_entries,
+            executed_at=executed_at,
+        )
         manifest_file.parent.mkdir(parents=True, exist_ok=True)
         manifest_file.write_text(
             json.dumps(manifest_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        remote_manifest_name = f"upload_manifest_{game_version}.json"
-        client.upload_file(local_path=manifest_file, remote_path=remote_manifest_name)
+        if has_index_changes:
+            client.upload_file(local_path=manifest_file, remote_path=UPLOAD_MANIFEST_FILE_NAME)
+        else:
+            logger.info("远端索引无变化，跳过索引文件回传。")
         return manifest_file
     finally:
         client.close()
@@ -578,7 +629,8 @@ def _resolve_pack_archive_type(config: PipelineConfig) -> str | None:
 def _build_remote_archive_name(game_version: str, archive_name: str) -> str:
     """生成远端压缩包文件名。"""
 
-    return f"package_{game_version}_{archive_name}"
+    del game_version
+    return archive_name
 
 
 def _calculate_sha256(file_path: Path) -> str:
@@ -589,6 +641,184 @@ def _calculate_sha256(file_path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _load_remote_upload_manifest_index(
+    client: BaiduPanClient,
+    package_root: Path,
+) -> dict[str, dict[str, object]]:
+    """读取远端上传索引并构建内存查询表。
+
+    Args:
+        client: 百度网盘客户端。
+        package_root: 当前版本打包根目录，用于临时落地远端索引文件。
+
+    Returns:
+        以 `remote_path.casefold()` 为键的索引字典。
+
+    Raises:
+        ValueError: 远端索引不是合法 JSON 或缺少 `entries` 列表。
+    """
+
+    temp_file = package_root / ".remote_upload_manifest.json"
+    try:
+        try:
+            client.download_file(remote_path=UPLOAD_MANIFEST_FILE_NAME, local_path=temp_file)
+        except FileNotFoundError:
+            logger.info("远端索引不存在，将创建新索引：{}", UPLOAD_MANIFEST_FILE_NAME)
+            return {}
+
+        try:
+            payload = json.loads(temp_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"远端索引解析失败：{UPLOAD_MANIFEST_FILE_NAME} 不是合法 JSON。"
+            ) from error
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"远端索引格式错误：{UPLOAD_MANIFEST_FILE_NAME} 根对象必须为字典。")
+        entries = payload.get("entries")
+        return _build_upload_manifest_index(entries=entries)
+    finally:
+        temp_file.unlink(missing_ok=True)
+
+
+def _build_upload_manifest_index(entries: object) -> dict[str, dict[str, object]]:
+    """将远端索引条目转换为高效查询结构。"""
+
+    if not isinstance(entries, list):
+        raise ValueError("远端索引格式错误：`entries` 必须为列表。")
+
+    index: dict[str, dict[str, object]] = {}
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict):
+            continue
+
+        remote_path_obj = raw_entry.get("remote_path")
+        if not (isinstance(remote_path_obj, str) and remote_path_obj.strip()):
+            continue
+
+        remote_path = remote_path_obj.strip().replace("\\", "/")
+        remote_name = str(raw_entry.get("remote_name") or Path(remote_path).name).strip()
+        game_version = (
+            str(raw_entry.get("game_version")).strip()
+            if isinstance(raw_entry.get("game_version"), str)
+            else ""
+        )
+        normalized_entry: dict[str, object] = {
+            "remote_path": remote_path,
+            "remote_name": remote_name,
+            "game_version": game_version or None,
+            "uploaded_at": raw_entry.get("uploaded_at"),
+        }
+        size_obj = _coerce_non_negative_int(raw_entry.get("size"))
+        if size_obj is not None:
+            normalized_entry["size"] = size_obj
+        sha256_obj = raw_entry.get("sha256")
+        if isinstance(sha256_obj, str) and sha256_obj.strip():
+            normalized_entry["sha256"] = sha256_obj.strip().lower()
+        index[remote_path.casefold()] = normalized_entry
+    return index
+
+
+def _build_upload_manifest_payload(
+    game_version: str,
+    index: dict[str, dict[str, object]],
+    run_entries: list[dict[str, object]],
+    executed_at: str,
+) -> dict[str, object]:
+    """构建上传索引快照。"""
+
+    index_entries = tuple(
+        sorted(
+            index.values(),
+            key=lambda entry: str(entry.get("remote_path", "")).casefold(),
+        )
+    )
+    uploaded_count = sum(1 for entry in run_entries if entry.get("status") == "uploaded")
+    skipped_count = sum(1 for entry in run_entries if entry.get("status") == "skipped")
+    return {
+        "schema_version": UPLOAD_MANIFEST_SCHEMA_VERSION,
+        "updated_at": executed_at,
+        "entry_count": len(index_entries),
+        "entries": index_entries,
+        "last_run": {
+            "game_version": game_version,
+            "executed_at": executed_at,
+            "archive_count": len(run_entries),
+            "uploaded_count": uploaded_count,
+            "skipped_count": skipped_count,
+            "entries": run_entries,
+        },
+    }
+
+
+def _join_remote_file_path(remote_dir: str, remote_name: str) -> str:
+    """拼接远端目录和文件名。"""
+
+    normalized_name = remote_name.strip().replace("\\", "/").lstrip("/")
+    if not normalized_name:
+        raise ValueError("上传阶段失败：远端文件名不能为空。")
+
+    normalized_dir = remote_dir.strip().replace("\\", "/").strip("/")
+    if not normalized_dir:
+        return f"/{normalized_name}"
+    return f"/{normalized_dir}/{normalized_name}"
+
+
+def _is_same_index_entry(
+    entry: dict[str, object],
+    expected_remote_name: str,
+    expected_game_version: str,
+) -> bool:
+    """按文件名与版本号判断索引条目是否匹配。"""
+
+    indexed_name = entry.get("remote_name")
+    if isinstance(indexed_name, str) and indexed_name.strip():
+        if indexed_name.strip() != expected_remote_name:
+            return False
+
+    indexed_version = entry.get("game_version")
+    if indexed_version is None:
+        return True
+    if not isinstance(indexed_version, str):
+        return False
+    return indexed_version.strip() == expected_game_version
+
+
+def _remote_file_exists(client: BaiduPanClient, remote_path: str) -> bool:
+    """判断远端路径是否已存在。"""
+
+    try:
+        client.get_path_entry(remote_path=remote_path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _current_utc_timestamp() -> str:
+    """返回 UTC ISO-8601 时间戳。"""
+
+    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _coerce_non_negative_int(value: object) -> int | None:
+    """将对象转换为非负整数。"""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = int(stripped)
+        except ValueError:
+            return None
+        return parsed if parsed >= 0 else None
+    return None
 
 
 def _cleanup_simulated_runtime_files(
