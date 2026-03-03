@@ -51,6 +51,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="低磁盘模式，启用时按实体顺序解包并减少峰值占用",
     )
     parser.add_argument(
+        "--enable-pack",
+        action=BooleanOptionalAction,
+        default=False,
+        help="解包后是否执行 7z 打包阶段",
+    )
+    parser.add_argument(
+        "--pack-output-dir",
+        default=None,
+        help="打包产物目录，默认 output/packages/<version>",
+    )
+    parser.add_argument(
+        "--pack-password",
+        default=None,
+        help="打包密码，启用后可配合文件名加密",
+    )
+    parser.add_argument(
+        "--pack-encrypt-filenames",
+        action=BooleanOptionalAction,
+        default=True,
+        help="启用密码时是否开启文件名加密（7z -mhe=on）",
+    )
+    parser.add_argument(
+        "--enable-upload",
+        action=BooleanOptionalAction,
+        default=False,
+        help="打包后是否上传到百度网盘并同步上传清单",
+    )
+    parser.add_argument(
         "--baidu-remote-dir",
         default="/apps/lol-audio/",
         help="百度网盘目标目录",

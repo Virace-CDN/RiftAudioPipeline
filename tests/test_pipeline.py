@@ -1,0 +1,168 @@
+"""主流程辅助函数测试。"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from rift_audio_pipeline.config import PipelineConfig
+import rift_audio_pipeline.pipeline as pipeline
+
+
+def test_pack_unpacked_outputs_should_pack_existing_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """应仅对存在的 champions/maps 目录执行打包。"""
+
+    output_path = tmp_path / "output"
+    champions_dir = output_path / "audios" / "16.4" / "champions"
+    maps_dir = output_path / "audios" / "16.4" / "maps"
+    champions_dir.mkdir(parents=True, exist_ok=True)
+    maps_dir.mkdir(parents=True, exist_ok=True)
+
+    calls: list[tuple[Path, Path]] = []
+
+    def _fake_pack_all(
+        audio_dir: Path,
+        output_dir: Path,
+        *,
+        password: str | None = None,
+        encrypt_filenames: bool = True,
+        extra_files: tuple[Path, ...] = tuple(),
+        compression_level: int = 0,
+        seven_zip_executable: str | None = None,
+    ) -> tuple[Path, ...]:
+        del password, encrypt_filenames, extra_files, compression_level, seven_zip_executable
+        calls.append((audio_dir, output_dir))
+        return (output_dir / f"{audio_dir.name}.7z",)
+
+    monkeypatch.setattr(pipeline, "pack_all", _fake_pack_all)
+
+    config = PipelineConfig(
+        output_path=output_path,
+        enable_pack=True,
+        pack_password="secret",
+        pack_encrypt_filenames=True,
+    )
+    archives = pipeline._pack_unpacked_outputs(config=config, game_version="16.4")
+
+    assert calls == [
+        (champions_dir, output_path / "packages" / "16.4" / "champions"),
+        (maps_dir, output_path / "packages" / "16.4" / "maps"),
+    ]
+    assert archives == (
+        output_path / "packages" / "16.4" / "champions" / "champions.7z",
+        output_path / "packages" / "16.4" / "maps" / "maps.7z",
+    )
+
+
+def test_pack_unpacked_outputs_should_return_empty_when_version_dir_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """缺失版本音频目录时应直接返回空集合。"""
+
+    monkeypatch.setattr(
+        pipeline,
+        "pack_all",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应触发打包")),
+    )
+
+    config = PipelineConfig(
+        output_path=tmp_path / "output",
+        enable_pack=True,
+    )
+    archives = pipeline._pack_unpacked_outputs(config=config, game_version="16.4")
+    assert archives == tuple()
+
+
+def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """应上传所有压缩包并同步上传清单。"""
+
+    class _FakeClient:
+        def __init__(self, credentials, remote_dir, token_store) -> None:
+            del credentials, token_store
+            self.remote_dir = remote_dir
+            self.upload_calls: list[tuple[Path, str]] = []
+
+        def upload_file(
+            self, local_path: Path, remote_path: str, rtype: int = 3
+        ) -> dict[str, object]:
+            del rtype
+            self.upload_calls.append((local_path, remote_path))
+            return {"path": remote_path, "errno": 0}
+
+        def close(self) -> None:
+            return None
+
+    fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
+    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "BaiduPanClient",
+        lambda credentials, remote_dir, token_store: fake_client,
+    )
+
+    output_path = tmp_path / "output"
+    package_root = output_path / "packages" / "16.4"
+    package_root.mkdir(parents=True, exist_ok=True)
+    first_archive = package_root / "Annie.7z"
+    second_archive = package_root / "Zac.7z"
+    first_archive.write_bytes(b"a")
+    second_archive.write_bytes(b"b")
+
+    config = PipelineConfig(
+        output_path=output_path,
+        baidu_pan_remote_dir="/apps/test",
+        baidu_pan_app_key="app",
+        baidu_pan_secret_key="secret",
+        baidu_pan_refresh_token="refresh",
+        enable_upload=True,
+    )
+    manifest_file = pipeline._upload_archives_and_manifest(
+        config=config,
+        game_version="16.4",
+        archives=(first_archive, second_archive),
+    )
+
+    assert manifest_file == package_root / "upload_manifest.json"
+    assert manifest_file.exists()
+    payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    assert payload["archive_count"] == 2
+    assert [entry["local_path"] for entry in payload["entries"]] == [
+        str(first_archive),
+        str(second_archive),
+    ]
+    assert fake_client.upload_calls == [
+        (first_archive, "package_16.4_Annie.7z"),
+        (second_archive, "package_16.4_Zac.7z"),
+        (manifest_file, "upload_manifest_16.4.json"),
+    ]
+
+
+def test_upload_archives_and_manifest_should_raise_when_credentials_missing(
+    tmp_path: Path,
+) -> None:
+    """缺少凭据时应拒绝上传。"""
+
+    output_path = tmp_path / "output"
+    archive = output_path / "packages" / "16.4" / "Annie.7z"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"a")
+
+    config = PipelineConfig(
+        output_path=output_path,
+        enable_upload=True,
+    )
+    with pytest.raises(ValueError, match="缺少百度凭据"):
+        pipeline._upload_archives_and_manifest(
+            config=config,
+            game_version="16.4",
+            archives=(archive,),
+        )

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from datetime import timezone
+import hashlib
+import json
 from pathlib import Path
 
 from loguru import logger
@@ -17,6 +21,9 @@ from rift_audio_pipeline.audio_processor import run_data_updater
 from rift_audio_pipeline.audio_processor import run_unpack
 from rift_audio_pipeline.audio_processor import run_unpack_by_entity
 from rift_audio_pipeline.baidu.sdk import ensure_official_sdk_path
+from rift_audio_pipeline.baidu.oauth import resolve_token_store
+from rift_audio_pipeline.baidu.pan import BaiduCredentials
+from rift_audio_pipeline.baidu.pan import BaiduPanClient
 from rift_audio_pipeline.bin_extractor import seed_bin_input_from_directory
 from rift_audio_pipeline.bin_extractor import write_many_to_bin_input
 from rift_audio_pipeline.config import PipelineConfig
@@ -35,6 +42,7 @@ from rift_audio_pipeline.manifest_ops import extract_bin_payloads_from_filter_de
 from rift_audio_pipeline.manifest_ops import extract_changed_entities_from_wad_paths
 from rift_audio_pipeline.manifest_ops import filter_wad_changes_by_bin_voice_paths
 from rift_audio_pipeline.manifest_ops import save_local_state
+from rift_audio_pipeline.packer import pack_all
 
 
 def run_pipeline(config: PipelineConfig) -> int:
@@ -320,6 +328,26 @@ def run_pipeline(config: PipelineConfig) -> int:
         logger.error("解包阶段失败，error={}", error)
         return 1
 
+    if config.enable_pack:
+        try:
+            archives = _pack_unpacked_outputs(config=config, game_version=latest.game_version)
+        except Exception as error:  # noqa: BLE001
+            logger.error("打包阶段失败，error={}", error)
+            return 1
+        logger.info("打包阶段执行完成：archive_count={}", len(archives))
+        if config.enable_upload:
+            try:
+                upload_manifest = _upload_archives_and_manifest(
+                    config=config,
+                    game_version=latest.game_version,
+                    archives=archives,
+                )
+            except Exception as error:  # noqa: BLE001
+                logger.error("上传阶段失败，error={}", error)
+                return 1
+            if upload_manifest is not None:
+                logger.info("上传阶段执行完成：manifest_file={}", upload_manifest)
+
     saved_state = build_local_state(latest_versions=latest)
     saved_file = save_local_state(state=saved_state, state_file=DEFAULT_LOCAL_STATE_FILE)
     logger.info("解包阶段执行完成，已同步状态文件：{}", saved_file)
@@ -357,6 +385,140 @@ def _build_runtime_download_dir(
     """构建运行时下载缓存目录。"""
 
     return runtime_game_path.parent / "downloads" / game_version / region
+
+
+def _pack_unpacked_outputs(config: PipelineConfig, game_version: str) -> tuple[Path, ...]:
+    """将当前版本解包产物按目录批量打包。"""
+
+    version_audio_dir = config.output_path / "audios" / game_version
+    if not version_audio_dir.is_dir():
+        logger.warning("未找到可打包目录：{}", version_audio_dir)
+        return tuple()
+
+    if config.pack_output_dir is not None:
+        pack_root = config.pack_output_dir
+    else:
+        pack_root = _resolve_package_output_root(config=config, game_version=game_version)
+
+    archives: list[Path] = []
+    pack_targets = (
+        ("champions", version_audio_dir / "champions"),
+        ("maps", version_audio_dir / "maps"),
+    )
+    for target_name, target_dir in pack_targets:
+        if not target_dir.is_dir():
+            continue
+        target_output_dir = pack_root / target_name
+        packed = pack_all(
+            audio_dir=target_dir,
+            output_dir=target_output_dir,
+            password=config.pack_password,
+            encrypt_filenames=config.pack_encrypt_filenames,
+        )
+        archives.extend(packed)
+        logger.info(
+            "打包完成：target={}, source={}, archive_count={}",
+            target_name,
+            target_dir,
+            len(packed),
+        )
+
+    return tuple(sorted(archives, key=lambda path: path.as_posix().casefold()))
+
+
+def _upload_archives_and_manifest(
+    config: PipelineConfig,
+    game_version: str,
+    archives: tuple[Path, ...],
+) -> Path | None:
+    """将打包产物上传到百度网盘，并同步本次上传清单。"""
+
+    if not archives:
+        logger.warning("上传阶段跳过：无可上传压缩包。")
+        return None
+
+    if not (
+        config.baidu_pan_app_key and config.baidu_pan_secret_key and config.baidu_pan_refresh_token
+    ):
+        raise ValueError("上传阶段缺少百度凭据，请配置 app_key/secret_key/refresh_token")
+
+    package_root = _resolve_package_output_root(config=config, game_version=game_version)
+    manifest_file = package_root / "upload_manifest.json"
+    uploaded_entries: list[dict[str, object]] = []
+
+    credentials = BaiduCredentials(
+        app_key=config.baidu_pan_app_key,
+        secret_key=config.baidu_pan_secret_key,
+        refresh_token=config.baidu_pan_refresh_token,
+    )
+    token_store = resolve_token_store()
+    client = BaiduPanClient(
+        credentials=credentials,
+        remote_dir=config.baidu_pan_remote_dir,
+        token_store=token_store,
+    )
+    try:
+        for archive in archives:
+            if not archive.is_file():
+                raise FileNotFoundError(f"上传失败：压缩包不存在：{archive}")
+            remote_name = _build_remote_archive_name(
+                game_version=game_version,
+                archive_name=archive.name,
+            )
+            response = client.upload_file(local_path=archive, remote_path=remote_name)
+            uploaded_entries.append(
+                {
+                    "local_path": str(archive),
+                    "remote_path": f"{config.baidu_pan_remote_dir.rstrip('/')}/{remote_name}",
+                    "size": archive.stat().st_size,
+                    "sha256": _calculate_sha256(archive),
+                    "response": response,
+                }
+            )
+
+        manifest_payload = {
+            "schema_version": 1,
+            "game_version": game_version,
+            "created_at": datetime.now(tz=timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+            "archive_count": len(uploaded_entries),
+            "entries": uploaded_entries,
+        }
+        manifest_file.parent.mkdir(parents=True, exist_ok=True)
+        manifest_file.write_text(
+            json.dumps(manifest_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        remote_manifest_name = f"upload_manifest_{game_version}.json"
+        client.upload_file(local_path=manifest_file, remote_path=remote_manifest_name)
+        return manifest_file
+    finally:
+        client.close()
+
+
+def _resolve_package_output_root(config: PipelineConfig, game_version: str) -> Path:
+    """解析当前版本打包产物根目录。"""
+
+    if config.pack_output_dir is not None:
+        return config.pack_output_dir
+    return config.output_path / "packages" / game_version
+
+
+def _build_remote_archive_name(game_version: str, archive_name: str) -> str:
+    """生成远端压缩包文件名。"""
+
+    return f"package_{game_version}_{archive_name}"
+
+
+def _calculate_sha256(file_path: Path) -> str:
+    """计算文件 SHA256。"""
+
+    digest = hashlib.sha256()
+    with file_path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _merge_runtime_wad_paths(*groups: tuple[str, ...]) -> tuple[str, ...]:

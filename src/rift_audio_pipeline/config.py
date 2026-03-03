@@ -31,6 +31,11 @@ class PipelineConfig:
         local_bin_dir: 本地 bin 输入目录（写入 `manifest/<version>/bin_input`）。
         unpack_workers: 解包并发线程数。
         low_disk_mode: 低磁盘模式；启用时按实体顺序解包以降低峰值空间占用。
+        enable_pack: 是否在解包后执行 7z 打包阶段。
+        pack_output_dir: 打包产物目录；为空时默认 `output/packages/<version>/`。
+        pack_password: 打包密码；为空时不启用密码。
+        pack_encrypt_filenames: 启用密码时是否开启文件名加密（`-mhe=on`）。
+        enable_upload: 是否在打包后上传到百度网盘并同步上传清单。
         dry_run: 仅检测，不执行耗时步骤。
     """
 
@@ -47,6 +52,11 @@ class PipelineConfig:
     local_bin_dir: Path | None = None
     unpack_workers: int = 2
     low_disk_mode: bool = True
+    enable_pack: bool = False
+    pack_output_dir: Path | None = None
+    pack_password: str | None = None
+    pack_encrypt_filenames: bool = True
+    enable_upload: bool = False
     dry_run: bool = False
 
     @classmethod
@@ -69,6 +79,9 @@ class PipelineConfig:
         local_bin_dir = (
             Path(args.local_bin_dir).expanduser().resolve() if args.local_bin_dir else None
         )
+        pack_output_dir = (
+            Path(args.pack_output_dir).expanduser().resolve() if args.pack_output_dir else None
+        )
         unpack_workers = max(1, int(args.unpack_workers))
 
         return cls(
@@ -85,5 +98,10 @@ class PipelineConfig:
             local_bin_dir=local_bin_dir,
             unpack_workers=unpack_workers,
             low_disk_mode=bool(args.low_disk_mode),
+            enable_pack=bool(args.enable_pack),
+            pack_output_dir=pack_output_dir,
+            pack_password=args.pack_password,
+            pack_encrypt_filenames=bool(args.pack_encrypt_filenames),
+            enable_upload=bool(args.enable_upload),
             dry_run=args.dry_run,
         )
