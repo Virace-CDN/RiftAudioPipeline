@@ -45,6 +45,9 @@ from rift_audio_pipeline.manifest_ops import filter_wad_changes_by_bin_voice_pat
 from rift_audio_pipeline.manifest_ops import save_local_state
 from rift_audio_pipeline.packer import pack_all
 
+DEFAULT_BUNDLED_PACK_EXTRA_DIR = Path(__file__).resolve().parent / "pack_extra"
+DEFAULT_PACK_EXTRA_FILES = ("食用说明.txt", "license.txt")
+
 
 def run_pipeline(config: PipelineConfig) -> int:
     """执行流水线主入口。
@@ -412,19 +415,33 @@ def _pack_unpacked_outputs(config: PipelineConfig, game_version: str) -> tuple[P
         pack_root = _resolve_package_output_root(config=config, game_version=game_version)
 
     archives: list[Path] = []
+    extra_files = _resolve_pack_extra_files(config=config)
+    if extra_files:
+        logger.info("打包附加文件已启用：{}", ", ".join(str(item) for item in extra_files))
     pack_targets = (
-        ("champions", version_audio_dir / "champions"),
-        ("maps", version_audio_dir / "maps"),
+        (
+            "champions",
+            version_audio_dir / "champions",
+            config.output_path / "reports" / game_version / "champions",
+        ),
+        (
+            "maps",
+            version_audio_dir / "maps",
+            config.output_path / "reports" / game_version / "maps",
+        ),
     )
-    for target_name, target_dir in pack_targets:
+    for target_name, target_dir, report_dir in pack_targets:
         if not target_dir.is_dir():
             continue
         target_output_dir = pack_root / target_name
         packed = pack_all(
             audio_dir=target_dir,
             output_dir=target_output_dir,
+            version=game_version,
+            report_dir=report_dir,
             password=config.pack_password,
             encrypt_filenames=config.pack_encrypt_filenames,
+            extra_files=extra_files,
         )
         archives.extend(packed)
         logger.info(
@@ -514,6 +531,29 @@ def _resolve_package_output_root(config: PipelineConfig, game_version: str) -> P
     if config.pack_output_dir is not None:
         return config.pack_output_dir
     return config.output_path / "packages" / game_version
+
+
+def _resolve_pack_extra_files(config: PipelineConfig) -> tuple[Path, ...]:
+    """解析打包附加文件列表。"""
+
+    candidate_dirs: list[Path] = []
+    if config.pack_extra_dir is not None:
+        candidate_dirs.append(config.pack_extra_dir)
+    else:
+        candidate_dirs.append(DEFAULT_BUNDLED_PACK_EXTRA_DIR)
+
+    for directory in candidate_dirs:
+        resolved_dir = directory.expanduser().resolve()
+        if not resolved_dir.is_dir():
+            continue
+        files: list[Path] = []
+        for file_name in DEFAULT_PACK_EXTRA_FILES:
+            file_path = resolved_dir / file_name
+            if file_path.is_file():
+                files.append(file_path)
+        if files:
+            return tuple(files)
+    return tuple()
 
 
 def _build_remote_archive_name(game_version: str, archive_name: str) -> str:

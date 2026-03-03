@@ -35,6 +35,7 @@ class PipelineConfig:
         pack_output_dir: 打包产物目录；为空时默认 `output/packages/<version>/`。
         pack_password: 打包密码；为空时不启用密码。
         pack_encrypt_filenames: 启用密码时是否开启文件名加密（`-mhe=on`）。
+        pack_extra_dir: 打包附加文件目录；为空时自动尝试默认 `extra` 目录。
         enable_upload: 是否在打包后上传到百度网盘并同步上传清单。
         dry_run: 仅检测，不执行耗时步骤。
     """
@@ -56,6 +57,7 @@ class PipelineConfig:
     pack_output_dir: Path | None = None
     pack_password: str | None = None
     pack_encrypt_filenames: bool = True
+    pack_extra_dir: Path | None = None
     enable_upload: bool = False
     dry_run: bool = False
 
@@ -82,6 +84,9 @@ class PipelineConfig:
         pack_output_dir = (
             Path(args.pack_output_dir).expanduser().resolve() if args.pack_output_dir else None
         )
+        pack_extra_dir = (
+            Path(args.pack_extra_dir).expanduser().resolve() if args.pack_extra_dir else None
+        )
         unpack_workers = max(1, int(args.unpack_workers))
 
         return cls(
@@ -102,6 +107,7 @@ class PipelineConfig:
             pack_output_dir=pack_output_dir,
             pack_password=args.pack_password,
             pack_encrypt_filenames=bool(args.pack_encrypt_filenames),
+            pack_extra_dir=pack_extra_dir,
             enable_upload=bool(args.enable_upload),
             dry_run=args.dry_run,
         )

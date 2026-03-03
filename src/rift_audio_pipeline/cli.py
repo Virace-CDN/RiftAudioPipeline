@@ -67,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="打包密码，启用后可配合文件名加密",
     )
     parser.add_argument(
+        "--pack-extra-dir",
+        default=None,
+        help="打包附加文件目录，默认使用项目内置 src/rift_audio_pipeline/pack_extra",
+    )
+    parser.add_argument(
         "--pack-encrypt-filenames",
         action=BooleanOptionalAction,
         default=True,

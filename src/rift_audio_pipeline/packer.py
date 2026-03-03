@@ -18,6 +18,8 @@ def pack_champion(
     champion_dir: Path,
     output_path: Path,
     *,
+    archive_name: str | None = None,
+    report_file: Path | None = None,
     password: str | None = None,
     encrypt_filenames: bool = True,
     extra_files: Sequence[Path] = tuple(),
@@ -29,6 +31,8 @@ def pack_champion(
     Args:
         champion_dir: 英雄语音目录。
         output_path: 打包产物目录。
+        archive_name: 压缩包文件名；为空时使用目录名。
+        report_file: 可选的 `_id_metadata.yaml` 报告文件。
         password: 压缩包密码；为空时不启用密码。
         encrypt_filenames: 启用密码时是否开启文件名加密（`-mhe=on`）。
         extra_files: 需要附加到压缩包根目录的额外文件集合。
@@ -50,16 +54,19 @@ def pack_champion(
 
     output_dir = output_path.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = output_dir / f"{source_dir.name}{ARCHIVE_SUFFIX}"
+    archive_file_name = _normalize_archive_name(archive_name=archive_name, fallback=source_dir.name)
+    archive_path = output_dir / archive_file_name
     normalized_password = password if password else None
 
     executable = _resolve_7zip_executable(seven_zip_executable)
     level = _validate_compression_level(compression_level)
     staged_extra_files = _normalize_extra_files(extra_files)
+    normalized_report_file = _normalize_report_file(report_file)
 
     with tempfile.TemporaryDirectory(prefix="rift_pack_") as temp_dir:
         stage_root = Path(temp_dir)
         _stage_directory(stage_root=stage_root, source_dir=source_dir)
+        _stage_report_file(stage_root=stage_root, report_file=normalized_report_file)
         _stage_extra_files(stage_root=stage_root, extra_files=staged_extra_files)
         command = _build_7z_command(
             executable=executable,
@@ -77,6 +84,8 @@ def pack_all(
     audio_dir: Path,
     output_dir: Path,
     *,
+    version: str | None = None,
+    report_dir: Path | None = None,
     password: str | None = None,
     encrypt_filenames: bool = True,
     extra_files: Sequence[Path] = tuple(),
@@ -88,6 +97,8 @@ def pack_all(
     Args:
         audio_dir: 音频目录。
         output_dir: 产物目录。
+        version: 压缩包版本后缀（例如 `16.4`）。
+        report_dir: 报告目录，命名规则为 `_<实体ID>_metadata.yaml`。
         password: 压缩包密码；为空时不启用密码。
         encrypt_filenames: 启用密码时是否开启文件名加密（`-mhe=on`）。
         extra_files: 需要附加到压缩包根目录的额外文件集合。
@@ -115,6 +126,8 @@ def pack_all(
             pack_champion(
                 champion_dir=item,
                 output_path=output_dir,
+                archive_name=_build_archive_name(directory_name=item.name, version=version),
+                report_file=_resolve_report_file(folder_name=item.name, report_dir=report_dir),
                 password=password,
                 encrypt_filenames=encrypt_filenames,
                 extra_files=extra_files,
@@ -159,6 +172,53 @@ def _normalize_extra_files(extra_files: Sequence[Path]) -> tuple[Path, ...]:
     return tuple(resolved)
 
 
+def _normalize_report_file(report_file: Path | None) -> Path | None:
+    """标准化并校验报告文件。"""
+
+    if report_file is None:
+        return None
+    resolved = report_file.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"报告文件不存在或不可读：{resolved}")
+    return resolved
+
+
+def _normalize_archive_name(archive_name: str | None, fallback: str) -> str:
+    """规范化压缩包文件名。"""
+
+    raw_name = archive_name.strip() if isinstance(archive_name, str) else fallback
+    if not raw_name:
+        raw_name = fallback
+    if not raw_name.endswith(ARCHIVE_SUFFIX):
+        return f"{raw_name}{ARCHIVE_SUFFIX}"
+    return raw_name
+
+
+def _build_archive_name(directory_name: str, version: str | None) -> str:
+    """构建压缩包文件名。"""
+
+    if version is None or not version.strip():
+        return f"{directory_name}{ARCHIVE_SUFFIX}"
+    return f"{directory_name}-{version.strip()}{ARCHIVE_SUFFIX}"
+
+
+def _resolve_report_file(folder_name: str, report_dir: Path | None) -> Path | None:
+    """根据目录名解析对应报告文件。"""
+
+    if report_dir is None:
+        return None
+    resolved_report_dir = report_dir.expanduser().resolve()
+    if not resolved_report_dir.is_dir():
+        return None
+    entity_id = folder_name.split("·", maxsplit=1)[0].strip()
+    if not entity_id:
+        return None
+    candidate = resolved_report_dir / f"_{entity_id}_metadata.yaml"
+    if candidate.is_file():
+        return candidate
+    return None
+
+
 def _stage_directory(stage_root: Path, source_dir: Path) -> None:
     """将目录以链接或复制方式放入临时打包目录。"""
 
@@ -167,6 +227,15 @@ def _stage_directory(stage_root: Path, source_dir: Path) -> None:
         target.symlink_to(source_dir, target_is_directory=True)
     except OSError:
         shutil.copytree(source_dir, target)
+
+
+def _stage_report_file(stage_root: Path, report_file: Path | None) -> None:
+    """将报告文件复制到压缩包根目录。"""
+
+    if report_file is None:
+        return
+    target = stage_root / report_file.name
+    shutil.copy2(report_file, target)
 
 
 def _stage_extra_files(stage_root: Path, extra_files: Sequence[Path]) -> None:

@@ -51,6 +51,34 @@ def test_pack_champion_should_build_7z_command_with_password_and_mhe(
     assert archive == (tmp_path / "archives" / "annie.7z").resolve()
 
 
+def test_pack_champion_should_stage_report_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """传入报告文件时应写入压缩包根目录。"""
+
+    champion_dir = tmp_path / "annie"
+    champion_dir.mkdir(parents=True, exist_ok=True)
+    (champion_dir / "voice.txt").write_text("voice", encoding="utf-8")
+    report_file = tmp_path / "_1_metadata.yaml"
+    report_file.write_text("meta: 1", encoding="utf-8")
+
+    monkeypatch.setattr(packer, "_resolve_7zip_executable", lambda _: "/usr/bin/7z")
+
+    def _fake_execute_7z_command(command: tuple[str, ...], cwd: Path) -> None:
+        del command
+        assert (cwd / "_1_metadata.yaml").exists()
+
+    monkeypatch.setattr(packer, "_execute_7z_command", _fake_execute_7z_command)
+
+    archive = packer.pack_champion(
+        champion_dir=champion_dir,
+        output_path=tmp_path / "archives",
+        report_file=report_file,
+    )
+    assert archive == (tmp_path / "archives" / "annie.7z").resolve()
+
+
 def test_pack_champion_should_raise_on_invalid_compression_level(tmp_path: Path) -> None:
     """压缩级别越界时应抛错。"""
 
@@ -105,12 +133,14 @@ def test_pack_all_should_pack_each_subdirectory(
     zac_dir.mkdir(parents=True, exist_ok=True)
     (audio_dir / "ignore.txt").write_text("x", encoding="utf-8")
 
-    calls: list[Path] = []
+    calls: list[tuple[Path, str | None, Path | None]] = []
 
     def _fake_pack_champion(
         champion_dir: Path,
         output_path: Path,
         *,
+        archive_name: str | None = None,
+        report_file: Path | None = None,
         password: str | None = None,
         encrypt_filenames: bool = True,
         extra_files: tuple[Path, ...] = tuple(),
@@ -125,15 +155,29 @@ def test_pack_all_should_pack_each_subdirectory(
             compression_level,
             seven_zip_executable,
         )
-        calls.append(champion_dir)
-        return tmp_path / "archives" / f"{champion_dir.name}.7z"
+        calls.append((champion_dir, archive_name, report_file))
+        normalized = archive_name if archive_name is not None else f"{champion_dir.name}.7z"
+        return tmp_path / "archives" / normalized
 
     monkeypatch.setattr(packer, "pack_champion", _fake_pack_champion)
 
-    archives = packer.pack_all(audio_dir=audio_dir, output_dir=tmp_path / "archives")
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "_Annie_metadata.yaml").write_text("meta", encoding="utf-8")
+    archives = packer.pack_all(
+        audio_dir=audio_dir,
+        output_dir=tmp_path / "archives",
+        version="16.4",
+        report_dir=report_dir,
+    )
 
-    assert calls == [annie_dir, zac_dir]
+    assert calls[0][0] == annie_dir
+    assert calls[1][0] == zac_dir
+    assert calls[0][1] == "Annie-16.4.7z"
+    assert calls[1][1] == "Zac-16.4.7z"
+    assert calls[0][2] == (report_dir / "_Annie_metadata.yaml").resolve()
+    assert calls[1][2] is None
     assert archives == (
-        tmp_path / "archives" / "Annie.7z",
-        tmp_path / "archives" / "Zac.7z",
+        tmp_path / "archives" / "Annie-16.4.7z",
+        tmp_path / "archives" / "Zac-16.4.7z",
     )

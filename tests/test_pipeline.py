@@ -23,23 +23,37 @@ def test_pack_unpacked_outputs_should_pack_existing_targets(
     champions_dir.mkdir(parents=True, exist_ok=True)
     maps_dir.mkdir(parents=True, exist_ok=True)
 
-    calls: list[tuple[Path, Path]] = []
+    calls: list[tuple[Path, Path, str | None, Path | None]] = []
+    extra_files = (tmp_path / "extra" / "说明.txt",)
+    extra_files[0].parent.mkdir(parents=True, exist_ok=True)
+    extra_files[0].write_text("x", encoding="utf-8")
+    champion_report_dir = output_path / "reports" / "16.4" / "champions"
+    champion_report_dir.mkdir(parents=True, exist_ok=True)
+    champion_report = champion_report_dir / "_1_metadata.yaml"
+    champion_report.write_text("meta", encoding="utf-8")
+    maps_report_dir = output_path / "reports" / "16.4" / "maps"
+    maps_report_dir.mkdir(parents=True, exist_ok=True)
 
     def _fake_pack_all(
         audio_dir: Path,
         output_dir: Path,
         *,
+        version: str | None = None,
+        report_dir: Path | None = None,
         password: str | None = None,
         encrypt_filenames: bool = True,
         extra_files: tuple[Path, ...] = tuple(),
         compression_level: int = 0,
         seven_zip_executable: str | None = None,
     ) -> tuple[Path, ...]:
-        del password, encrypt_filenames, extra_files, compression_level, seven_zip_executable
-        calls.append((audio_dir, output_dir))
+        del password, encrypt_filenames, compression_level, seven_zip_executable
+        calls.append((audio_dir, output_dir, version, report_dir))
+        assert tuple(extra_files) == extra_files_expected
         return (output_dir / f"{audio_dir.name}.7z",)
 
+    extra_files_expected = extra_files
     monkeypatch.setattr(pipeline, "pack_all", _fake_pack_all)
+    monkeypatch.setattr(pipeline, "_resolve_pack_extra_files", lambda config: extra_files_expected)
 
     config = PipelineConfig(
         output_path=output_path,
@@ -50,8 +64,18 @@ def test_pack_unpacked_outputs_should_pack_existing_targets(
     archives = pipeline._pack_unpacked_outputs(config=config, game_version="16.4")
 
     assert calls == [
-        (champions_dir, output_path / "packages" / "16.4" / "champions"),
-        (maps_dir, output_path / "packages" / "16.4" / "maps"),
+        (
+            champions_dir,
+            output_path / "packages" / "16.4" / "champions",
+            "16.4",
+            champion_report_dir,
+        ),
+        (
+            maps_dir,
+            output_path / "packages" / "16.4" / "maps",
+            "16.4",
+            maps_report_dir,
+        ),
     ]
     assert archives == (
         output_path / "packages" / "16.4" / "champions" / "champions.7z",
@@ -77,6 +101,54 @@ def test_pack_unpacked_outputs_should_return_empty_when_version_dir_missing(
     )
     archives = pipeline._pack_unpacked_outputs(config=config, game_version="16.4")
     assert archives == tuple()
+
+
+def test_resolve_pack_extra_files_should_use_config_dir_first(tmp_path: Path) -> None:
+    """显式配置目录时应优先使用该目录。"""
+
+    configured_dir = tmp_path / "extras"
+    configured_dir.mkdir(parents=True, exist_ok=True)
+    first = configured_dir / "食用说明.txt"
+    second = configured_dir / "license.txt"
+    first.write_text("readme", encoding="utf-8")
+    second.write_text("license", encoding="utf-8")
+
+    config = PipelineConfig(
+        output_path=tmp_path / "output",
+        pack_extra_dir=configured_dir,
+    )
+    resolved = pipeline._resolve_pack_extra_files(config=config)
+    assert resolved == (first.resolve(), second.resolve())
+
+
+def test_resolve_pack_extra_files_should_return_empty_when_missing(tmp_path: Path) -> None:
+    """未找到附加文件目录时应返回空集合。"""
+
+    config = PipelineConfig(
+        output_path=tmp_path / "output",
+        pack_extra_dir=tmp_path / "missing",
+    )
+    resolved = pipeline._resolve_pack_extra_files(config=config)
+    assert resolved == tuple()
+
+
+def test_resolve_pack_extra_files_should_use_bundled_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """未显式配置时应读取项目内置 extra 目录。"""
+
+    bundled_dir = tmp_path / "bundled"
+    bundled_dir.mkdir(parents=True, exist_ok=True)
+    first = bundled_dir / "食用说明.txt"
+    second = bundled_dir / "license.txt"
+    first.write_text("readme", encoding="utf-8")
+    second.write_text("license", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline, "DEFAULT_BUNDLED_PACK_EXTRA_DIR", bundled_dir)
+    config = PipelineConfig(output_path=tmp_path / "output")
+    resolved = pipeline._resolve_pack_extra_files(config=config)
+    assert resolved == (first.resolve(), second.resolve())
 
 
 def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
