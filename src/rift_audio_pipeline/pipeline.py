@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from loguru import logger
 
-from rift_audio_pipeline.baidu_pan import ensure_official_sdk_path
+from rift_audio_pipeline.baidu.sdk import ensure_official_sdk_path
 from rift_audio_pipeline.config import PipelineConfig
 
 
