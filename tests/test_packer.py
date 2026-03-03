@@ -168,16 +168,17 @@ def test_pack_all_should_pack_each_subdirectory(
         audio_dir=audio_dir,
         output_dir=tmp_path / "archives",
         version="16.4",
+        audio_type="VO",
         report_dir=report_dir,
     )
 
     assert calls[0][0] == annie_dir
     assert calls[1][0] == zac_dir
-    assert calls[0][1] == "Annie-16.4.7z"
-    assert calls[1][1] == "Zac-16.4.7z"
+    assert calls[0][1] == "Annie-16.4-VO.7z"
+    assert calls[1][1] == "Zac-16.4-VO.7z"
     assert calls[0][2] == (report_dir / "_Annie_metadata.yaml").resolve()
     assert calls[1][2] is None
     assert archives == (
-        tmp_path / "archives" / "Annie-16.4.7z",
-        tmp_path / "archives" / "Zac-16.4.7z",
+        tmp_path / "archives" / "Annie-16.4-VO.7z",
+        tmp_path / "archives" / "Zac-16.4-VO.7z",
     )

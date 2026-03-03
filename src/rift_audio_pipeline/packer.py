@@ -85,6 +85,7 @@ def pack_all(
     output_dir: Path,
     *,
     version: str | None = None,
+    audio_type: str | None = None,
     report_dir: Path | None = None,
     password: str | None = None,
     encrypt_filenames: bool = True,
@@ -98,6 +99,7 @@ def pack_all(
         audio_dir: 音频目录。
         output_dir: 产物目录。
         version: 压缩包版本后缀（例如 `16.4`）。
+        audio_type: 压缩包类型后缀（例如 `VO`）。
         report_dir: 报告目录，命名规则为 `_<实体ID>_metadata.yaml`。
         password: 压缩包密码；为空时不启用密码。
         encrypt_filenames: 启用密码时是否开启文件名加密（`-mhe=on`）。
@@ -126,7 +128,11 @@ def pack_all(
             pack_champion(
                 champion_dir=item,
                 output_path=output_dir,
-                archive_name=_build_archive_name(directory_name=item.name, version=version),
+                archive_name=_build_archive_name(
+                    directory_name=item.name,
+                    version=version,
+                    audio_type=audio_type,
+                ),
                 report_file=_resolve_report_file(folder_name=item.name, report_dir=report_dir),
                 password=password,
                 encrypt_filenames=encrypt_filenames,
@@ -194,12 +200,19 @@ def _normalize_archive_name(archive_name: str | None, fallback: str) -> str:
     return raw_name
 
 
-def _build_archive_name(directory_name: str, version: str | None) -> str:
+def _build_archive_name(
+    directory_name: str,
+    version: str | None,
+    audio_type: str | None,
+) -> str:
     """构建压缩包文件名。"""
 
-    if version is None or not version.strip():
-        return f"{directory_name}{ARCHIVE_SUFFIX}"
-    return f"{directory_name}-{version.strip()}{ARCHIVE_SUFFIX}"
+    parts = [directory_name]
+    if version is not None and version.strip():
+        parts.append(version.strip())
+    if audio_type is not None and audio_type.strip():
+        parts.append(audio_type.strip())
+    return f"{'-'.join(parts)}{ARCHIVE_SUFFIX}"
 
 
 def _resolve_report_file(folder_name: str, report_dir: Path | None) -> Path | None:

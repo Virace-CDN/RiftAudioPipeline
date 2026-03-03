@@ -23,7 +23,7 @@ def test_pack_unpacked_outputs_should_pack_existing_targets(
     champions_dir.mkdir(parents=True, exist_ok=True)
     maps_dir.mkdir(parents=True, exist_ok=True)
 
-    calls: list[tuple[Path, Path, str | None, Path | None]] = []
+    calls: list[tuple[Path, Path, str | None, str | None, Path | None]] = []
     extra_files = (tmp_path / "extra" / "说明.txt",)
     extra_files[0].parent.mkdir(parents=True, exist_ok=True)
     extra_files[0].write_text("x", encoding="utf-8")
@@ -39,6 +39,7 @@ def test_pack_unpacked_outputs_should_pack_existing_targets(
         output_dir: Path,
         *,
         version: str | None = None,
+        audio_type: str | None = None,
         report_dir: Path | None = None,
         password: str | None = None,
         encrypt_filenames: bool = True,
@@ -47,7 +48,7 @@ def test_pack_unpacked_outputs_should_pack_existing_targets(
         seven_zip_executable: str | None = None,
     ) -> tuple[Path, ...]:
         del password, encrypt_filenames, compression_level, seven_zip_executable
-        calls.append((audio_dir, output_dir, version, report_dir))
+        calls.append((audio_dir, output_dir, version, audio_type, report_dir))
         assert tuple(extra_files) == extra_files_expected
         return (output_dir / f"{audio_dir.name}.7z",)
 
@@ -68,12 +69,14 @@ def test_pack_unpacked_outputs_should_pack_existing_targets(
             champions_dir,
             output_path / "packages" / "16.4" / "champions",
             "16.4",
+            "VO",
             champion_report_dir,
         ),
         (
             maps_dir,
             output_path / "packages" / "16.4" / "maps",
             "16.4",
+            "VO",
             maps_report_dir,
         ),
     ]
@@ -149,6 +152,26 @@ def test_resolve_pack_extra_files_should_use_bundled_default(
     config = PipelineConfig(output_path=tmp_path / "output")
     resolved = pipeline._resolve_pack_extra_files(config=config)
     assert resolved == (first.resolve(), second.resolve())
+
+
+def test_resolve_pack_archive_type_should_return_single_type(tmp_path: Path) -> None:
+    """仅配置单一音频类型时应返回类型后缀。"""
+
+    config = PipelineConfig(
+        output_path=tmp_path / "output",
+        audio_types=("vo",),
+    )
+    assert pipeline._resolve_pack_archive_type(config=config) == "VO"
+
+
+def test_resolve_pack_archive_type_should_return_none_when_multiple(tmp_path: Path) -> None:
+    """配置多类型时应返回 None（混合模式）。"""
+
+    config = PipelineConfig(
+        output_path=tmp_path / "output",
+        audio_types=("VO", "SFX"),
+    )
+    assert pipeline._resolve_pack_archive_type(config=config) is None
 
 
 def test_upload_archives_and_manifest_should_upload_archives_and_manifest(

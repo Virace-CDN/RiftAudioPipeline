@@ -416,8 +416,11 @@ def _pack_unpacked_outputs(config: PipelineConfig, game_version: str) -> tuple[P
 
     archives: list[Path] = []
     extra_files = _resolve_pack_extra_files(config=config)
+    archive_audio_type = _resolve_pack_archive_type(config=config)
     if extra_files:
         logger.info("打包附加文件已启用：{}", ", ".join(str(item) for item in extra_files))
+    if archive_audio_type is not None:
+        logger.info("打包命名类型后缀：{}", archive_audio_type)
     pack_targets = (
         (
             "champions",
@@ -438,6 +441,7 @@ def _pack_unpacked_outputs(config: PipelineConfig, game_version: str) -> tuple[P
             audio_dir=target_dir,
             output_dir=target_output_dir,
             version=game_version,
+            audio_type=archive_audio_type,
             report_dir=report_dir,
             password=config.pack_password,
             encrypt_filenames=config.pack_encrypt_filenames,
@@ -554,6 +558,21 @@ def _resolve_pack_extra_files(config: PipelineConfig) -> tuple[Path, ...]:
         if files:
             return tuple(files)
     return tuple()
+
+
+def _resolve_pack_archive_type(config: PipelineConfig) -> str | None:
+    """解析压缩包命名的类型后缀。"""
+
+    normalized_types = sorted(
+        {
+            item.strip().upper()
+            for item in config.audio_types
+            if isinstance(item, str) and item.strip()
+        }
+    )
+    if len(normalized_types) == 1:
+        return normalized_types[0]
+    return None
 
 
 def _build_remote_archive_name(game_version: str, archive_name: str) -> str:
