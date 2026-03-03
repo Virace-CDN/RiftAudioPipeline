@@ -14,6 +14,7 @@ wheels/
 
 # Test artifacts
 output/
+temp/
 
 # Codex memory and local style
 .ai_memory/
@@ -22,6 +23,7 @@ output/
 # Local secrets and runtime config
 .config/
 .dev.baidu
+state/voice_filter_results/
 
 # Local planning docs (not committed)
 docs/LOL语音资源自动化计划书.md

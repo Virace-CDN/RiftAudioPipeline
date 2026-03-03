@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from argparse import BooleanOptionalAction
 
 from rift_audio_pipeline.config import PipelineConfig
 from rift_audio_pipeline.pipeline import run_pipeline
@@ -32,6 +33,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="解包音频类型，例如 VO",
     )
     parser.add_argument("--temp-dir", default=None, help="临时目录")
+    parser.add_argument(
+        "--local-bin-dir",
+        default=None,
+        help="本地 bin 目录（将写入 output/manifest/<version>/bin_input）",
+    )
+    parser.add_argument(
+        "--unpack-workers",
+        type=int,
+        default=2,
+        help="解包并发线程数（低磁盘模式建议 1-2）",
+    )
+    parser.add_argument(
+        "--low-disk-mode",
+        action=BooleanOptionalAction,
+        default=True,
+        help="低磁盘模式，启用时按实体顺序解包并减少峰值占用",
+    )
     parser.add_argument(
         "--baidu-remote-dir",
         default="/apps/lol-audio/",

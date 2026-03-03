@@ -16,6 +16,12 @@ uv sync
 uv run rift-audio-pipeline --output-path ./output
 ```
 
+开发环境（含 `pytest`）：
+
+```bash
+uv sync --dev
+```
+
 ## 依赖版本（已固定）
 
 当前项目依赖已固定在 `pyproject.toml`：
@@ -23,9 +29,24 @@ uv run rift-audio-pipeline --output-path ./output
 - `httpx==0.28.1`
 - `loguru==0.7.3`
 - `python-dateutil==2.9.0.post0`
-- `riotmanifest==2.0.0`
+- `riotmanifest==2.1.0`
 - `urllib3==2.6.3`
-- `lol-audio-unpack` 固定到 Git 提交 `0f8fa40c15fc4212b2b0d492ccfa9ef436470f81`
+- `lol-audio-unpack` 跟踪 `v3-test` 分支（`@v3-test`）
+
+## 低磁盘模式建议（GitHub Actions）
+
+```bash
+uv run rift-audio-pipeline \
+  --output-path ./temp/lol_output \
+  --temp-dir ./temp/mini_game \
+  --local-bin-dir ./temp/downloaded_bins \
+  --unpack-workers 1 \
+  --low-disk-mode
+```
+
+- 运行时最小游戏环境会放在项目根目录 `temp/mini_game`，便于外部检查。
+- `DataUpdater` / `BinUpdater` 执行完成后，会自动清理 LCU WAD 与 `bin_input`，降低峰值空间。
+- `--low-disk-mode` 会按英雄/地图顺序解包，配合较小 `worker` 进一步降低磁盘压力。
 
 ## 百度 OAuth（本地授权码模式）
 

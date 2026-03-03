@@ -28,6 +28,9 @@ class PipelineConfig:
         baidu_pan_app_key: 百度开放平台 app key。
         baidu_pan_secret_key: 百度开放平台 secret key。
         baidu_pan_refresh_token: 百度开放平台 refresh token。
+        local_bin_dir: 本地 bin 输入目录（写入 `manifest/<version>/bin_input`）。
+        unpack_workers: 解包并发线程数。
+        low_disk_mode: 低磁盘模式；启用时按实体顺序解包以降低峰值空间占用。
         dry_run: 仅检测，不执行耗时步骤。
     """
 
@@ -41,6 +44,9 @@ class PipelineConfig:
     baidu_pan_app_key: str | None = None
     baidu_pan_secret_key: str | None = None
     baidu_pan_refresh_token: str | None = None
+    local_bin_dir: Path | None = None
+    unpack_workers: int = 2
+    low_disk_mode: bool = True
     dry_run: bool = False
 
     @classmethod
@@ -60,6 +66,10 @@ class PipelineConfig:
         output_path = Path(args.output_path).expanduser().resolve()
         game_path = Path(args.game_path).expanduser().resolve() if args.game_path else None
         temp_dir = Path(args.temp_dir).expanduser().resolve() if args.temp_dir else None
+        local_bin_dir = (
+            Path(args.local_bin_dir).expanduser().resolve() if args.local_bin_dir else None
+        )
+        unpack_workers = max(1, int(args.unpack_workers))
 
         return cls(
             output_path=output_path,
@@ -72,5 +82,8 @@ class PipelineConfig:
             baidu_pan_app_key=args.baidu_app_key or env_app_key,
             baidu_pan_secret_key=args.baidu_secret_key or env_secret_key,
             baidu_pan_refresh_token=args.baidu_refresh_token or env_refresh_token,
+            local_bin_dir=local_bin_dir,
+            unpack_workers=unpack_workers,
+            low_disk_mode=bool(args.low_disk_mode),
             dry_run=args.dry_run,
         )

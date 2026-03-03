@@ -493,7 +493,10 @@ def test_upload_file_should_complete_precreate_upload_create(
     payload = client.upload_file(local_path=local_file, remote_path="upload/sample.txt")
 
     assert payload["path"] == "/apps/rift-audio-pipeline/upload/sample.txt"
-    assert runtime.fileupload_api.precreate_calls[-1]["path"] == "/apps/rift-audio-pipeline/upload/sample.txt"
+    assert (
+        runtime.fileupload_api.precreate_calls[-1]["path"]
+        == "/apps/rift-audio-pipeline/upload/sample.txt"
+    )
     assert len(runtime.fileupload_api.part_calls) == 1
     assert runtime.fileupload_api.create_calls[-1]["isdir"] == 0
 
