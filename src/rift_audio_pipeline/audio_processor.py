@@ -124,6 +124,7 @@ def resolve_runtime_wad_paths(
     region: str,
     champion_ids: Sequence[int],
     map_ids: Sequence[int],
+    include_root_wad: bool = True,
 ) -> tuple[str, ...]:
     """从 `data` 文件解析目标实体对应的运行时 WAD 路径。
 
@@ -137,6 +138,7 @@ def resolve_runtime_wad_paths(
         region: 语言区域（例如 `zh_CN`）。
         champion_ids: 英雄 ID 集合。
         map_ids: 地图 ID 集合。
+        include_root_wad: 是否包含 `wad.root` 路径。
 
     Returns:
         去重并排序后的运行时 WAD 路径集合。
@@ -160,6 +162,7 @@ def resolve_runtime_wad_paths(
             wad_paths = _extract_runtime_wad_paths_from_payload(
                 payload_item=champion_data,
                 region=region,
+                include_root_wad=include_root_wad,
             )
             for path in wad_paths:
                 runtime_paths.setdefault(path.casefold(), path)
@@ -171,6 +174,7 @@ def resolve_runtime_wad_paths(
             wad_paths = _extract_runtime_wad_paths_from_payload(
                 payload_item=map_data,
                 region=region,
+                include_root_wad=include_root_wad,
             )
             for path in wad_paths:
                 runtime_paths.setdefault(path.casefold(), path)
@@ -303,6 +307,7 @@ def _initialize_unpack_config(game_path: Path, output_path: Path, region: str) -
 def _extract_runtime_wad_paths_from_payload(
     payload_item: object,
     region: str,
+    include_root_wad: bool,
 ) -> tuple[str, ...]:
     """从 `data` 条目提取根 WAD 与区域 WAD 运行时路径。"""
 
@@ -312,10 +317,9 @@ def _extract_runtime_wad_paths_from_payload(
     if not isinstance(wad_raw, Mapping):
         return tuple()
 
-    candidates = [
-        wad_raw.get("root"),
-        wad_raw.get(region),
-    ]
+    candidates = [wad_raw.get(region)]
+    if include_root_wad:
+        candidates.insert(0, wad_raw.get("root"))
     normalized: dict[str, str] = {}
     for item in candidates:
         if not isinstance(item, str):

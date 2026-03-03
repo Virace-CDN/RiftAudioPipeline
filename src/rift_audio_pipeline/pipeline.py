@@ -30,6 +30,7 @@ from rift_audio_pipeline.bin_extractor import seed_bin_input_from_directory
 from rift_audio_pipeline.config import PipelineConfig
 from rift_audio_pipeline.game_dir_builder import build_simulated_dir
 from rift_audio_pipeline.game_dir_builder import check_local_game_path
+from rift_audio_pipeline.game_dir_builder import cleanup_lcu_data_wads
 from rift_audio_pipeline.game_dir_builder import cleanup_updater_inputs
 from rift_audio_pipeline.game_dir_builder import write_content_metadata
 from rift_audio_pipeline.manifest_ops import DECISION_REASON_FIRST_RUN
@@ -171,6 +172,9 @@ def run_pipeline(config: PipelineConfig) -> int:
     if config.dry_run:
         logger.info("dry-run 启用：仅做更新判定，不执行后续任务。")
         return 0
+    if not config.enable_pack or not config.enable_upload:
+        logger.error("检测到版本更新，但当前流程要求必须启用打包与上传：--enable-pack --enable-upload")
+        return 1
 
     runtime_game_path, runtime_is_simulated = _resolve_runtime_game_path(
         config=config,
@@ -217,6 +221,12 @@ def run_pipeline(config: PipelineConfig) -> int:
     except Exception as error:  # noqa: BLE001
         logger.error("DataUpdater 执行失败，error={}", error)
         return 1
+    if runtime_is_simulated:
+        removed_lcu_data_wads = cleanup_lcu_data_wads(
+            game_path=runtime_game_path,
+            region=config.game_region,
+        )
+        logger.info("DataUpdater 后已清理 LCU 输入 WAD：removed_count={}", removed_lcu_data_wads)
 
     if secondary_filter_result is not None and secondary_filter_version_dir is not None:
         if data_file_base.parent != secondary_filter_version_dir:
@@ -265,6 +275,7 @@ def run_pipeline(config: PipelineConfig) -> int:
             region=config.game_region,
             champion_ids=runtime_wad_targets.champion_ids,
             map_ids=runtime_wad_targets.map_ids,
+            include_root_wad=secondary_filter_result is None,
         )
         if secondary_unpack_paths is not None:
             runtime_wad_paths = _merge_runtime_wad_paths(
@@ -272,6 +283,7 @@ def run_pipeline(config: PipelineConfig) -> int:
                 _build_runtime_wad_paths_from_manifest_paths(
                     manifest_paths=secondary_unpack_paths,
                     region=config.game_region,
+                    include_root_wad=False,
                 ),
             )
         if not runtime_wad_paths:
@@ -329,39 +341,41 @@ def run_pipeline(config: PipelineConfig) -> int:
                 map_ids=targets.map_ids,
                 max_workers=config.unpack_workers,
             )
+        if runtime_is_simulated:
+            removed_runtime_wads, removed_download_cache = _cleanup_simulated_runtime_files(
+                runtime_game_path=runtime_game_path,
+                runtime_download_dir=runtime_download_dir,
+            )
+            logger.info(
+                "解包后已清理模拟目录临时文件：runtime_wad_count={}, download_cache_count={}",
+                removed_runtime_wads,
+                removed_download_cache,
+            )
     except Exception as error:  # noqa: BLE001
         logger.error("解包阶段失败，error={}", error)
         return 1
 
-    if config.enable_pack:
-        try:
-            archives = _pack_unpacked_outputs(config=config, game_version=latest.game_version)
-        except Exception as error:  # noqa: BLE001
-            logger.error("打包阶段失败，error={}", error)
-            return 1
-        logger.info("打包阶段执行完成：archive_count={}", len(archives))
-        if config.enable_upload:
-            try:
-                upload_manifest = _upload_archives_and_manifest(
-                    config=config,
-                    game_version=latest.game_version,
-                    archives=archives,
-                )
-            except Exception as error:  # noqa: BLE001
-                logger.error("上传阶段失败，error={}", error)
-                return 1
-            if upload_manifest is not None:
-                logger.info("上传阶段执行完成：manifest_file={}", upload_manifest)
-                if runtime_is_simulated:
-                    removed_runtime_wads, removed_download_cache = _cleanup_simulated_runtime_files(
-                        runtime_game_path=runtime_game_path,
-                        runtime_download_dir=runtime_download_dir,
-                    )
-                    logger.info(
-                        "模拟目录临时文件清理完成：runtime_wad_count={}, download_cache_count={}",
-                        removed_runtime_wads,
-                        removed_download_cache,
-                    )
+    try:
+        archives = _pack_unpacked_outputs(config=config, game_version=latest.game_version)
+    except Exception as error:  # noqa: BLE001
+        logger.error("打包阶段失败，error={}", error)
+        return 1
+    logger.info("打包阶段执行完成：archive_count={}", len(archives))
+    removed_audio_files = _cleanup_version_audio_outputs(
+        version_audio_dir=config.output_path / "audios" / latest.game_version
+    )
+    logger.info("打包后已清理音频目录文件：removed_count={}", removed_audio_files)
+    try:
+        upload_manifest = _upload_archives_and_manifest(
+            config=config,
+            game_version=latest.game_version,
+            archives=archives,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.error("上传阶段失败，error={}", error)
+        return 1
+    if upload_manifest is not None:
+        logger.info("上传阶段执行完成：manifest_file={}", upload_manifest)
 
     saved_state = build_local_state(latest_versions=latest)
     saved_file = save_local_state(state=saved_state, state_file=DEFAULT_LOCAL_STATE_FILE)
@@ -865,6 +879,7 @@ def _merge_runtime_wad_paths(*groups: tuple[str, ...]) -> tuple[str, ...]:
 def _build_runtime_wad_paths_from_manifest_paths(
     manifest_paths: tuple[str, ...],
     region: str,
+    include_root_wad: bool = True,
 ) -> tuple[str, ...]:
     """将 manifest WAD 路径转换为运行时根/区域路径集合。"""
 
@@ -883,9 +898,23 @@ def _build_runtime_wad_paths_from_manifest_paths(
         runtime_paths.setdefault(region_runtime_path.casefold(), region_runtime_path)
 
         lowered = normalized.casefold()
-        if lowered.endswith(region_suffix.casefold()):
+        if include_root_wad and lowered.endswith(region_suffix.casefold()):
             root_manifest_path = f"{normalized[: len(normalized) - len(region_suffix)]}.wad.client"
             root_runtime_path = f"Game/{root_manifest_path}"
             runtime_paths.setdefault(root_runtime_path.casefold(), root_runtime_path)
 
     return tuple(sorted(runtime_paths.values(), key=str.casefold))
+
+
+def _cleanup_version_audio_outputs(version_audio_dir: Path) -> int:
+    """清理已打包版本的音频目录，降低上传阶段磁盘占用。"""
+
+    if not version_audio_dir.is_dir():
+        return 0
+
+    removed_files = 0
+    for item in version_audio_dir.rglob("*"):
+        if item.is_file():
+            removed_files += 1
+    shutil.rmtree(version_audio_dir, ignore_errors=True)
+    return removed_files

@@ -336,3 +336,45 @@ def test_resolve_runtime_wad_paths_should_return_all_when_targets_empty(
         "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
         "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
     }
+
+
+def test_resolve_runtime_wad_paths_should_skip_root_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """关闭 include_root_wad 时应仅返回区域 WAD 路径。"""
+
+    monkeypatch.setattr(
+        manager_utils,
+        "read_data",
+        lambda _: {
+            "champions": {
+                "1": {
+                    "wad": {
+                        "root": "Game/DATA/FINAL/Champions/Annie.wad.client",
+                        "zh_CN": "DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+                    }
+                },
+            },
+            "maps": {
+                "11": {
+                    "wad": {
+                        "root": "DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
+                        "zh_CN": "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
+                    }
+                }
+            },
+        },
+    )
+
+    wad_paths = resolve_runtime_wad_paths(
+        data_file_base=tmp_path / "manifest" / "16.4" / "data",
+        region="zh_CN",
+        champion_ids=(1,),
+        map_ids=(11,),
+        include_root_wad=False,
+    )
+    assert set(wad_paths) == {
+        "Game/DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+        "Game/DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
+    }

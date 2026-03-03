@@ -178,6 +178,40 @@ def cleanup_updater_inputs(game_path: Path, version_dir: Path) -> tuple[int, int
     return removed_lcu_wad_count, removed_bin_file_count
 
 
+def cleanup_lcu_data_wads(game_path: Path, region: str) -> int:
+    """清理 DataUpdater 所需的 LCU WAD 输入文件。
+
+    清理范围：
+    - `default-assets*.wad`
+    - `{region}-assets.wad`
+
+    Args:
+        game_path: 运行时游戏目录。
+        region: 语言区域（例如 `zh_CN`）。
+
+    Returns:
+        已删除文件数。
+    """
+
+    lcu_dir = game_path / "LeagueClient" / "Plugins" / "rcp-be-lol-game-data"
+    if not lcu_dir.is_dir():
+        return 0
+
+    targets: dict[str, Path] = {}
+    patterns = (f"{region}-assets.wad", "default-assets*.wad")
+    for pattern in patterns:
+        for file_path in lcu_dir.glob(pattern):
+            if not file_path.is_file():
+                continue
+            targets[file_path.as_posix().casefold()] = file_path
+
+    removed_count = 0
+    for file_path in sorted(targets.values(), key=lambda item: item.as_posix().casefold()):
+        file_path.unlink(missing_ok=True)
+        removed_count += 1
+    return removed_count
+
+
 def _normalize_relative_game_path(relative_path: str) -> Path:
     """规范化并校验游戏目录内相对路径。"""
 

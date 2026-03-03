@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from rift_audio_pipeline.game_dir_builder import build_simulated_dir
+from rift_audio_pipeline.game_dir_builder import cleanup_lcu_data_wads
 from rift_audio_pipeline.game_dir_builder import cleanup_updater_inputs
 from rift_audio_pipeline.game_dir_builder import stage_wad_file
 from rift_audio_pipeline.game_dir_builder import write_content_metadata
@@ -94,3 +95,24 @@ def test_cleanup_updater_inputs_should_remove_lcu_wad_and_bin_input(tmp_path: Pa
     assert (lcu_dir / "keep.txt").exists()
     assert not (version_dir / "bin_input").exists()
     assert not (version_dir / ".use_local_bin").exists()
+
+
+def test_cleanup_lcu_data_wads_should_remove_default_and_region_files(tmp_path: Path) -> None:
+    """应仅清理 default-assets*.wad 与 region-assets.wad。"""
+
+    game_dir = build_simulated_dir(tmp_path / "sim_game")
+    lcu_dir = game_dir / "LeagueClient" / "Plugins" / "rcp-be-lol-game-data"
+    (lcu_dir / "default-assets.wad").write_bytes(b"1")
+    (lcu_dir / "default-assets2.wad").write_bytes(b"2")
+    (lcu_dir / "zh_CN-assets.wad").write_bytes(b"3")
+    (lcu_dir / "en_US-assets.wad").write_bytes(b"4")
+    (lcu_dir / "keep.txt").write_text("keep", encoding="utf-8")
+
+    removed_count = cleanup_lcu_data_wads(game_path=game_dir, region="zh_CN")
+
+    assert removed_count == 3
+    assert not (lcu_dir / "default-assets.wad").exists()
+    assert not (lcu_dir / "default-assets2.wad").exists()
+    assert not (lcu_dir / "zh_CN-assets.wad").exists()
+    assert (lcu_dir / "en_US-assets.wad").exists()
+    assert (lcu_dir / "keep.txt").exists()
