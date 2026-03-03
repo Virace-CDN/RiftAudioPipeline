@@ -83,4 +83,11 @@ uv run rift-baidu-oauth refresh-token --dev-config .dev.baidu
 - 每次索引有变化时会回传两份索引文件：
   - `upload_manifest.json`：机器可读索引（幂等校验基线）。
   - `upload_manifest_readable.txt`：人类可读索引（便于网盘内检索与排查）。
+- `upload_manifest.json` 内含 `database` 视图（按 `target_group + resource_type + entity_key` 聚合多版本），用于将索引作为长期数据库维护。
 - 首次执行可接受远端索引缺失并自动初始化目录与索引；差异更新流程若远端缺失 `upload_manifest.json` 会直接终止，避免在索引失真状态继续上传。
+
+## 差异更新日志
+
+- 每次 diff 更新会产出并上传两份日志到 `update_logs/<目标版本>/`：
+  - `*.json`：结构化日志，包含版本区间、WAD 变化、二次筛选明细、上传结果与原因。
+  - `*.txt`：人类可读日志，便于网盘 Web 端检索与追踪。

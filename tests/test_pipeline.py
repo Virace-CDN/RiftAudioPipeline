@@ -280,6 +280,14 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
     assert "## OLD 归档资源" in readable_content
     assert "VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z" in readable_content
     assert payload["entry_count"] == 2
+    assert payload["database_schema_version"] == 1
+    assert payload["database_entry_count"] == 2
+    database_values = list(payload["database"].values())
+    assert any(
+        item.get("entity_key") == "1·annie·黑暗之女·安妮"
+        and item.get("latest_game_version") == "16.4"
+        for item in database_values
+    )
     assert payload["last_run"]["archive_count"] == 2
     assert payload["last_run"]["uploaded_count"] == 2
     assert payload["last_run"]["skipped_count"] == 0
@@ -545,6 +553,13 @@ def test_upload_archives_and_manifest_should_archive_old_version_before_upload(
         == "/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z"
     )
     assert payload["last_run"]["uploaded_count"] == 1
+    database_values = list(payload["database"].values())
+    assert any(
+        item.get("entity_key") == "1·annie·黑暗之女·安妮"
+        and item.get("latest_game_version") == "16.4"
+        and len(item.get("versions", [])) >= 2
+        for item in database_values
+    )
 
 
 def test_upload_archives_and_manifest_should_fail_when_remote_file_exists_without_index(
@@ -749,6 +764,62 @@ def test_cleanup_simulated_runtime_files_should_remove_wads_and_downloads(
     assert not runtime_download_dir.exists()
 
 
+def test_build_update_log_payload_should_include_diff_details() -> None:
+    """更新日志负载应包含版本区间、WAD 明细与上传结果统计。"""
+
+    decision = SimpleNamespace(
+        reason="region_manifest_changed",
+        previous_state=SimpleNamespace(game_version="16.3"),
+        wad_changes=SimpleNamespace(
+            added_paths=("DATA/FINAL/Champions/Annie.zh_CN.wad.client",),
+            changed_paths=("DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",),
+            removed_paths=tuple(),
+            update_paths=(
+                "DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+                "DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
+            ),
+        ),
+    )
+    target_entities = SimpleNamespace(champion_aliases=("annie",), map_ids=("11",))
+    targets = SimpleNamespace(champion_ids=(1,), map_ids=(11,))
+    upload_run_records = [
+        {"status": "uploaded", "remote_name": "1·annie-16.4-VO.7z", "reason": "uploaded"},
+        {
+            "status": "skipped",
+            "remote_name": "11·map11-16.4-VO.7z",
+            "reason": "remote_index_hit_same_version",
+        },
+        {
+            "status": "archived_old",
+            "remote_name": "1·annie-16.3-VO.7z",
+            "reason": "previous_version_archived_to_old_bucket",
+        },
+    ]
+
+    payload = pipeline._build_update_log_payload(
+        decision=decision,
+        game_version="16.4",
+        executed_at="2026-03-04T00:00:00Z",
+        target_entities=target_entities,
+        targets=targets,
+        secondary_filter_result=None,
+        upload_run_records=upload_run_records,
+    )
+    assert payload["from_game_version"] == "16.3"
+    assert payload["to_game_version"] == "16.4"
+    assert payload["wad_changes"]["changed_paths"] == [
+        "DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client"
+    ]
+    assert payload["upload_summary"]["uploaded_count"] == 1
+    assert payload["upload_summary"]["skipped_count"] == 1
+    assert payload["upload_summary"]["archived_count"] == 1
+
+    readable = pipeline._build_update_log_text(payload=payload)
+    assert "版本区间: 16.3 -> 16.4" in readable
+    assert "## WAD 变更" in readable
+    assert "## 上传结果" in readable
+
+
 def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -830,8 +901,9 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
         game_version: str,
         archives: tuple[Path, ...],
         allow_missing_remote_index: bool = True,
+        run_record_collector: list[dict[str, object]] | None = None,
     ) -> Path:
-        del allow_missing_remote_index, config, game_version
+        del allow_missing_remote_index, config, game_version, run_record_collector
         upload_calls.append(tuple(path.name for path in archives))
         manifest_file = output_path / "packages" / "16.4" / "upload_manifest.json"
         manifest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -867,6 +939,7 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
         include_root_wad=True,
         unpack_workers=2,
         allow_missing_remote_index=True,
+        run_record_collector=[],
     )
 
     assert manifest_file == output_path / "packages" / "16.4" / "upload_manifest.json"

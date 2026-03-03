@@ -59,6 +59,9 @@ UPLOAD_MANIFEST_SCHEMA_VERSION = 2
 RESOURCE_TYPE_BUCKETS = ("VO", "SFX", "MUSIC")
 OLD_RESOURCE_BUCKET = "OLD"
 RESOURCE_TARGET_GROUPS = ("champions", "maps")
+UPLOAD_DATABASE_SCHEMA_VERSION = 1
+UPDATE_LOG_SCHEMA_VERSION = 1
+UPDATE_LOG_REMOTE_DIR = "update_logs"
 STREAMING_UPLOAD_QUEUE_SIZE = 1
 STREAMING_DISK_SPACE_MULTIPLIER = 3
 STREAMING_MIN_REQUIRED_BYTES = 512 * 1024 * 1024
@@ -373,6 +376,7 @@ def run_pipeline(config: PipelineConfig) -> int:
     )
     allow_missing_remote_index = decision.reason == DECISION_REASON_FIRST_RUN
     upload_manifest: Path | None = None
+    upload_run_records: list[dict[str, object]] = []
     effective_unpack_workers = _resolve_effective_unpack_workers(
         configured_workers=config.unpack_workers,
         runtime_is_simulated=runtime_is_simulated,
@@ -406,6 +410,7 @@ def run_pipeline(config: PipelineConfig) -> int:
                 include_root_wad=secondary_filter_result is None,
                 unpack_workers=effective_unpack_workers,
                 allow_missing_remote_index=allow_missing_remote_index,
+                run_record_collector=upload_run_records,
             )
         else:
             run_unpack(
@@ -447,12 +452,32 @@ def run_pipeline(config: PipelineConfig) -> int:
                 game_version=latest.game_version,
                 archives=archives,
                 allow_missing_remote_index=allow_missing_remote_index,
+                run_record_collector=upload_run_records,
             )
         except Exception as error:  # noqa: BLE001
             logger.error("上传阶段失败，error={}", error)
             return 1
         if upload_manifest is not None:
             logger.info("上传阶段执行完成：manifest_file={}", upload_manifest)
+
+    try:
+        update_log_json, update_log_text = _write_and_upload_update_log_files(
+            config=config,
+            decision=decision,
+            game_version=latest.game_version,
+            target_entities=target_entities,
+            targets=targets,
+            secondary_filter_result=secondary_filter_result,
+            upload_run_records=upload_run_records,
+        )
+        logger.info(
+            "更新日志已生成并上传：json_file={}, text_file={}",
+            update_log_json,
+            update_log_text,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.error("更新日志阶段失败，error={}", error)
+        return 1
 
     saved_state = build_local_state(latest_versions=latest)
     saved_file = save_local_state(state=saved_state, state_file=DEFAULT_LOCAL_STATE_FILE)
@@ -508,6 +533,7 @@ def _run_streaming_unpack_pack_upload(
     include_root_wad: bool,
     unpack_workers: int,
     allow_missing_remote_index: bool,
+    run_record_collector: list[dict[str, object]],
 ) -> Path | None:
     """执行实体级流式流水线：解包 -> 打包 -> 上传 -> 清理。"""
 
@@ -548,6 +574,7 @@ def _run_streaming_unpack_pack_upload(
             "upload_errors": upload_errors,
             "upload_manifest_holder": upload_manifest_holder,
             "allow_missing_remote_index": allow_missing_remote_index,
+            "run_record_collector": run_record_collector,
         },
         daemon=True,
     )
@@ -682,6 +709,7 @@ def _run_streaming_upload_worker(
     upload_errors: list[Exception],
     upload_manifest_holder: list[Path | None],
     allow_missing_remote_index: bool,
+    run_record_collector: list[dict[str, object]],
 ) -> None:
     """消费流式打包产物并执行上传与压缩包清理。"""
 
@@ -695,6 +723,7 @@ def _run_streaming_upload_worker(
                 game_version=game_version,
                 archives=(artifact.archive_path,),
                 allow_missing_remote_index=allow_missing_remote_index,
+                run_record_collector=run_record_collector,
             )
             if manifest_file is not None:
                 upload_manifest_holder[0] = manifest_file
@@ -1043,6 +1072,7 @@ def _upload_archives_and_manifest(
     game_version: str,
     archives: tuple[Path, ...],
     allow_missing_remote_index: bool = True,
+    run_record_collector: list[dict[str, object]] | None = None,
 ) -> Path | None:
     """将打包产物上传到百度网盘，并同步本次上传清单。"""
 
@@ -1126,6 +1156,7 @@ def _upload_archives_and_manifest(
                             "resource_type": upload_layout.resource_type,
                             "entity_key": upload_layout.entity_key,
                             "status": "skipped",
+                            "reason": "remote_index_hit_same_version",
                         }
                     )
                     continue
@@ -1169,6 +1200,7 @@ def _upload_archives_and_manifest(
                     "resource_type": upload_layout.resource_type,
                     "entity_key": upload_layout.entity_key,
                     "status": "uploaded",
+                    "reason": "uploaded",
                     "response": response,
                 }
             )
@@ -1178,6 +1210,7 @@ def _upload_archives_and_manifest(
             index=remote_index,
             run_entries=run_entries,
             executed_at=executed_at,
+            remote_dir=config.baidu_pan_remote_dir,
         )
         manifest_file.parent.mkdir(parents=True, exist_ok=True)
         manifest_file.write_text(
@@ -1193,6 +1226,8 @@ def _upload_archives_and_manifest(
             ),
             encoding="utf-8",
         )
+        if run_record_collector is not None:
+            run_record_collector.extend(run_entries)
         if has_index_changes:
             client.upload_file(local_path=manifest_file, remote_path=UPLOAD_MANIFEST_FILE_NAME)
             client.upload_file(
@@ -1390,6 +1425,7 @@ def _archive_remote_old_versions(
                 "resource_type": layout.resource_type,
                 "entity_key": layout.entity_key,
                 "status": "archived_old",
+                "reason": "previous_version_archived_to_old_bucket",
             }
         )
     return archived_entries
@@ -1551,6 +1587,325 @@ def _build_readable_upload_manifest_content(
     return "\n".join(lines)
 
 
+def _build_upload_database_payload(
+    index: dict[str, dict[str, object]],
+    remote_dir: str,
+) -> dict[str, dict[str, object]]:
+    """将远端索引聚合为实体维度数据库视图。"""
+
+    grouped: dict[str, dict[str, object]] = {}
+    for entry in sorted(
+        index.values(),
+        key=lambda item: str(item.get("remote_path", "")).casefold(),
+    ):
+        metadata = _resolve_index_entry_metadata(entry=entry, remote_dir=remote_dir)
+        if metadata.target_group is None or metadata.resource_type is None:
+            continue
+        entity_key = metadata.entity_key or metadata.remote_name
+        bucket = OLD_RESOURCE_BUCKET if metadata.is_old_bucket else metadata.resource_type
+        db_key = f"{metadata.target_group}|{metadata.resource_type}|{entity_key}".casefold()
+        bucket_obj = grouped.get(db_key)
+        if bucket_obj is None:
+            bucket_obj = {
+                "entity_key": entity_key,
+                "target_group": metadata.target_group,
+                "resource_type": metadata.resource_type,
+                "versions": [],
+            }
+            grouped[db_key] = bucket_obj
+        versions = bucket_obj["versions"]
+        if not isinstance(versions, list):
+            continue
+        versions.append(
+            {
+                "game_version": metadata.game_version,
+                "remote_name": metadata.remote_name,
+                "remote_path": metadata.remote_path,
+                "bucket": bucket,
+                "is_archived": metadata.is_old_bucket,
+            }
+        )
+
+    normalized_grouped: dict[str, dict[str, object]] = {}
+    for key, value in grouped.items():
+        versions_obj = value.get("versions")
+        versions = versions_obj if isinstance(versions_obj, list) else []
+        sorted_versions = sorted(
+            versions,
+            key=lambda item: _parse_game_version_sort_key(
+                str(item.get("game_version") or ""),
+                str(item.get("remote_name") or ""),
+            ),
+        )
+        latest_version = next(
+            (
+                item
+                for item in reversed(sorted_versions)
+                if not bool(item.get("is_archived", False))
+            ),
+            sorted_versions[-1] if sorted_versions else None,
+        )
+        normalized_grouped[key] = {
+            "entity_key": value.get("entity_key"),
+            "target_group": value.get("target_group"),
+            "resource_type": value.get("resource_type"),
+            "latest_game_version": latest_version.get("game_version") if latest_version else None,
+            "latest_remote_name": latest_version.get("remote_name") if latest_version else None,
+            "versions": sorted_versions,
+        }
+    return normalized_grouped
+
+
+def _parse_game_version_sort_key(game_version: str, fallback: str) -> tuple[int, ...]:
+    """将版本号解析为可排序键。"""
+
+    normalized = game_version.strip()
+    if not normalized:
+        return (-1, -1, -1, -1)
+    parts = normalized.split(".")
+    parsed: list[int] = []
+    for part in parts[:4]:
+        if part.isdigit():
+            parsed.append(int(part))
+        else:
+            parsed.append(-1)
+    while len(parsed) < 4:
+        parsed.append(-1)
+    if all(value == -1 for value in parsed):
+        stable_tail = sum(ord(char) for char in fallback.casefold()) % 1_000_000
+        return (-1, -1, -1, stable_tail)
+    return tuple(parsed)
+
+
+def _write_and_upload_update_log_files(
+    config: PipelineConfig,
+    decision: object,
+    game_version: str,
+    target_entities: object,
+    targets: object,
+    secondary_filter_result: object | None,
+    upload_run_records: list[dict[str, object]],
+) -> tuple[Path, Path]:
+    """生成并上传每次 diff 的详细更新日志（JSON + 文本）。"""
+
+    executed_at = _current_utc_timestamp()
+    previous_version_obj = getattr(getattr(decision, "previous_state", None), "game_version", None)
+    previous_version = (
+        str(previous_version_obj).strip() if isinstance(previous_version_obj, str) else "unknown"
+    )
+    version_pair = f"{previous_version}~{game_version}"
+    log_stem = f"{version_pair}_{executed_at.replace(':', '').replace('-', '')}"
+    report_dir = config.output_path / "reports" / "update_logs" / game_version
+    report_dir.mkdir(parents=True, exist_ok=True)
+    json_file = report_dir / f"{log_stem}.json"
+    text_file = report_dir / f"{log_stem}.txt"
+
+    payload = _build_update_log_payload(
+        decision=decision,
+        game_version=game_version,
+        executed_at=executed_at,
+        target_entities=target_entities,
+        targets=targets,
+        secondary_filter_result=secondary_filter_result,
+        upload_run_records=upload_run_records,
+    )
+    json_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    text_file.write_text(_build_update_log_text(payload=payload), encoding="utf-8")
+
+    if not (
+        config.baidu_pan_app_key and config.baidu_pan_secret_key and config.baidu_pan_refresh_token
+    ):
+        raise ValueError("更新日志上传失败：缺少百度凭据")
+
+    credentials = BaiduCredentials(
+        app_key=config.baidu_pan_app_key,
+        secret_key=config.baidu_pan_secret_key,
+        refresh_token=config.baidu_pan_refresh_token,
+    )
+    token_store = resolve_token_store()
+    client = BaiduPanClient(
+        credentials=credentials,
+        remote_dir=config.baidu_pan_remote_dir,
+        token_store=token_store,
+    )
+    try:
+        remote_log_dir = f"{UPDATE_LOG_REMOTE_DIR}/{game_version}"
+        _ensure_remote_directory(client=client, relative_dir=remote_log_dir)
+        client.upload_file(
+            local_path=json_file,
+            remote_path=f"{remote_log_dir}/{json_file.name}",
+        )
+        client.upload_file(
+            local_path=text_file,
+            remote_path=f"{remote_log_dir}/{text_file.name}",
+        )
+    finally:
+        client.close()
+
+    return json_file, text_file
+
+
+def _build_update_log_payload(
+    decision: object,
+    game_version: str,
+    executed_at: str,
+    target_entities: object,
+    targets: object,
+    secondary_filter_result: object | None,
+    upload_run_records: list[dict[str, object]],
+) -> dict[str, object]:
+    """构建单次 diff 的结构化更新日志。"""
+
+    changed_entities = {
+        "champion_aliases": list(getattr(target_entities, "champion_aliases", tuple())),
+        "map_ids": list(getattr(target_entities, "map_ids", tuple())),
+    }
+    processing_targets = {
+        "champion_ids": list(getattr(targets, "champion_ids", tuple())),
+        "map_ids": list(getattr(targets, "map_ids", tuple())),
+    }
+    wad_changes_obj = getattr(decision, "wad_changes", None)
+    wad_changes = {
+        "added_paths": list(getattr(wad_changes_obj, "added_paths", tuple())),
+        "changed_paths": list(getattr(wad_changes_obj, "changed_paths", tuple())),
+        "removed_paths": list(getattr(wad_changes_obj, "removed_paths", tuple())),
+        "update_paths": list(getattr(wad_changes_obj, "update_paths", tuple())),
+    }
+
+    secondary_filter: dict[str, object] | None = None
+    if secondary_filter_result is not None:
+        decisions_obj = getattr(secondary_filter_result, "decisions", tuple())
+        filter_decisions: list[dict[str, object]] = []
+        for item in decisions_obj:
+            path_statuses_obj = getattr(item, "path_statuses", tuple())
+            path_statuses = [
+                {
+                    "path": str(getattr(status_item, "path", "")),
+                    "status": str(getattr(status_item, "status", "")),
+                    "path_type": str(getattr(status_item, "path_type", "")),
+                }
+                for status_item in path_statuses_obj
+            ]
+            filter_decisions.append(
+                {
+                    "region_wad_path": str(getattr(item, "region_wad_path", "")),
+                    "root_wad_path": getattr(item, "root_wad_path", None),
+                    "entity_type": str(getattr(item, "entity_type", "")),
+                    "matched_bin_paths": list(getattr(item, "matched_bin_paths", tuple())),
+                    "changed_audio_paths": list(getattr(item, "changed_audio_paths", tuple())),
+                    "changed_event_paths": list(getattr(item, "changed_event_paths", tuple())),
+                    "should_unpack": bool(getattr(item, "should_unpack", False)),
+                    "skip_reason": getattr(item, "skip_reason", None),
+                    "path_statuses": path_statuses,
+                }
+            )
+        secondary_filter = {
+            "unpack_paths": list(getattr(secondary_filter_result, "unpack_paths", tuple())),
+            "skipped_paths": list(getattr(secondary_filter_result, "skipped_paths", tuple())),
+            "decisions": filter_decisions,
+        }
+
+    uploaded_count = sum(1 for item in upload_run_records if item.get("status") == "uploaded")
+    skipped_count = sum(1 for item in upload_run_records if item.get("status") == "skipped")
+    archived_count = sum(1 for item in upload_run_records if item.get("status") == "archived_old")
+    previous_state_obj = getattr(decision, "previous_state", None)
+    previous_version = getattr(previous_state_obj, "game_version", None)
+    payload: dict[str, object] = {
+        "schema_version": UPDATE_LOG_SCHEMA_VERSION,
+        "executed_at": executed_at,
+        "decision_reason": str(getattr(decision, "reason", "")),
+        "from_game_version": previous_version,
+        "to_game_version": game_version,
+        "changed_entities": changed_entities,
+        "wad_changes": wad_changes,
+        "processing_targets": processing_targets,
+        "upload_summary": {
+            "run_entry_count": len(upload_run_records),
+            "uploaded_count": uploaded_count,
+            "skipped_count": skipped_count,
+            "archived_count": archived_count,
+            "entries": upload_run_records,
+        },
+    }
+    if secondary_filter is not None:
+        payload["secondary_filter"] = secondary_filter
+    return payload
+
+
+def _build_update_log_text(payload: dict[str, object]) -> str:
+    """将结构化更新日志渲染为人类可读文本。"""
+
+    changed_entities_obj = payload.get("changed_entities")
+    changed_entities = changed_entities_obj if isinstance(changed_entities_obj, dict) else {}
+    wad_changes_obj = payload.get("wad_changes")
+    wad_changes = wad_changes_obj if isinstance(wad_changes_obj, dict) else {}
+    upload_summary_obj = payload.get("upload_summary")
+    upload_summary = upload_summary_obj if isinstance(upload_summary_obj, dict) else {}
+    lines = [
+        "# RiftAudioPipeline 差异更新日志",
+        "",
+        f"执行时间(UTC): {payload.get('executed_at')}",
+        f"决策原因: {payload.get('decision_reason')}",
+        f"版本区间: {payload.get('from_game_version')} -> {payload.get('to_game_version')}",
+        "",
+        "## 变更实体",
+        f"- champions(alias): {', '.join(changed_entities.get('champion_aliases', [])) or '无'}",
+        f"- maps(id): {', '.join(changed_entities.get('map_ids', [])) or '无'}",
+        "",
+        "## WAD 变更",
+        f"- added: {len(wad_changes.get('added_paths', []))}",
+        f"- changed: {len(wad_changes.get('changed_paths', []))}",
+        f"- removed: {len(wad_changes.get('removed_paths', []))}",
+        f"- update_paths: {len(wad_changes.get('update_paths', []))}",
+    ]
+    secondary_filter_obj = payload.get("secondary_filter")
+    if isinstance(secondary_filter_obj, dict):
+        lines.extend(
+            (
+                "",
+                "## 二次筛选",
+                f"- 需解包 WAD: {len(secondary_filter_obj.get('unpack_paths', []))}",
+                f"- 可跳过 WAD: {len(secondary_filter_obj.get('skipped_paths', []))}",
+            )
+        )
+        decisions_obj = secondary_filter_obj.get("decisions", [])
+        if isinstance(decisions_obj, list):
+            for item in decisions_obj:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    "- WAD: "
+                    f"{item.get('region_wad_path')} | should_unpack={item.get('should_unpack')} | "
+                    f"skip_reason={item.get('skip_reason')}"
+                )
+                lines.append(
+                    f"  changed_audio={len(item.get('changed_audio_paths', []))}, "
+                    f"changed_event={len(item.get('changed_event_paths', []))}"
+                )
+    lines.extend(
+        (
+            "",
+            "## 上传结果",
+            f"- run_entry_count: {upload_summary.get('run_entry_count', 0)}",
+            f"- uploaded_count: {upload_summary.get('uploaded_count', 0)}",
+            f"- skipped_count: {upload_summary.get('skipped_count', 0)}",
+            f"- archived_count: {upload_summary.get('archived_count', 0)}",
+        )
+    )
+    entries_obj = upload_summary.get("entries")
+    if isinstance(entries_obj, list):
+        for item in entries_obj:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "- "
+                f"{item.get('status')} | {item.get('remote_name') or item.get('remote_path')} | "
+                f"reason={item.get('reason')}"
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _calculate_sha256(file_path: Path) -> str:
     """计算文件 SHA256。"""
 
@@ -1655,6 +2010,7 @@ def _build_upload_manifest_payload(
     index: dict[str, dict[str, object]],
     run_entries: list[dict[str, object]],
     executed_at: str,
+    remote_dir: str,
 ) -> dict[str, object]:
     """构建上传索引快照。"""
 
@@ -1664,19 +2020,25 @@ def _build_upload_manifest_payload(
             key=lambda entry: str(entry.get("remote_path", "")).casefold(),
         )
     )
+    database = _build_upload_database_payload(index=index, remote_dir=remote_dir)
     uploaded_count = sum(1 for entry in run_entries if entry.get("status") == "uploaded")
     skipped_count = sum(1 for entry in run_entries if entry.get("status") == "skipped")
+    archived_count = sum(1 for entry in run_entries if entry.get("status") == "archived_old")
     return {
         "schema_version": UPLOAD_MANIFEST_SCHEMA_VERSION,
         "updated_at": executed_at,
         "entry_count": len(index_entries),
         "entries": index_entries,
+        "database_schema_version": UPLOAD_DATABASE_SCHEMA_VERSION,
+        "database_entry_count": len(database),
+        "database": database,
         "last_run": {
             "game_version": game_version,
             "executed_at": executed_at,
             "archive_count": len(run_entries),
             "uploaded_count": uploaded_count,
             "skipped_count": skipped_count,
+            "archived_count": archived_count,
             "entries": run_entries,
         },
     }
