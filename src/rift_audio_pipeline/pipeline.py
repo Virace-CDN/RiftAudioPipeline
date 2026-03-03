@@ -25,8 +25,8 @@ from rift_audio_pipeline.baidu.sdk import ensure_official_sdk_path
 from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
 from rift_audio_pipeline.baidu.pan import BaiduPanClient
+from rift_audio_pipeline.bin_extractor import create_local_bin_flag
 from rift_audio_pipeline.bin_extractor import seed_bin_input_from_directory
-from rift_audio_pipeline.bin_extractor import write_many_to_bin_input
 from rift_audio_pipeline.config import PipelineConfig
 from rift_audio_pipeline.game_dir_builder import build_simulated_dir
 from rift_audio_pipeline.game_dir_builder import check_local_game_path
@@ -36,10 +36,8 @@ from rift_audio_pipeline.manifest_ops import DECISION_REASON_FIRST_RUN
 from rift_audio_pipeline.manifest_ops import DECISION_REASON_GAME_VERSION_UNCHANGED
 from rift_audio_pipeline.manifest_ops import DECISION_REASON_NO_REGION_MANIFEST_CHANGES
 from rift_audio_pipeline.manifest_ops import DEFAULT_LOCAL_STATE_FILE
-from rift_audio_pipeline.manifest_ops import build_voice_filter_result_cache_path
 from rift_audio_pipeline.manifest_ops import build_local_state
 from rift_audio_pipeline.manifest_ops import evaluate_update_need
-from rift_audio_pipeline.manifest_ops import extract_bin_payloads_from_filter_decisions
 from rift_audio_pipeline.manifest_ops import extract_changed_entities_from_wad_paths
 from rift_audio_pipeline.manifest_ops import filter_wad_changes_by_bin_voice_paths
 from rift_audio_pipeline.manifest_ops import save_local_state
@@ -98,6 +96,7 @@ def run_pipeline(config: PipelineConfig) -> int:
 
     secondary_filter_result = None
     secondary_unpack_paths: tuple[str, ...] | None = None
+    secondary_filter_version_dir: Path | None = None
     if decision.reason == DECISION_REASON_FIRST_RUN:
         logger.info("检测到首次启动（无历史状态），将进入首次全量更新流程。")
     else:
@@ -123,12 +122,10 @@ def run_pipeline(config: PipelineConfig) -> int:
                     new_manifest_url=latest.game_manifest_url,
                     region=config.game_region,
                     update_paths=decision.wad_changes.update_paths,
-                )
-                filter_cache_file = build_voice_filter_result_cache_path(
-                    old_manifest_url=decision.previous_state.game_manifest_url,
-                    new_manifest_url=latest.game_manifest_url,
-                    region=config.game_region,
-                    update_paths=decision.wad_changes.update_paths,
+                    bin_output_dir=config.output_path
+                    / "manifest"
+                    / latest.game_version
+                    / "bin_input",
                 )
             except Exception as error:  # noqa: BLE001
                 logger.error("WAD 二次筛选失败，error={}", error)
@@ -139,11 +136,24 @@ def run_pipeline(config: PipelineConfig) -> int:
                 len(secondary_filter.unpack_paths),
                 len(secondary_filter.skipped_paths),
             )
-            logger.info("WAD 二次筛选缓存文件：{}", filter_cache_file)
             if secondary_filter.unpack_paths:
                 logger.info("需解包 WAD：{}", ", ".join(secondary_filter.unpack_paths))
                 secondary_filter_result = secondary_filter
                 secondary_unpack_paths = secondary_filter.unpack_paths
+                secondary_filter_version_dir = config.output_path / "manifest" / latest.game_version
+                create_local_bin_flag(version_dir=secondary_filter_version_dir)
+                matched_auto_bin_paths = {
+                    path.strip().replace("\\", "/").casefold()
+                    for decision_item in secondary_filter.decisions
+                    if decision_item.should_unpack
+                    for path in decision_item.matched_bin_paths
+                    if isinstance(path, str) and path.strip()
+                }
+                logger.info(
+                    "二次筛选 BIN 预写入完成：version_dir={}, matched_count={}",
+                    secondary_filter_version_dir,
+                    len(matched_auto_bin_paths),
+                )
             if secondary_filter.skipped_paths:
                 logger.info("可跳过 WAD：{}", ", ".join(secondary_filter.skipped_paths))
 
@@ -208,25 +218,14 @@ def run_pipeline(config: PipelineConfig) -> int:
         logger.error("DataUpdater 执行失败，error={}", error)
         return 1
 
-    if secondary_filter_result is not None:
-        try:
-            auto_bin_payloads = extract_bin_payloads_from_filter_decisions(
-                manifest_url=latest.game_manifest_url,
-                decisions=secondary_filter_result.decisions,
+    if secondary_filter_result is not None and secondary_filter_version_dir is not None:
+        if data_file_base.parent != secondary_filter_version_dir:
+            logger.error(
+                "二次筛选 BIN 预写入版本目录与 DataUpdater 结果不一致：expected={}, actual={}",
+                secondary_filter_version_dir,
+                data_file_base.parent,
             )
-            written_auto_bins = write_many_to_bin_input(
-                version_dir=data_file_base.parent,
-                bin_payloads=auto_bin_payloads,
-                enable_local_bin=True,
-            )
-        except Exception as error:  # noqa: BLE001
-            logger.error("二次筛选 BIN 自动复用写入失败，error={}", error)
             return 1
-        logger.info(
-            "二次筛选 BIN 自动复用完成：matched_count={}, written_count={}",
-            len(auto_bin_payloads),
-            len(written_auto_bins),
-        )
 
     if config.local_bin_dir is not None:
         try:

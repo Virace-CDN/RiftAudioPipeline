@@ -18,19 +18,15 @@ from rift_audio_pipeline.manifest_ops import ManifestVoiceFilterResult
 from rift_audio_pipeline.manifest_ops import ManifestWadChanges
 from rift_audio_pipeline.manifest_ops import VoicePathStatus
 from rift_audio_pipeline.manifest_ops import WadVoiceFilterDecision
-from rift_audio_pipeline.manifest_ops import build_voice_filter_result_cache_path
 from rift_audio_pipeline.manifest_ops import build_local_state
 from rift_audio_pipeline.manifest_ops import compare_major_minor
 from rift_audio_pipeline.manifest_ops import evaluate_update_need
 from rift_audio_pipeline.manifest_ops import extract_changed_entities_from_wad_paths
-from rift_audio_pipeline.manifest_ops import extract_bin_payloads_from_filter_decisions
 from rift_audio_pipeline.manifest_ops import filter_wad_changes_by_bin_voice_paths
 from rift_audio_pipeline.manifest_ops import get_changed_entities
 from rift_audio_pipeline.manifest_ops import get_manifest_wad_changes
-from rift_audio_pipeline.manifest_ops import load_voice_filter_result_cache
 from rift_audio_pipeline.manifest_ops import load_local_state
 from rift_audio_pipeline.manifest_ops import save_local_state
-from rift_audio_pipeline.manifest_ops import save_voice_filter_result_cache
 import rift_audio_pipeline.manifest_ops as manifest_ops
 
 
@@ -497,133 +493,17 @@ def test_filter_wad_changes_by_bin_voice_paths_should_aggregate_unpack_paths(
     assert len(result.decisions) == 2
 
 
-def test_voice_filter_cache_should_support_round_trip(tmp_path: Path) -> None:
-    """二次筛选缓存应可写入并读取。"""
-
-    cache_dir = tmp_path / "voice_filter_cache"
-    result = ManifestVoiceFilterResult(
-        unpack_paths=("DATA/FINAL/Champions/Annie.zh_CN.wad.client",),
-        skipped_paths=("DATA/FINAL/Champions/Zac.zh_CN.wad.client",),
-        decisions=(
-            WadVoiceFilterDecision(
-                region_wad_path="DATA/FINAL/Champions/Annie.zh_CN.wad.client",
-                root_wad_path="DATA/FINAL/Champions/Annie.wad.client",
-                entity_type="champion",
-                matched_bin_paths=("data/characters/annie/skins/skin0.bin",),
-                audio_paths=(
-                    "assets/sounds/wwise2016/vo/en_us/characters/annie/skins/base/annie_base_vo_audio.wpk",
-                ),
-                event_paths=tuple(),
-                path_statuses=(
-                    VoicePathStatus(
-                        path="assets/sounds/wwise2016/vo/en_us/characters/annie/skins/base/annie_base_vo_audio.wpk",
-                        status="changed",
-                        path_type="audio",
-                    ),
-                ),
-                changed_audio_paths=(
-                    "assets/sounds/wwise2016/vo/en_us/characters/annie/skins/base/annie_base_vo_audio.wpk",
-                ),
-                changed_event_paths=tuple(),
-                should_unpack=True,
-                skip_reason=None,
-            ),
-        ),
-    )
-    old_manifest_url = "https://example.test/old.manifest"
-    new_manifest_url = "https://example.test/new.manifest"
-    region = "zh_CN"
-    update_paths = (
-        "DATA/FINAL/Champions/Annie.zh_CN.wad.client",
-        "DATA/FINAL/Champions/Zac.zh_CN.wad.client",
-    )
-
-    cache_file = save_voice_filter_result_cache(
-        result=result,
-        old_manifest_url=old_manifest_url,
-        new_manifest_url=new_manifest_url,
-        region=region,
-        update_paths=update_paths,
-        cache_dir=cache_dir,
-    )
-    expected_file = build_voice_filter_result_cache_path(
-        old_manifest_url=old_manifest_url,
-        new_manifest_url=new_manifest_url,
-        region=region,
-        update_paths=update_paths,
-        cache_dir=cache_dir,
-    )
-    loaded = load_voice_filter_result_cache(
-        old_manifest_url=old_manifest_url,
-        new_manifest_url=new_manifest_url,
-        region=region,
-        update_paths=update_paths,
-        cache_dir=cache_dir,
-    )
-
-    assert cache_file == expected_file
-    assert cache_file.exists()
-    assert loaded == result
-
-
-def test_filter_wad_changes_by_bin_voice_paths_should_read_cache_before_recompute(
+def test_filter_wad_changes_by_bin_voice_paths_should_write_bin_output_dir(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """缓存命中时不应重复创建 manifest 并触发网络解析。"""
-
-    cache_dir = tmp_path / "voice_filter_cache"
-    old_manifest_url = "https://example.test/old.manifest"
-    new_manifest_url = "https://example.test/new.manifest"
-    region = "zh_CN"
-    update_paths = ("DATA/FINAL/Champions/Annie.zh_CN.wad.client",)
-    expected = ManifestVoiceFilterResult(
-        unpack_paths=("DATA/FINAL/Champions/Annie.zh_CN.wad.client",),
-        skipped_paths=tuple(),
-        decisions=tuple(),
-    )
-    save_voice_filter_result_cache(
-        result=expected,
-        old_manifest_url=old_manifest_url,
-        new_manifest_url=new_manifest_url,
-        region=region,
-        update_paths=update_paths,
-        cache_dir=cache_dir,
-    )
-
-    def _raise_if_recompute(*_: Any, **__: Any) -> Any:
-        raise AssertionError("缓存命中时不应创建 PatcherManifest")
-
-    monkeypatch.setattr(manifest_ops, "PatcherManifest", _raise_if_recompute)
-
-    actual = filter_wad_changes_by_bin_voice_paths(
-        old_manifest_url=old_manifest_url,
-        new_manifest_url=new_manifest_url,
-        region=region,
-        update_paths=update_paths,
-        cache_dir=cache_dir,
-    )
-
-    assert actual == expected
-
-
-def test_extract_bin_payloads_from_filter_decisions_should_collect_unpack_bins(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """应仅提取需解包决策的 BIN，并对重复路径去重。"""
-
-    class _FakeFile:
-        def __init__(self, name: str) -> None:
-            self.name = name
+    """启用 BIN 输出目录时，应在筛选阶段直接写入本地 BIN 文件。"""
 
     class _FakeManifest:
         def __init__(self, file: str, path: str) -> None:
             self.file = file
             self.path = path
-            self.files = {
-                "annie": _FakeFile("DATA/FINAL/Champions/Annie.wad.client"),
-                "map11": _FakeFile("DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client"),
-            }
+            self.files: dict[str, Any] = {}
 
     class _FakeExtractor:
         def __init__(self, manifest: _FakeManifest) -> None:
@@ -640,82 +520,46 @@ def test_extract_bin_payloads_from_filter_decisions_should_collect_unpack_bins(
         ) -> None:
             return None
 
-    calls: list[tuple[str, tuple[str, ...]]] = []
-
-    def _fake_extract_existing_bin_raws(
-        extractor: _FakeExtractor,
-        root_wad_path: str,
-        candidate_bin_paths: tuple[str, ...],
-    ) -> dict[str, bytes]:
-        del extractor
-        calls.append((root_wad_path, candidate_bin_paths))
-        if "Annie" in root_wad_path:
-            return {"data/characters/annie/skins/skin0.bin": b"annie-bin"}
-        return {
-            "data/maps/shipping/map11/map11.bin": b"map-bin",
-            "data/characters/annie/skins/skin0.bin": b"duplicate-should-be-ignored",
-        }
+    def _fake_decision(**kwargs: Any) -> WadVoiceFilterDecision:
+        decision = WadVoiceFilterDecision(
+            region_wad_path="DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+            root_wad_path="DATA/FINAL/Champions/Annie.wad.client",
+            entity_type="champion",
+            matched_bin_paths=("data/characters/annie/skins/skin0.bin",),
+            audio_paths=tuple(),
+            event_paths=tuple(),
+            path_statuses=tuple(),
+            changed_audio_paths=(
+                "assets/sounds/wwise2016/vo/en_us/characters/annie/skins/base/annie_base_vo_audio.wpk",
+            ),
+            changed_event_paths=tuple(),
+            should_unpack=True,
+            skip_reason=None,
+        )
+        callback = kwargs.get("on_bin_payloads")
+        if callable(callback):
+            callback(
+                decision,
+                {
+                    "data/characters/annie/skins/skin0.bin": b"annie-bin",
+                    "data/maps/shipping/map11/map11.bin": b"map-bin",
+                },
+            )
+        return decision
 
     monkeypatch.setattr(manifest_ops, "PatcherManifest", _FakeManifest)
     monkeypatch.setattr(manifest_ops, "WADExtractor", _FakeExtractor)
-    monkeypatch.setattr(manifest_ops, "_extract_existing_bin_raws", _fake_extract_existing_bin_raws)
+    monkeypatch.setattr(manifest_ops, "_build_wad_voice_filter_decision", _fake_decision)
 
-    payloads = extract_bin_payloads_from_filter_decisions(
-        manifest_url="https://example.test/game.manifest",
-        decisions=(
-            WadVoiceFilterDecision(
-                region_wad_path="DATA/FINAL/Champions/Annie.zh_CN.wad.client",
-                root_wad_path="DATA/FINAL/Champions/Annie.wad.client",
-                entity_type="champion",
-                matched_bin_paths=("data/characters/annie/skins/skin0.bin",),
-                audio_paths=tuple(),
-                event_paths=tuple(),
-                path_statuses=tuple(),
-                changed_audio_paths=tuple(),
-                changed_event_paths=tuple(),
-                should_unpack=True,
-                skip_reason=None,
-            ),
-            WadVoiceFilterDecision(
-                region_wad_path="DATA/FINAL/Champions/Zac.zh_CN.wad.client",
-                root_wad_path="DATA/FINAL/Champions/Zac.wad.client",
-                entity_type="champion",
-                matched_bin_paths=("data/characters/zac/skins/skin0.bin",),
-                audio_paths=tuple(),
-                event_paths=tuple(),
-                path_statuses=tuple(),
-                changed_audio_paths=tuple(),
-                changed_event_paths=tuple(),
-                should_unpack=False,
-                skip_reason="仅 vo_events 变更",
-            ),
-            WadVoiceFilterDecision(
-                region_wad_path="DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
-                root_wad_path="DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
-                entity_type="map",
-                matched_bin_paths=("data/maps/shipping/map11/map11.bin",),
-                audio_paths=tuple(),
-                event_paths=tuple(),
-                path_statuses=tuple(),
-                changed_audio_paths=tuple(),
-                changed_event_paths=tuple(),
-                should_unpack=True,
-                skip_reason=None,
-            ),
-        ),
+    bin_output_dir = tmp_path / "manifest" / "16.4" / "bin_input"
+    result = filter_wad_changes_by_bin_voice_paths(
+        old_manifest_url="https://example.test/old.manifest",
+        new_manifest_url="https://example.test/new.manifest",
+        region="zh_CN",
+        update_paths=("DATA/FINAL/Champions/Annie.zh_CN.wad.client",),
+        bin_output_dir=bin_output_dir,
     )
 
-    assert calls == [
-        (
-            "DATA/FINAL/Champions/Annie.wad.client",
-            ("data/characters/annie/skins/skin0.bin",),
-        ),
-        (
-            "DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client",
-            ("data/maps/shipping/map11/map11.bin",),
-        ),
-    ]
-    assert payloads == {
-        "data/characters/annie/skins/skin0.bin": b"annie-bin",
-        "data/maps/shipping/map11/map11.bin": b"map-bin",
-    }
+    assert result.unpack_paths == ("DATA/FINAL/Champions/Annie.zh_CN.wad.client",)
+    assert (bin_output_dir / "data" / "characters" / "annie" / "skins" / "skin0.bin").read_bytes() == b"annie-bin"
+    assert (bin_output_dir / "data" / "maps" / "shipping" / "map11" / "map11.bin").read_bytes() == b"map-bin"

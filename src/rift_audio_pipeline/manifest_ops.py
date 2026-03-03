@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
-import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 from typing import Any
 from typing import Literal
 from typing import TypeAlias
@@ -25,12 +26,7 @@ from riotmanifest import diff_manifests
 DEFAULT_GAME_RELEASE_REGION = "EUW1"
 DEFAULT_LCU_RELEASE_REGION = "EUW"
 DEFAULT_LOCAL_STATE_FILE = Path(__file__).resolve().parents[2] / "state" / "run_history.json"
-DEFAULT_VOICE_FILTER_RESULT_DIR = (
-    Path(__file__).resolve().parents[2] / "state" / "voice_filter_results"
-)
 LOCAL_STATE_SCHEMA_VERSION = 1
-VOICE_FILTER_RESULT_SCHEMA_VERSION = 1
-VOICE_FILTER_ALGORITHM_VERSION = "1"
 WAD_CLIENT_FILE_PATTERN = r"wad\.client$"
 LOCALIZED_WAD_SEGMENT = "/localized/"
 DEFAULT_MAX_CHAMPION_SKIN_BIN_INDEX = 260
@@ -420,145 +416,13 @@ def extract_changed_entities_from_wad_paths(paths: Sequence[str]) -> ChangedEnti
     return _extract_changed_entities_from_paths(paths=normalized_paths)
 
 
-def build_voice_filter_result_cache_path(
-    old_manifest_url: str,
-    new_manifest_url: str,
-    region: str,
-    update_paths: Sequence[str],
-    cache_dir: Path = DEFAULT_VOICE_FILTER_RESULT_DIR,
-) -> Path:
-    """构建二次筛选缓存文件路径。
-
-    Args:
-        old_manifest_url: 旧版本 manifest URL。
-        new_manifest_url: 新版本 manifest URL。
-        region: 语言区域（例如 `zh_CN`）。
-        update_paths: 参与筛选的区域 WAD 路径集合。
-        cache_dir: 缓存目录。
-
-    Returns:
-        缓存文件绝对路径。
-    """
-
-    normalized_paths = _normalize_update_paths(update_paths)
-    key_payload = {
-        "algorithm_version": VOICE_FILTER_ALGORITHM_VERSION,
-        "old_manifest_url": old_manifest_url,
-        "new_manifest_url": new_manifest_url,
-        "region": region,
-        "update_paths": list(normalized_paths),
-    }
-    digest = hashlib.sha256(
-        json.dumps(key_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:16]
-    safe_region = re.sub(r"[^0-9A-Za-z_-]", "_", region.strip()) or "unknown"
-    return cache_dir.expanduser().resolve() / f"voice_filter_{safe_region}_{digest}.json"
-
-
-def save_voice_filter_result_cache(
-    result: ManifestVoiceFilterResult,
-    old_manifest_url: str,
-    new_manifest_url: str,
-    region: str,
-    update_paths: Sequence[str],
-    cache_dir: Path = DEFAULT_VOICE_FILTER_RESULT_DIR,
-) -> Path:
-    """保存二次筛选缓存文件。
-
-    Args:
-        result: 二次筛选结果。
-        old_manifest_url: 旧版本 manifest URL。
-        new_manifest_url: 新版本 manifest URL。
-        region: 语言区域（例如 `zh_CN`）。
-        update_paths: 参与筛选的区域 WAD 路径集合。
-        cache_dir: 缓存目录。
-
-    Returns:
-        已写入的缓存文件路径。
-    """
-
-    cache_path = build_voice_filter_result_cache_path(
-        old_manifest_url=old_manifest_url,
-        new_manifest_url=new_manifest_url,
-        region=region,
-        update_paths=update_paths,
-        cache_dir=cache_dir,
-    )
-    normalized_paths = _normalize_update_paths(update_paths)
-    payload = {
-        "schema_version": VOICE_FILTER_RESULT_SCHEMA_VERSION,
-        "algorithm_version": VOICE_FILTER_ALGORITHM_VERSION,
-        "created_at": datetime.now(tz=timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z"),
-        "old_manifest_url": old_manifest_url,
-        "new_manifest_url": new_manifest_url,
-        "region": region,
-        "update_paths": list(normalized_paths),
-        "result": result.to_dict(),
-    }
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return cache_path
-
-
-def load_voice_filter_result_cache(
-    old_manifest_url: str,
-    new_manifest_url: str,
-    region: str,
-    update_paths: Sequence[str],
-    cache_dir: Path = DEFAULT_VOICE_FILTER_RESULT_DIR,
-) -> ManifestVoiceFilterResult | None:
-    """读取二次筛选缓存。
-
-    Args:
-        old_manifest_url: 旧版本 manifest URL。
-        new_manifest_url: 新版本 manifest URL。
-        region: 语言区域（例如 `zh_CN`）。
-        update_paths: 参与筛选的区域 WAD 路径集合。
-        cache_dir: 缓存目录。
-
-    Returns:
-        命中缓存时返回筛选结果，否则返回 `None`。
-    """
-
-    cache_path = build_voice_filter_result_cache_path(
-        old_manifest_url=old_manifest_url,
-        new_manifest_url=new_manifest_url,
-        region=region,
-        update_paths=update_paths,
-        cache_dir=cache_dir,
-    )
-    if not cache_path.exists():
-        return None
-    try:
-        payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, Mapping):
-        return None
-
-    if int(payload.get("schema_version", 0)) != VOICE_FILTER_RESULT_SCHEMA_VERSION:
-        return None
-    if str(payload.get("algorithm_version", "")) != VOICE_FILTER_ALGORITHM_VERSION:
-        return None
-    result_payload = payload.get("result")
-    if not isinstance(result_payload, Mapping):
-        return None
-    return ManifestVoiceFilterResult.from_dict(result_payload)
-
-
 def filter_wad_changes_by_bin_voice_paths(
     old_manifest_url: str,
     new_manifest_url: str,
     region: str,
     update_paths: Sequence[str],
     max_champion_skin_bin_index: int = DEFAULT_MAX_CHAMPION_SKIN_BIN_INDEX,
-    reuse_cached_result: bool = True,
-    cache_dir: Path = DEFAULT_VOICE_FILTER_RESULT_DIR,
+    bin_output_dir: Path | None = None,
 ) -> ManifestVoiceFilterResult:
     """基于根 WAD 的 BIN 解析结果筛选真正需要解包的区域 WAD。
 
@@ -574,6 +438,7 @@ def filter_wad_changes_by_bin_voice_paths(
         region: 语言区域（例如 `zh_CN`）。
         update_paths: 来自 manifest diff 的区域 WAD 变化路径（通常为 `added + changed`）。
         max_champion_skin_bin_index: 英雄 BIN 探测上限（包含该值）。
+        bin_output_dir: 可选 BIN 落地目录；传入后会在筛选阶段直接写入 BIN 文件。
 
     Returns:
         二次筛选结果，包含“需解包路径”、“可跳过路径”与每个 WAD 的明细判定。
@@ -595,16 +460,6 @@ def filter_wad_changes_by_bin_voice_paths(
             skipped_paths=tuple(),
             decisions=tuple(),
         )
-    if reuse_cached_result:
-        cached = load_voice_filter_result_cache(
-            old_manifest_url=old_manifest_url,
-            new_manifest_url=new_manifest_url,
-            region=region,
-            update_paths=normalized_paths,
-            cache_dir=cache_dir,
-        )
-        if cached is not None:
-            return cached
 
     old_manifest = PatcherManifest(file=old_manifest_url, path="")
     new_manifest = PatcherManifest(file=new_manifest_url, path="")
@@ -612,6 +467,30 @@ def filter_wad_changes_by_bin_voice_paths(
     new_file_index = _build_manifest_file_index(new_manifest)
 
     decisions: list[WadVoiceFilterDecision] = []
+    on_bin_payloads: Callable[[WadVoiceFilterDecision, Mapping[str, bytes]], None] | None = None
+    if bin_output_dir is not None:
+        _prepare_voice_filter_bin_output_dir(bin_output_dir=bin_output_dir)
+        written_bin_keys: set[str] = set()
+
+        def _on_bin_payloads(
+            decision: WadVoiceFilterDecision,
+            bin_payloads: Mapping[str, bytes],
+        ) -> None:
+            del decision
+            for raw_path, content in sorted(bin_payloads.items(), key=lambda item: item[0].casefold()):
+                normalized_path = _normalize_manifest_path(raw_path)
+                lowered = normalized_path.casefold()
+                if lowered in written_bin_keys:
+                    continue
+                _write_voice_filter_bin_output_file(
+                    bin_output_dir=bin_output_dir,
+                    relative_path=normalized_path,
+                    content=content,
+                )
+                written_bin_keys.add(lowered)
+
+        on_bin_payloads = _on_bin_payloads
+
     with WADExtractor(new_manifest) as new_extractor, WADExtractor(old_manifest) as old_extractor:
         for wad_path in normalized_paths:
             decision = _build_wad_voice_filter_decision(
@@ -622,6 +501,7 @@ def filter_wad_changes_by_bin_voice_paths(
                 region=region,
                 wad_path=wad_path,
                 max_champion_skin_bin_index=max_champion_skin_bin_index,
+                on_bin_payloads=on_bin_payloads,
             )
             decisions.append(decision)
 
@@ -642,75 +522,69 @@ def filter_wad_changes_by_bin_voice_paths(
         skipped_paths=skipped_paths,
         decisions=tuple(sorted(decisions, key=lambda item: item.region_wad_path.casefold())),
     )
-    if reuse_cached_result:
-        save_voice_filter_result_cache(
-            result=result,
-            old_manifest_url=old_manifest_url,
-            new_manifest_url=new_manifest_url,
-            region=region,
-            update_paths=normalized_paths,
-            cache_dir=cache_dir,
-        )
     return result
 
 
-def extract_bin_payloads_from_filter_decisions(
-    manifest_url: str,
-    decisions: Sequence[WadVoiceFilterDecision],
-) -> dict[str, bytes]:
-    """从二次筛选结果中提取可复用的 BIN 原始数据。
+def _prepare_voice_filter_bin_output_dir(bin_output_dir: Path) -> None:
+    """准备 BIN 输出目录。
 
     Args:
-        manifest_url: 用于提取 BIN 的 GAME manifest URL。
-        decisions: 二次筛选决策集合。
-
-    Returns:
-        以 BIN 相对路径为 key、原始字节为 value 的映射。
+        bin_output_dir: BIN 输出目录。
     """
 
-    root_to_bin_paths: dict[str, set[str]] = {}
-    for decision in decisions:
-        if not decision.should_unpack:
-            continue
-        if not decision.root_wad_path:
-            continue
-        root_wad_path = _normalize_manifest_path(decision.root_wad_path)
-        if not root_wad_path:
-            continue
-        for raw_bin_path in decision.matched_bin_paths:
-            normalized_bin_path = _normalize_manifest_path(raw_bin_path)
-            if not normalized_bin_path:
-                continue
-            root_to_bin_paths.setdefault(root_wad_path, set()).add(normalized_bin_path)
+    if bin_output_dir.exists():
+        shutil.rmtree(bin_output_dir, ignore_errors=True)
+    bin_output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not root_to_bin_paths:
-        return {}
 
-    manifest = PatcherManifest(file=manifest_url, path="")
-    file_index = _build_manifest_file_index(manifest)
-    payloads_by_key: dict[str, tuple[str, bytes]] = {}
+def _write_voice_filter_bin_output_file(
+    bin_output_dir: Path,
+    relative_path: str,
+    content: bytes,
+) -> Path:
+    """写入单个 BIN 原始数据到输出目录。
 
-    with WADExtractor(manifest) as extractor:
-        for root_wad_path in sorted(root_to_bin_paths, key=str.casefold):
-            if root_wad_path.casefold() not in file_index:
-                continue
-            bin_paths = tuple(sorted(root_to_bin_paths[root_wad_path], key=str.casefold))
-            extracted = _extract_existing_bin_raws(
-                extractor=extractor,
-                root_wad_path=root_wad_path,
-                candidate_bin_paths=bin_paths,
-            )
-            for bin_path, raw in extracted.items():
-                lowered = bin_path.casefold()
-                if lowered in payloads_by_key:
-                    continue
-                payloads_by_key[lowered] = (bin_path, raw)
+    Args:
+        bin_output_dir: BIN 输出目录。
+        relative_path: BIN 相对路径。
+        content: BIN 原始字节。
 
-    ordered: dict[str, bytes] = {}
-    for lowered_key in sorted(payloads_by_key):
-        original_path, raw = payloads_by_key[lowered_key]
-        ordered[original_path] = raw
-    return ordered
+    Returns:
+        已写入的目标文件路径。
+    """
+
+    normalized_path = _normalize_relative_bin_output_path(relative_path)
+    target_file = bin_output_dir / normalized_path
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_bytes(content)
+    return target_file
+
+
+def _normalize_relative_bin_output_path(relative_path: str) -> Path:
+    """规范化 BIN 输出相对路径并阻止越界。
+
+    Args:
+        relative_path: 原始相对路径。
+
+    Returns:
+        规范化后的相对路径对象。
+
+    Raises:
+        ValueError: 输入为空、绝对路径或包含越界段时抛出。
+    """
+
+    raw = _normalize_manifest_path(relative_path)
+    if not raw:
+        raise ValueError("BIN 输出路径不能为空")
+    path = Path(raw)
+    if path.is_absolute():
+        raise ValueError(f"BIN 输出路径不允许绝对路径：{relative_path}")
+    normalized = Path(*[part for part in path.parts if part not in {"", "."}])
+    if not normalized.parts:
+        raise ValueError(f"BIN 输出路径无有效路径段：{relative_path}")
+    if any(part == ".." for part in normalized.parts):
+        raise ValueError(f"BIN 输出路径存在越界路径段：{relative_path}")
+    return normalized
 
 
 def _build_wad_voice_filter_decision(
@@ -721,8 +595,23 @@ def _build_wad_voice_filter_decision(
     region: str,
     wad_path: str,
     max_champion_skin_bin_index: int,
+    on_bin_payloads: Callable[[WadVoiceFilterDecision, Mapping[str, bytes]], None] | None = None,
 ) -> WadVoiceFilterDecision:
-    """构建单个区域 WAD 的二次筛选判定。"""
+    """构建单个区域 WAD 的二次筛选判定。
+
+    Args:
+        old_extractor: 旧版本 WAD 提取器。
+        new_extractor: 新版本 WAD 提取器。
+        old_file_index: 旧版本 manifest 文件索引。
+        new_file_index: 新版本 manifest 文件索引。
+        region: 语言区域。
+        wad_path: 目标区域 WAD 路径。
+        max_champion_skin_bin_index: 英雄 BIN 探测上限。
+        on_bin_payloads: 可选回调；当判定需解包时回传该 WAD 命中的 BIN 原始数据。
+
+    Returns:
+        单个 WAD 的筛选判定结果。
+    """
 
     normalized_wad_path = _normalize_manifest_path(wad_path)
     if LOCALIZED_WAD_SEGMENT in normalized_wad_path.casefold():
@@ -866,7 +755,7 @@ def _build_wad_voice_filter_decision(
     else:
         skip_reason = "VO 音频资源未发生变化"
 
-    return WadVoiceFilterDecision(
+    decision = WadVoiceFilterDecision(
         region_wad_path=normalized_wad_path,
         root_wad_path=root_wad_path,
         entity_type=entity_type,
@@ -879,6 +768,9 @@ def _build_wad_voice_filter_decision(
         should_unpack=should_unpack,
         skip_reason=skip_reason,
     )
+    if should_unpack and on_bin_payloads is not None:
+        on_bin_payloads(decision, bin_raws)
+    return decision
 
 
 def _collect_voice_path_statuses(
