@@ -13,3 +13,11 @@ wheels/
 # Codex memory and local style
 .ai_memory/
 .CODING_STYLE.md
+
+# Local secrets and runtime config
+.config/
+.dev.baidu
+
+# Local planning docs (not committed)
+docs/LOL语音资源自动化计划书.md
+docs/执行计划.md
