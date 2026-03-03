@@ -55,6 +55,9 @@ DEFAULT_BUNDLED_PACK_EXTRA_DIR = Path(__file__).resolve().parent / "pack_extra"
 DEFAULT_PACK_EXTRA_FILES = ("食用说明.txt", "license.txt")
 UPLOAD_MANIFEST_FILE_NAME = "upload_manifest.json"
 UPLOAD_MANIFEST_SCHEMA_VERSION = 2
+RESOURCE_TYPE_BUCKETS = ("VO", "SFX", "MUSIC")
+OLD_RESOURCE_BUCKET = "OLD"
+RESOURCE_TARGET_GROUPS = ("champions", "maps")
 STREAMING_UPLOAD_QUEUE_SIZE = 1
 STREAMING_DISK_SPACE_MULTIPLIER = 3
 STREAMING_MIN_REQUIRED_BYTES = 512 * 1024 * 1024
@@ -77,6 +80,31 @@ class _PackedEntityArtifact:
 
     task: _StreamingEntityTask
     archive_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchiveUploadLayout:
+    """压缩包上传路由信息。"""
+
+    remote_name: str
+    remote_relative_path: str
+    remote_path: str
+    target_group: str
+    resource_type: str
+    entity_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexedArchiveMetadata:
+    """远端索引条目解析结果。"""
+
+    remote_path: str
+    remote_name: str
+    game_version: str | None
+    target_group: str | None
+    resource_type: str | None
+    entity_key: str | None
+    is_old_bucket: bool
 
 
 def run_pipeline(config: PipelineConfig) -> int:
@@ -1037,18 +1065,35 @@ def _upload_archives_and_manifest(
     try:
         remote_index = _load_remote_upload_manifest_index(client=client, package_root=package_root)
         executed_at = _current_utc_timestamp()
+        default_resource_type = _resolve_default_upload_resource_type(config=config)
         for archive in archives:
             if not archive.is_file():
                 raise FileNotFoundError(f"上传失败：压缩包不存在：{archive}")
 
-            remote_name = _build_remote_archive_name(
+            upload_layout = _build_archive_upload_layout(
+                archive=archive,
                 game_version=game_version,
-                archive_name=archive.name,
-            )
-            remote_path = _join_remote_file_path(
                 remote_dir=config.baidu_pan_remote_dir,
-                remote_name=remote_name,
+                default_resource_type=default_resource_type,
             )
+            _ensure_remote_directory(
+                client=client,
+                relative_dir=f"{upload_layout.resource_type}/{upload_layout.target_group}",
+            )
+            archived_entries = _archive_remote_old_versions(
+                client=client,
+                remote_dir=config.baidu_pan_remote_dir,
+                remote_index=remote_index,
+                layout=upload_layout,
+                expected_game_version=game_version,
+                executed_at=executed_at,
+            )
+            if archived_entries:
+                has_index_changes = True
+                run_entries.extend(archived_entries)
+
+            remote_name = upload_layout.remote_name
+            remote_path = upload_layout.remote_path
             existing_entry = remote_index.get(remote_path.casefold())
             if existing_entry is not None:
                 if _is_same_index_entry(
@@ -1063,6 +1108,9 @@ def _upload_archives_and_manifest(
                             "remote_path": remote_path,
                             "remote_name": remote_name,
                             "game_version": game_version,
+                            "target_group": upload_layout.target_group,
+                            "resource_type": upload_layout.resource_type,
+                            "entity_key": upload_layout.entity_key,
                             "status": "skipped",
                         }
                     )
@@ -1072,7 +1120,7 @@ def _upload_archives_and_manifest(
                     f"remote_path={remote_path}, expected_game_version={game_version}"
                 )
 
-            if _remote_file_exists(client=client, remote_path=remote_name):
+            if _remote_file_exists(client=client, remote_path=upload_layout.remote_relative_path):
                 raise RuntimeError(
                     "上传阶段终止：检测到远端已存在同名文件但索引缺失，"
                     f"remote_path={remote_path}。请先修复远端索引后再重试。"
@@ -1080,12 +1128,17 @@ def _upload_archives_and_manifest(
 
             file_size = archive.stat().st_size
             file_sha256 = _calculate_sha256(archive)
-            response = client.upload_file(local_path=archive, remote_path=remote_name)
+            response = client.upload_file(
+                local_path=archive, remote_path=upload_layout.remote_relative_path
+            )
             has_index_changes = True
             remote_index[remote_path.casefold()] = {
                 "remote_path": remote_path,
                 "remote_name": remote_name,
                 "game_version": game_version,
+                "target_group": upload_layout.target_group,
+                "resource_type": upload_layout.resource_type,
+                "entity_key": upload_layout.entity_key,
                 "size": file_size,
                 "sha256": file_sha256,
                 "uploaded_at": executed_at,
@@ -1097,6 +1150,9 @@ def _upload_archives_and_manifest(
                     "remote_name": remote_name,
                     "size": file_size,
                     "sha256": file_sha256,
+                    "target_group": upload_layout.target_group,
+                    "resource_type": upload_layout.resource_type,
+                    "entity_key": upload_layout.entity_key,
                     "status": "uploaded",
                     "response": response,
                 }
@@ -1168,11 +1224,235 @@ def _resolve_pack_archive_type(config: PipelineConfig) -> str | None:
     return None
 
 
-def _build_remote_archive_name(game_version: str, archive_name: str) -> str:
-    """生成远端压缩包文件名。"""
+def _resolve_default_upload_resource_type(config: PipelineConfig) -> str:
+    """解析上传阶段默认资源类型目录。"""
 
-    del game_version
-    return archive_name
+    archive_type = _resolve_pack_archive_type(config=config)
+    if archive_type in RESOURCE_TYPE_BUCKETS:
+        return archive_type
+    for item in config.audio_types:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip().upper()
+        if normalized in RESOURCE_TYPE_BUCKETS:
+            return normalized
+    return RESOURCE_TYPE_BUCKETS[0]
+
+
+def _build_archive_upload_layout(
+    archive: Path,
+    game_version: str,
+    remote_dir: str,
+    default_resource_type: str,
+) -> _ArchiveUploadLayout:
+    """解析单个压缩包的远端目录路由。"""
+
+    target_group = _resolve_archive_target_group(archive=archive)
+    entity_key, _, archive_resource_type = _parse_archive_file_name(archive.name)
+    resource_type = archive_resource_type or default_resource_type
+    remote_relative_path = f"{resource_type}/{target_group}/{archive.name}"
+    return _ArchiveUploadLayout(
+        remote_name=archive.name,
+        remote_relative_path=remote_relative_path,
+        remote_path=_join_remote_file_path(remote_dir=remote_dir, remote_name=remote_relative_path),
+        target_group=target_group,
+        resource_type=resource_type,
+        entity_key=entity_key,
+    )
+
+
+def _resolve_archive_target_group(archive: Path) -> str:
+    """从本地路径解析上传目标分组（champions/maps）。"""
+
+    for part in reversed(archive.parts[:-1]):
+        lowered = part.casefold()
+        if lowered in RESOURCE_TARGET_GROUPS:
+            return lowered
+    return "champions"
+
+
+def _parse_archive_file_name(
+    archive_name: str,
+) -> tuple[str, str | None, str | None]:
+    """解析压缩包文件名中的实体名、版本和资源类型。"""
+
+    if archive_name.casefold().endswith(".7z"):
+        stem = archive_name[:-3]
+    else:
+        stem = archive_name
+    normalized_stem = stem.strip()
+    if not normalized_stem:
+        return archive_name, None, None
+    parts = normalized_stem.rsplit("-", maxsplit=2)
+    if len(parts) != 3:
+        return normalized_stem, None, None
+    entity_key = parts[0].strip()
+    parsed_version = parts[1].strip() or None
+    parsed_resource_type = parts[2].strip().upper()
+    if not entity_key:
+        return normalized_stem, None, None
+    if parsed_resource_type not in RESOURCE_TYPE_BUCKETS:
+        return normalized_stem, None, None
+    return entity_key, parsed_version, parsed_resource_type
+
+
+def _archive_remote_old_versions(
+    client: BaiduPanClient,
+    remote_dir: str,
+    remote_index: dict[str, dict[str, object]],
+    layout: _ArchiveUploadLayout,
+    expected_game_version: str,
+    executed_at: str,
+) -> list[dict[str, object]]:
+    """将同实体旧版本远端文件归档到 `OLD/<target_group>/`。"""
+
+    archived_entries: list[dict[str, object]] = []
+    old_relative_dir = f"{OLD_RESOURCE_BUCKET}/{layout.target_group}"
+    for index_key, index_entry in tuple(remote_index.items()):
+        metadata = _resolve_index_entry_metadata(entry=index_entry, remote_dir=remote_dir)
+        if metadata.remote_path.casefold() == layout.remote_path.casefold():
+            continue
+        if metadata.is_old_bucket:
+            continue
+        if metadata.target_group != layout.target_group:
+            continue
+        if metadata.resource_type != layout.resource_type:
+            continue
+        if metadata.entity_key != layout.entity_key:
+            continue
+        if metadata.game_version is None or metadata.game_version == expected_game_version:
+            continue
+
+        _ensure_remote_directory(client=client, relative_dir=old_relative_dir)
+        client.move_path(
+            source_path=metadata.remote_path,
+            destination_dir=old_relative_dir,
+            new_name=metadata.remote_name,
+        )
+        archived_remote_relative = f"{old_relative_dir}/{metadata.remote_name}"
+        archived_remote_path = _join_remote_file_path(
+            remote_dir=remote_dir,
+            remote_name=archived_remote_relative,
+        )
+        updated_entry = dict(index_entry)
+        updated_entry.update(
+            {
+                "remote_path": archived_remote_path,
+                "remote_name": metadata.remote_name,
+                "game_version": metadata.game_version,
+                "bucket": OLD_RESOURCE_BUCKET,
+                "target_group": layout.target_group,
+                "resource_type": layout.resource_type,
+                "entity_key": layout.entity_key,
+                "uploaded_at": executed_at,
+            }
+        )
+        remote_index.pop(index_key, None)
+        remote_index[archived_remote_path.casefold()] = updated_entry
+        logger.info(
+            "发现同实体旧版本，已归档到 OLD：source={}, destination={}",
+            metadata.remote_path,
+            archived_remote_path,
+        )
+        archived_entries.append(
+            {
+                "remote_path": archived_remote_path,
+                "remote_name": metadata.remote_name,
+                "game_version": metadata.game_version,
+                "target_group": layout.target_group,
+                "resource_type": layout.resource_type,
+                "entity_key": layout.entity_key,
+                "status": "archived_old",
+            }
+        )
+    return archived_entries
+
+
+def _resolve_index_entry_metadata(
+    entry: dict[str, object],
+    remote_dir: str,
+) -> _IndexedArchiveMetadata:
+    """解析远端索引条目的路由元数据。"""
+
+    remote_path_value = entry.get("remote_path")
+    if not (isinstance(remote_path_value, str) and remote_path_value.strip()):
+        raise ValueError(f"远端索引条目缺少 remote_path：{entry}")
+    remote_path = remote_path_value.strip().replace("\\", "/")
+    remote_name = str(entry.get("remote_name") or Path(remote_path).name).strip()
+    raw_relative = _build_relative_remote_path(remote_path=remote_path, remote_dir=remote_dir)
+    path_parts = [item for item in raw_relative.split("/") if item]
+    bucket = path_parts[0].upper() if path_parts else ""
+    target_group = (
+        path_parts[1].casefold()
+        if len(path_parts) >= 2 and path_parts[1].casefold() in RESOURCE_TARGET_GROUPS
+        else None
+    )
+    parsed_entity_key, parsed_version, parsed_resource_type = _parse_archive_file_name(remote_name)
+    entry_game_version = entry.get("game_version")
+    game_version = (
+        entry_game_version.strip()
+        if isinstance(entry_game_version, str) and entry_game_version.strip()
+        else parsed_version
+    )
+    entry_resource_type = entry.get("resource_type")
+    if isinstance(entry_resource_type, str) and entry_resource_type.strip():
+        resource_type = entry_resource_type.strip().upper()
+    elif bucket in RESOURCE_TYPE_BUCKETS:
+        resource_type = bucket
+    else:
+        resource_type = parsed_resource_type
+    entry_entity_key = entry.get("entity_key")
+    if isinstance(entry_entity_key, str) and entry_entity_key.strip():
+        entity_key = entry_entity_key.strip()
+    else:
+        entity_key = parsed_entity_key
+    entry_target_group = entry.get("target_group")
+    if isinstance(entry_target_group, str) and entry_target_group.strip():
+        normalized_target = entry_target_group.strip().casefold()
+        if normalized_target in RESOURCE_TARGET_GROUPS:
+            target_group = normalized_target
+    is_old_bucket = bucket == OLD_RESOURCE_BUCKET
+    return _IndexedArchiveMetadata(
+        remote_path=remote_path,
+        remote_name=remote_name,
+        game_version=game_version,
+        target_group=target_group,
+        resource_type=resource_type,
+        entity_key=entity_key,
+        is_old_bucket=is_old_bucket,
+    )
+
+
+def _build_relative_remote_path(remote_path: str, remote_dir: str) -> str:
+    """将绝对远端路径转换为工作目录下相对路径。"""
+
+    normalized_remote_path = remote_path.strip().replace("\\", "/")
+    if not normalized_remote_path.startswith("/"):
+        normalized_remote_path = f"/{normalized_remote_path.lstrip('/')}"
+    normalized_dir = remote_dir.strip().replace("\\", "/").strip("/")
+    normalized_work_dir = f"/{normalized_dir}" if normalized_dir else "/"
+    if normalized_work_dir == "/":
+        return normalized_remote_path.lstrip("/")
+    if normalized_remote_path.casefold().startswith(f"{normalized_work_dir}/".casefold()):
+        return normalized_remote_path[len(normalized_work_dir) + 1 :]
+    if normalized_remote_path.casefold() == normalized_work_dir.casefold():
+        return ""
+    return normalized_remote_path.lstrip("/")
+
+
+def _ensure_remote_directory(client: BaiduPanClient, relative_dir: str) -> None:
+    """确保远端目录存在（按层创建）。"""
+
+    normalized = relative_dir.strip().replace("\\", "/").strip("/")
+    if not normalized:
+        return
+
+    current = ""
+    for segment in normalized.split("/"):
+        current = f"{current}/{segment}" if current else segment
+        if _remote_file_exists(client=client, remote_path=current):
+            continue
+        client.create_directory(dir_path=current)
 
 
 def _calculate_sha256(file_path: Path) -> str:
@@ -1253,6 +1533,10 @@ def _build_upload_manifest_index(entries: object) -> dict[str, dict[str, object]
             "game_version": game_version or None,
             "uploaded_at": raw_entry.get("uploaded_at"),
         }
+        for field_name in ("bucket", "target_group", "resource_type", "entity_key"):
+            field_value = raw_entry.get(field_name)
+            if isinstance(field_value, str) and field_value.strip():
+                normalized_entry[field_name] = field_value.strip()
         size_obj = _coerce_non_negative_int(raw_entry.get("size"))
         if size_obj is not None:
             normalized_entry["size"] = size_obj

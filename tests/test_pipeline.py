@@ -188,12 +188,22 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
             self.upload_calls: list[tuple[Path, str]] = []
             self.download_calls: list[tuple[str, Path]] = []
             self.get_path_calls: list[str] = []
+            self.create_dir_calls: list[str] = []
+            self.move_calls: list[tuple[str, str, str | None, str]] = []
+            self.remote_dirs: set[str] = {self.remote_dir}
+            self.remote_files: set[str] = set()
+
+        def _normalize_remote_path(self, remote_path: str) -> str:
+            if remote_path.startswith("/"):
+                return remote_path
+            return f"{self.remote_dir.rstrip('/')}/{remote_path.lstrip('/')}"
 
         def upload_file(
             self, local_path: Path, remote_path: str, rtype: int = 3
         ) -> dict[str, object]:
             del rtype
             self.upload_calls.append((local_path, remote_path))
+            self.remote_files.add(self._normalize_remote_path(remote_path))
             return {"path": remote_path, "errno": 0}
 
         def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
@@ -202,7 +212,28 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
 
         def get_path_entry(self, remote_path: str) -> dict[str, object]:
             self.get_path_calls.append(remote_path)
+            normalized = self._normalize_remote_path(remote_path)
+            if normalized in self.remote_dirs:
+                return {"path": normalized, "isdir": 1}
+            if normalized in self.remote_files:
+                return {"path": normalized, "isdir": 0}
             raise FileNotFoundError(remote_path)
+
+        def create_directory(self, dir_path: str) -> dict[str, object]:
+            normalized = self._normalize_remote_path(dir_path)
+            self.create_dir_calls.append(dir_path)
+            self.remote_dirs.add(normalized)
+            return {"path": normalized, "isdir": 1, "errno": 0}
+
+        def move_path(
+            self,
+            source_path: str,
+            destination_dir: str,
+            new_name: str | None = None,
+            ondup: str = "newcopy",
+        ) -> dict[str, object]:
+            self.move_calls.append((source_path, destination_dir, new_name, ondup))
+            return {"errno": 0}
 
         def close(self) -> None:
             return None
@@ -218,8 +249,10 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
     output_path = tmp_path / "output"
     package_root = output_path / "packages" / "16.4"
     package_root.mkdir(parents=True, exist_ok=True)
-    first_archive = package_root / "Annie.7z"
-    second_archive = package_root / "Zac.7z"
+    first_archive = package_root / "champions" / "1·annie·黑暗之女·安妮-16.4-VO.7z"
+    second_archive = package_root / "champions" / "154·zac·生化魔人·扎克-16.4-VO.7z"
+    first_archive.parent.mkdir(parents=True, exist_ok=True)
+    second_archive.parent.mkdir(parents=True, exist_ok=True)
     first_archive.write_bytes(b"a")
     second_archive.write_bytes(b"b")
 
@@ -244,12 +277,16 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
     assert payload["last_run"]["archive_count"] == 2
     assert payload["last_run"]["uploaded_count"] == 2
     assert payload["last_run"]["skipped_count"] == 0
-    assert [entry["remote_name"] for entry in payload["entries"]] == ["Annie.7z", "Zac.7z"]
+    assert {entry["remote_name"] for entry in payload["entries"]} == {
+        "1·annie·黑暗之女·安妮-16.4-VO.7z",
+        "154·zac·生化魔人·扎克-16.4-VO.7z",
+    }
     assert fake_client.upload_calls == [
-        (first_archive, "Annie.7z"),
-        (second_archive, "Zac.7z"),
+        (first_archive, "VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z"),
+        (second_archive, "VO/champions/154·zac·生化魔人·扎克-16.4-VO.7z"),
         (manifest_file, "upload_manifest.json"),
     ]
+    assert fake_client.move_calls == []
 
 
 def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
@@ -264,6 +301,12 @@ def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
             self.remote_dir = remote_dir
             self.upload_calls: list[tuple[Path, str]] = []
             self.download_calls: list[tuple[str, Path]] = []
+            self.remote_dirs: set[str] = {self.remote_dir}
+
+        def _normalize_remote_path(self, remote_path: str) -> str:
+            if remote_path.startswith("/"):
+                return remote_path
+            return f"{self.remote_dir.rstrip('/')}/{remote_path.lstrip('/')}"
 
         def upload_file(
             self, local_path: Path, remote_path: str, rtype: int = 3
@@ -279,7 +322,25 @@ def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
             return {"path": remote_path}
 
         def get_path_entry(self, remote_path: str) -> dict[str, object]:
-            raise AssertionError(f"不应查询远端目录：{remote_path}")
+            normalized = self._normalize_remote_path(remote_path)
+            if normalized in self.remote_dirs:
+                return {"path": normalized, "isdir": 1}
+            raise FileNotFoundError(remote_path)
+
+        def create_directory(self, dir_path: str) -> dict[str, object]:
+            self.remote_dirs.add(self._normalize_remote_path(dir_path))
+            return {"path": dir_path, "isdir": 1}
+
+        def move_path(
+            self,
+            source_path: str,
+            destination_dir: str,
+            new_name: str | None = None,
+            ondup: str = "newcopy",
+        ) -> dict[str, object]:
+            raise AssertionError(
+                f"同版本命中跳过上传时不应触发 move：{source_path} -> {destination_dir}/{new_name}"
+            )
 
         def close(self) -> None:
             return None
@@ -287,15 +348,19 @@ def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
     output_path = tmp_path / "output"
     package_root = output_path / "packages" / "16.4"
     package_root.mkdir(parents=True, exist_ok=True)
-    archive = package_root / "Annie.7z"
+    archive = package_root / "champions" / "1·annie·黑暗之女·安妮-16.4-VO.7z"
+    archive.parent.mkdir(parents=True, exist_ok=True)
     archive.write_bytes(b"annie-audio")
     remote_manifest_payload = {
         "schema_version": 2,
         "entries": [
             {
-                "remote_path": "/apps/test/Annie.7z",
-                "remote_name": "Annie.7z",
+                "remote_path": "/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z",
+                "remote_name": "1·annie·黑暗之女·安妮-16.4-VO.7z",
                 "game_version": "16.4",
+                "target_group": "champions",
+                "resource_type": "VO",
+                "entity_key": "1·annie·黑暗之女·安妮",
                 "uploaded_at": "2026-03-04T00:00:00Z",
             }
         ],
@@ -334,6 +399,146 @@ def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
     assert payload["last_run"]["skipped_count"] == 1
 
 
+def test_upload_archives_and_manifest_should_archive_old_version_before_upload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """同实体存在旧版本时，应先移动到 OLD 目录再上传新版本。"""
+
+    class _FakeClient:
+        def __init__(self, credentials, remote_dir, token_store) -> None:
+            del credentials, token_store
+            self.remote_dir = remote_dir
+            self.upload_calls: list[tuple[Path, str]] = []
+            self.download_calls: list[tuple[str, Path]] = []
+            self.move_calls: list[tuple[str, str, str | None, str]] = []
+            self.create_dir_calls: list[str] = []
+            self.remote_dirs: set[str] = {self.remote_dir}
+            self.remote_files: set[str] = {
+                f"{self.remote_dir.rstrip('/')}/VO/champions/1·annie·黑暗之女·安妮-16.1-VO.7z"
+            }
+
+        def _normalize_remote_path(self, remote_path: str) -> str:
+            if remote_path.startswith("/"):
+                return remote_path
+            return f"{self.remote_dir.rstrip('/')}/{remote_path.lstrip('/')}"
+
+        def upload_file(
+            self, local_path: Path, remote_path: str, rtype: int = 3
+        ) -> dict[str, object]:
+            del rtype
+            self.upload_calls.append((local_path, remote_path))
+            if remote_path != "upload_manifest.json":
+                self.remote_files.add(self._normalize_remote_path(remote_path))
+            return {"path": remote_path, "errno": 0}
+
+        def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
+            self.download_calls.append((remote_path, local_path))
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_text(json.dumps(remote_manifest_payload), encoding="utf-8")
+            return {"path": remote_path}
+
+        def get_path_entry(self, remote_path: str) -> dict[str, object]:
+            normalized = self._normalize_remote_path(remote_path)
+            if normalized in self.remote_dirs:
+                return {"path": normalized, "isdir": 1}
+            if normalized in self.remote_files:
+                return {"path": normalized, "isdir": 0}
+            raise FileNotFoundError(remote_path)
+
+        def create_directory(self, dir_path: str) -> dict[str, object]:
+            normalized = self._normalize_remote_path(dir_path)
+            self.create_dir_calls.append(dir_path)
+            self.remote_dirs.add(normalized)
+            return {"path": normalized, "isdir": 1}
+
+        def move_path(
+            self,
+            source_path: str,
+            destination_dir: str,
+            new_name: str | None = None,
+            ondup: str = "newcopy",
+        ) -> dict[str, object]:
+            self.move_calls.append((source_path, destination_dir, new_name, ondup))
+            source_full = self._normalize_remote_path(source_path)
+            destination_full = self._normalize_remote_path(
+                f"{destination_dir.strip().rstrip('/')}/{new_name}"
+            )
+            self.remote_files.discard(source_full)
+            self.remote_files.add(destination_full)
+            return {"errno": 0}
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "output"
+    package_root = output_path / "packages" / "16.4"
+    package_root.mkdir(parents=True, exist_ok=True)
+    archive = package_root / "champions" / "1·annie·黑暗之女·安妮-16.4-VO.7z"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"new-version")
+    remote_manifest_payload = {
+        "schema_version": 2,
+        "entries": [
+            {
+                "remote_path": "/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.1-VO.7z",
+                "remote_name": "1·annie·黑暗之女·安妮-16.1-VO.7z",
+                "game_version": "16.1",
+                "target_group": "champions",
+                "resource_type": "VO",
+                "entity_key": "1·annie·黑暗之女·安妮",
+            }
+        ],
+    }
+
+    fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
+    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "BaiduPanClient",
+        lambda credentials, remote_dir, token_store: fake_client,
+    )
+
+    config = PipelineConfig(
+        output_path=output_path,
+        baidu_pan_remote_dir="/apps/test",
+        baidu_pan_app_key="app",
+        baidu_pan_secret_key="secret",
+        baidu_pan_refresh_token="refresh",
+        enable_upload=True,
+    )
+    manifest_file = pipeline._upload_archives_and_manifest(
+        config=config,
+        game_version="16.4",
+        archives=(archive,),
+    )
+
+    assert manifest_file == package_root / "upload_manifest.json"
+    assert fake_client.move_calls == [
+        (
+            "/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.1-VO.7z",
+            "OLD/champions",
+            "1·annie·黑暗之女·安妮-16.1-VO.7z",
+            "newcopy",
+        )
+    ]
+    assert fake_client.upload_calls == [
+        (archive, "VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z"),
+        (manifest_file, "upload_manifest.json"),
+    ]
+    payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    index_by_name = {entry["remote_name"]: entry for entry in payload["entries"]}
+    assert (
+        index_by_name["1·annie·黑暗之女·安妮-16.1-VO.7z"]["remote_path"]
+        == "/apps/test/OLD/champions/1·annie·黑暗之女·安妮-16.1-VO.7z"
+    )
+    assert (
+        index_by_name["1·annie·黑暗之女·安妮-16.4-VO.7z"]["remote_path"]
+        == "/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z"
+    )
+    assert payload["last_run"]["uploaded_count"] == 1
+
+
 def test_upload_archives_and_manifest_should_fail_when_remote_file_exists_without_index(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -345,6 +550,15 @@ def test_upload_archives_and_manifest_should_fail_when_remote_file_exists_withou
             del credentials, token_store
             self.remote_dir = remote_dir
             self.upload_calls: list[tuple[Path, str]] = []
+            self.remote_dirs: set[str] = {self.remote_dir}
+            self.existing_file = (
+                f"{self.remote_dir.rstrip('/')}/VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z"
+            )
+
+        def _normalize_remote_path(self, remote_path: str) -> str:
+            if remote_path.startswith("/"):
+                return remote_path
+            return f"{self.remote_dir.rstrip('/')}/{remote_path.lstrip('/')}"
 
         def upload_file(
             self, local_path: Path, remote_path: str, rtype: int = 3
@@ -358,7 +572,27 @@ def test_upload_archives_and_manifest_should_fail_when_remote_file_exists_withou
             raise FileNotFoundError(remote_path)
 
         def get_path_entry(self, remote_path: str) -> dict[str, object]:
-            return {"path": f"/apps/test/{remote_path}", "isdir": 0}
+            normalized = self._normalize_remote_path(remote_path)
+            if normalized == self.existing_file:
+                return {"path": normalized, "isdir": 0}
+            if normalized in self.remote_dirs:
+                return {"path": normalized, "isdir": 1}
+            raise FileNotFoundError(remote_path)
+
+        def create_directory(self, dir_path: str) -> dict[str, object]:
+            self.remote_dirs.add(self._normalize_remote_path(dir_path))
+            return {"path": dir_path, "isdir": 1}
+
+        def move_path(
+            self,
+            source_path: str,
+            destination_dir: str,
+            new_name: str | None = None,
+            ondup: str = "newcopy",
+        ) -> dict[str, object]:
+            raise AssertionError(
+                f"索引缺失冲突路径不应触发 move：{source_path} -> {destination_dir}/{new_name}"
+            )
 
         def close(self) -> None:
             return None
@@ -366,7 +600,8 @@ def test_upload_archives_and_manifest_should_fail_when_remote_file_exists_withou
     output_path = tmp_path / "output"
     package_root = output_path / "packages" / "16.4"
     package_root.mkdir(parents=True, exist_ok=True)
-    archive = package_root / "Annie.7z"
+    archive = package_root / "champions" / "1·annie·黑暗之女·安妮-16.4-VO.7z"
+    archive.parent.mkdir(parents=True, exist_ok=True)
     archive.write_bytes(b"a")
 
     fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
