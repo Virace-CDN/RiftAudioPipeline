@@ -45,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="解包并发线程数（低磁盘模式建议 1-2）",
     )
     parser.add_argument(
+        "--download-concurrency",
+        type=int,
+        default=4,
+        help="模拟目录下载并发数（LCU/GAME WAD 下载）",
+    )
+    parser.add_argument(
         "--low-disk-mode",
         action=BooleanOptionalAction,
         default=True,

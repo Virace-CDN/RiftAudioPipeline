@@ -29,6 +29,7 @@ class PipelineConfig:
         baidu_pan_secret_key: 百度开放平台 secret key。
         baidu_pan_refresh_token: 百度开放平台 refresh token。
         local_bin_dir: 本地 bin 输入目录（写入 `manifest/<version>/bin_input`）。
+        download_concurrency: 模拟目录下载并发数（GAME/LCU manifest 文件下载）。
         unpack_workers: 解包并发线程数。
         low_disk_mode: 低磁盘模式；模拟目录下启用“按实体流式解包/打包/上传/清理”以降低峰值空间占用。
         enable_pack: 是否在解包后执行 7z 打包阶段。
@@ -51,6 +52,7 @@ class PipelineConfig:
     baidu_pan_secret_key: str | None = None
     baidu_pan_refresh_token: str | None = None
     local_bin_dir: Path | None = None
+    download_concurrency: int = 4
     unpack_workers: int = 2
     low_disk_mode: bool = True
     enable_pack: bool = False
@@ -88,6 +90,7 @@ class PipelineConfig:
             Path(args.pack_extra_dir).expanduser().resolve() if args.pack_extra_dir else None
         )
         unpack_workers = max(1, int(args.unpack_workers))
+        download_concurrency = max(1, int(args.download_concurrency))
 
         return cls(
             output_path=output_path,
@@ -101,6 +104,7 @@ class PipelineConfig:
             baidu_pan_secret_key=args.baidu_secret_key or env_secret_key,
             baidu_pan_refresh_token=args.baidu_refresh_token or env_refresh_token,
             local_bin_dir=local_bin_dir,
+            download_concurrency=download_concurrency,
             unpack_workers=unpack_workers,
             low_disk_mode=bool(args.low_disk_mode),
             enable_pack=bool(args.enable_pack),

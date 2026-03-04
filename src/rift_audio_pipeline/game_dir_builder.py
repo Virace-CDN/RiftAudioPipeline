@@ -123,6 +123,8 @@ def stage_runtime_file(
     normalized_path = _normalize_relative_game_path(relative_path)
     target_file = game_path / normalized_path
     target_file.parent.mkdir(parents=True, exist_ok=True)
+    if source_file.resolve(strict=False) == target_file.resolve(strict=False):
+        return target_file
 
     if target_file.exists():
         target_file.unlink()

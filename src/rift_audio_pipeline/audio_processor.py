@@ -43,6 +43,8 @@ def run_data_updater(
 
     updater = DataUpdater(languages=[region], force_update=force_update)
     data_file_base = updater.check_and_update()
+    if not isinstance(data_file_base, Path):
+        raise RuntimeError(f"DataUpdater 未返回有效 data 路径：{data_file_base!r}")
     logger.info("DataUpdater 执行完成：{}", data_file_base)
     return data_file_base
 

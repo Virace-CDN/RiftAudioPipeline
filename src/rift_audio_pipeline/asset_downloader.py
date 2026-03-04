@@ -7,8 +7,10 @@ from collections.abc import Iterable
 from collections.abc import Sequence
 from pathlib import Path
 import re
+import time
 from typing import Any
 
+from loguru import logger
 from riotmanifest import PatcherManifest
 
 from rift_audio_pipeline.game_dir_builder import stage_runtime_file
@@ -21,6 +23,7 @@ def download_game_content_metadata(
     game_manifest_url: str,
     download_dir: Path,
     game_path: Path,
+    concurrency_limit: int = DEFAULT_DOWNLOAD_CONCURRENCY,
 ) -> Path:
     """下载并落地 `content-metadata.json`。
 
@@ -28,21 +31,31 @@ def download_game_content_metadata(
         game_manifest_url: GAME manifest URL。
         download_dir: 下载缓存目录。
         game_path: 运行时最小游戏目录。
+        concurrency_limit: 并发下载数。
 
     Returns:
         落地后的目标文件路径。
     """
 
+    logger.debug(
+        "开始下载 content-metadata：manifest_url={}, download_dir={}, game_path={}",
+        game_manifest_url,
+        download_dir,
+        game_path,
+    )
     downloaded = download_manifest_exact_paths(
         manifest_url=game_manifest_url,
         download_dir=download_dir,
         exact_paths=("content-metadata.json",),
+        concurrency_limit=concurrency_limit,
     )
-    return stage_runtime_file(
+    staged = stage_runtime_file(
         game_path=game_path,
         relative_path="Game/content-metadata.json",
         source_file=downloaded[0],
     )
+    logger.debug("content-metadata 下载完成：source={}, staged={}", downloaded[0], staged)
+    return staged
 
 
 def download_lcu_data_wads(
@@ -50,6 +63,7 @@ def download_lcu_data_wads(
     download_dir: Path,
     game_path: Path,
     region: str,
+    concurrency_limit: int = DEFAULT_DOWNLOAD_CONCURRENCY,
 ) -> tuple[Path, ...]:
     """下载 DataUpdater 所需 LCU WAD 并落地到最小游戏目录。
 
@@ -63,11 +77,19 @@ def download_lcu_data_wads(
         落地后的 WAD 路径集合。
     """
 
+    logger.debug(
+        "开始下载 LCU WAD：manifest_url={}, region={}, download_dir={}, concurrency_limit={}",
+        lcu_manifest_url,
+        region,
+        download_dir,
+        concurrency_limit,
+    )
     region_pattern = rf"^Plugins/rcp-be-lol-game-data/{re.escape(region)}-assets\.wad$"
     downloaded = download_manifest_patterns(
         manifest_url=lcu_manifest_url,
         download_dir=download_dir,
         patterns=(LCU_DEFAULT_ASSETS_PATTERN, region_pattern),
+        concurrency_limit=concurrency_limit,
     )
 
     staged: list[Path] = []
@@ -81,6 +103,7 @@ def download_lcu_data_wads(
                 source_file=source,
             )
         )
+    logger.debug("LCU WAD 下载完成：downloaded_count={}, staged_count={}", len(downloaded), len(staged))
     return tuple(staged)
 
 
@@ -89,6 +112,7 @@ def download_game_wads_by_runtime_paths(
     download_dir: Path,
     game_path: Path,
     runtime_wad_paths: Sequence[str],
+    concurrency_limit: int = DEFAULT_DOWNLOAD_CONCURRENCY,
 ) -> tuple[Path, ...]:
     """按运行时路径下载 GAME WAD 并落地到最小游戏目录。
 
@@ -100,16 +124,24 @@ def download_game_wads_by_runtime_paths(
         download_dir: 下载缓存目录。
         game_path: 运行时最小游戏目录。
         runtime_wad_paths: 运行时 WAD 路径集合。
+        concurrency_limit: 并发下载数。
 
     Returns:
         落地后的 WAD 路径集合。
     """
 
+    logger.debug(
+        "开始下载 GAME WAD：manifest_url={}, download_dir={}, runtime_wad_count={}",
+        game_manifest_url,
+        download_dir,
+        len(runtime_wad_paths),
+    )
     manifest_paths = tuple(_to_game_manifest_path(path) for path in runtime_wad_paths)
     downloaded = download_manifest_exact_paths(
         manifest_url=game_manifest_url,
         download_dir=download_dir,
         exact_paths=manifest_paths,
+        concurrency_limit=concurrency_limit,
     )
 
     staged: list[Path] = []
@@ -122,6 +154,7 @@ def download_game_wads_by_runtime_paths(
                 source_file=source,
             )
         )
+    logger.debug("GAME WAD 下载完成：downloaded_count={}, staged_count={}", len(downloaded), len(staged))
     return tuple(staged)
 
 
@@ -217,12 +250,26 @@ def _download_selected_files(
     if not files:
         return tuple()
     download_dir.mkdir(parents=True, exist_ok=True)
+    started_at = time.perf_counter()
+    logger.debug(
+        "开始 manifest 文件下载：download_dir={}, file_count={}, concurrency_limit={}",
+        download_dir,
+        len(files),
+        concurrency_limit,
+    )
     results = asyncio.run(
         manifest.download_files_concurrently(
             files=list(files),
             concurrency_limit=concurrency_limit,
             raise_on_error=False,
         )
+    )
+    elapsed = time.perf_counter() - started_at
+    logger.debug(
+        "manifest 文件下载完成：download_dir={}, file_count={}, elapsed_sec={:.2f}",
+        download_dir,
+        len(files),
+        elapsed,
     )
     failed = [
         str(file_obj.name) for file_obj, success in zip(files, results, strict=False) if not success

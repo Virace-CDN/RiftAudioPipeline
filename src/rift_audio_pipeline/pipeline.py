@@ -14,6 +14,7 @@ from queue import Full
 from queue import Queue
 import shutil
 import threading
+import time
 
 from loguru import logger
 
@@ -28,6 +29,7 @@ from rift_audio_pipeline.audio_processor import run_data_updater
 from rift_audio_pipeline.audio_processor import run_unpack
 from rift_audio_pipeline.baidu.sdk import ensure_official_sdk_path
 from rift_audio_pipeline.baidu.oauth import resolve_token_store
+from rift_audio_pipeline.baidu.pan import BaiduPanApiError
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
 from rift_audio_pipeline.baidu.pan import BaiduPanClient
 from rift_audio_pipeline.bin_extractor import create_local_bin_flag
@@ -140,6 +142,7 @@ def run_pipeline(config: PipelineConfig) -> int:
         latest.lcu_version,
         config.game_region,
     )
+    pipeline_game_version = _normalize_pipeline_game_version(latest.game_version)
 
     if not decision.should_update:
         saved_state = build_local_state(latest_versions=latest)
@@ -186,7 +189,7 @@ def run_pipeline(config: PipelineConfig) -> int:
                     update_paths=decision.wad_changes.update_paths,
                     bin_output_dir=config.output_path
                     / "manifest"
-                    / latest.game_version
+                    / pipeline_game_version
                     / "bin_input",
                 )
             except Exception as error:  # noqa: BLE001
@@ -202,7 +205,9 @@ def run_pipeline(config: PipelineConfig) -> int:
                 logger.info("需解包 WAD：{}", ", ".join(secondary_filter.unpack_paths))
                 secondary_filter_result = secondary_filter
                 secondary_unpack_paths = secondary_filter.unpack_paths
-                secondary_filter_version_dir = config.output_path / "manifest" / latest.game_version
+                secondary_filter_version_dir = (
+                    config.output_path / "manifest" / pipeline_game_version
+                )
                 create_local_bin_flag(version_dir=secondary_filter_version_dir)
                 matched_auto_bin_paths = {
                     path.strip().replace("\\", "/").casefold()
@@ -238,6 +243,19 @@ def run_pipeline(config: PipelineConfig) -> int:
             "检测到版本更新，但当前流程要求必须启用打包与上传：--enable-pack --enable-upload"
         )
         return 1
+    allow_missing_remote_index = decision.reason == DECISION_REASON_FIRST_RUN
+    try:
+        _preflight_remote_upload_index(
+            config=config,
+            package_root=_resolve_package_output_root(
+                config=config,
+                game_version=pipeline_game_version,
+            ),
+            allow_missing_remote_index=allow_missing_remote_index,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.error("更新确认阶段远端索引预检失败，error={}", error)
+        return 1
 
     runtime_game_path, runtime_is_simulated = _resolve_runtime_game_path(
         config=config,
@@ -249,21 +267,34 @@ def run_pipeline(config: PipelineConfig) -> int:
 
     runtime_download_dir = _build_runtime_download_dir(
         runtime_game_path=runtime_game_path,
-        game_version=latest.game_version,
+        game_version=pipeline_game_version,
         region=config.game_region,
+        runtime_is_simulated=runtime_is_simulated,
+    )
+    game_download_dir, lcu_download_dir = _resolve_runtime_download_dirs(
+        runtime_download_dir=runtime_download_dir,
+        runtime_is_simulated=runtime_is_simulated,
     )
     if runtime_is_simulated:
         try:
+            removed_stale_lcu_wads = cleanup_lcu_data_wads(
+                game_path=runtime_game_path,
+                region=config.game_region,
+            )
+            if removed_stale_lcu_wads > 0:
+                logger.info("下载前已清理历史 LCU WAD：removed_count={}", removed_stale_lcu_wads)
             metadata_file = download_game_content_metadata(
                 game_manifest_url=latest.game_manifest_url,
-                download_dir=runtime_download_dir / "game",
+                download_dir=game_download_dir,
                 game_path=runtime_game_path,
+                concurrency_limit=config.download_concurrency,
             )
             lcu_wads = download_lcu_data_wads(
                 lcu_manifest_url=latest.lcu_manifest_url,
-                download_dir=runtime_download_dir / "lcu",
+                download_dir=lcu_download_dir,
                 game_path=runtime_game_path,
                 region=config.game_region,
+                concurrency_limit=config.download_concurrency,
             )
         except Exception as error:  # noqa: BLE001
             logger.error("最小游戏目录基础资源下载失败，error={}", error)
@@ -275,6 +306,12 @@ def run_pipeline(config: PipelineConfig) -> int:
         )
 
     try:
+        logger.debug(
+            "开始执行 DataUpdater：game_path={}, output_path={}, region={}",
+            runtime_game_path,
+            config.output_path,
+            config.game_region,
+        )
         data_file_base = run_data_updater(
             game_path=runtime_game_path,
             output_path=config.output_path,
@@ -284,6 +321,15 @@ def run_pipeline(config: PipelineConfig) -> int:
     except Exception as error:  # noqa: BLE001
         logger.error("DataUpdater 执行失败，error={}", error)
         return 1
+    data_version = data_file_base.parent.name.strip()
+    if data_version:
+        if data_version != pipeline_game_version:
+            logger.info(
+                "本地路径版本已按 DataUpdater 目录修正：expected={}, actual={}",
+                pipeline_game_version,
+                data_version,
+            )
+        pipeline_game_version = data_version
     if runtime_is_simulated:
         removed_lcu_data_wads = cleanup_lcu_data_wads(
             game_path=runtime_game_path,
@@ -353,12 +399,19 @@ def run_pipeline(config: PipelineConfig) -> int:
         if not runtime_wad_paths:
             logger.error("未解析到可下载的 GAME WAD 路径，无法继续模拟目录解包。")
             return 1
+        removed_stale_runtime_wads = _cleanup_task_runtime_wads(
+            runtime_game_path=runtime_game_path,
+            runtime_wad_paths=runtime_wad_paths,
+        )
+        if removed_stale_runtime_wads > 0:
+            logger.info("下载前已清理历史 GAME WAD：removed_count={}", removed_stale_runtime_wads)
         try:
             game_wads = download_game_wads_by_runtime_paths(
                 game_manifest_url=latest.game_manifest_url,
-                download_dir=runtime_download_dir / "game",
+                download_dir=game_download_dir,
                 game_path=runtime_game_path,
                 runtime_wad_paths=runtime_wad_paths,
+                concurrency_limit=config.download_concurrency,
             )
         except Exception as error:  # noqa: BLE001
             logger.error("最小游戏目录 GAME WAD 下载失败，error={}", error)
@@ -374,7 +427,6 @@ def run_pipeline(config: PipelineConfig) -> int:
         runtime_is_simulated=runtime_is_simulated,
         targets=targets,
     )
-    allow_missing_remote_index = decision.reason == DECISION_REASON_FIRST_RUN
     upload_manifest: Path | None = None
     upload_run_records: list[dict[str, object]] = []
     effective_unpack_workers = _resolve_effective_unpack_workers(
@@ -402,7 +454,7 @@ def run_pipeline(config: PipelineConfig) -> int:
         if streaming_mode:
             upload_manifest = _run_streaming_unpack_pack_upload(
                 config=config,
-                game_version=latest.game_version,
+                game_version=pipeline_game_version,
                 data_file_base=data_file_base,
                 targets=targets,
                 runtime_game_path=runtime_game_path,
@@ -437,19 +489,19 @@ def run_pipeline(config: PipelineConfig) -> int:
             logger.info("上传阶段执行完成：manifest_file={}", upload_manifest)
     else:
         try:
-            archives = _pack_unpacked_outputs(config=config, game_version=latest.game_version)
+            archives = _pack_unpacked_outputs(config=config, game_version=pipeline_game_version)
         except Exception as error:  # noqa: BLE001
             logger.error("打包阶段失败，error={}", error)
             return 1
         logger.info("打包阶段执行完成：archive_count={}", len(archives))
         removed_audio_files = _cleanup_version_audio_outputs(
-            version_audio_dir=config.output_path / "audios" / latest.game_version
+            version_audio_dir=config.output_path / "audios" / pipeline_game_version
         )
         logger.info("打包后已清理音频目录文件：removed_count={}", removed_audio_files)
         try:
             upload_manifest = _upload_archives_and_manifest(
                 config=config,
-                game_version=latest.game_version,
+                game_version=pipeline_game_version,
                 archives=archives,
                 allow_missing_remote_index=allow_missing_remote_index,
                 run_record_collector=upload_run_records,
@@ -464,7 +516,7 @@ def run_pipeline(config: PipelineConfig) -> int:
         update_log_json, update_log_text = _write_and_upload_update_log_files(
             config=config,
             decision=decision,
-            game_version=latest.game_version,
+            game_version=pipeline_game_version,
             target_entities=target_entities,
             targets=targets,
             secondary_filter_result=secondary_filter_result,
@@ -635,7 +687,19 @@ def _run_streaming_unpack_pack_upload(
         )
         sentinel_enqueued = True
         if not upload_errors:
-            upload_queue.join()
+            while upload_queue.unfinished_tasks > 0:
+                logger.debug(
+                    "等待流式上传队列完成：unfinished_tasks={}",
+                    upload_queue.unfinished_tasks,
+                )
+                if upload_errors:
+                    break
+                if not upload_thread.is_alive():
+                    raise RuntimeError(
+                        "流式上传线程已退出但仍存在未完成任务："
+                        f"unfinished_tasks={upload_queue.unfinished_tasks}"
+                    )
+                time.sleep(1)
         if upload_errors:
             raise RuntimeError("流式上传线程执行失败，流水线终止。") from upload_errors[0]
     finally:
@@ -713,11 +777,19 @@ def _run_streaming_upload_worker(
 ) -> None:
     """消费流式打包产物并执行上传与压缩包清理。"""
 
+    logger.debug("流式上传线程已启动：game_version={}", game_version)
     while True:
         artifact = upload_queue.get()
         try:
             if artifact is None:
+                logger.debug("流式上传线程收到停止信号。")
                 return
+            logger.debug(
+                "流式上传线程开始处理任务：target={}, entity_id={}, archive={}",
+                artifact.task.target,
+                artifact.task.entity_id,
+                artifact.archive_path,
+            )
             manifest_file = _upload_archives_and_manifest(
                 config=config,
                 game_version=game_version,
@@ -735,6 +807,7 @@ def _run_streaming_upload_worker(
                 artifact.archive_path,
             )
         except Exception as error:  # noqa: BLE001
+            logger.exception("流式上传线程异常：error={}", error)
             upload_errors.append(error)
             return
         finally:
@@ -1004,10 +1077,24 @@ def _build_runtime_download_dir(
     runtime_game_path: Path,
     game_version: str,
     region: str,
+    runtime_is_simulated: bool,
 ) -> Path:
     """构建运行时下载缓存目录。"""
 
+    if runtime_is_simulated:
+        return runtime_game_path
     return runtime_game_path.parent / "downloads" / game_version / region
+
+
+def _resolve_runtime_download_dirs(
+    runtime_download_dir: Path,
+    runtime_is_simulated: bool,
+) -> tuple[Path, Path]:
+    """解析 GAME/LCU 下载目录。"""
+
+    if runtime_is_simulated:
+        return runtime_download_dir / "Game", runtime_download_dir / "LeagueClient"
+    return runtime_download_dir / "game", runtime_download_dir / "lcu"
 
 
 def _pack_unpacked_outputs(config: PipelineConfig, game_version: str) -> tuple[Path, ...]:
@@ -1067,6 +1154,47 @@ def _pack_unpacked_outputs(config: PipelineConfig, game_version: str) -> tuple[P
     return tuple(sorted(archives, key=lambda path: path.as_posix().casefold()))
 
 
+def _preflight_remote_upload_index(
+    config: PipelineConfig,
+    package_root: Path,
+    allow_missing_remote_index: bool,
+) -> None:
+    """在主线更新确认阶段预检远端上传索引。"""
+
+    if not (
+        config.baidu_pan_app_key and config.baidu_pan_secret_key and config.baidu_pan_refresh_token
+    ):
+        raise ValueError("上传索引预检失败：缺少百度凭据，请配置 app_key/secret_key/refresh_token")
+
+    credentials = BaiduCredentials(
+        app_key=config.baidu_pan_app_key,
+        secret_key=config.baidu_pan_secret_key,
+        refresh_token=config.baidu_pan_refresh_token,
+    )
+    token_store = resolve_token_store()
+    client = BaiduPanClient(
+        credentials=credentials,
+        remote_dir=config.baidu_pan_remote_dir,
+        token_store=token_store,
+    )
+    try:
+        _initialize_remote_upload_layout(client=client)
+        remote_index = _load_remote_upload_manifest_index(
+            client=client,
+            package_root=package_root,
+            allow_missing_remote_index=allow_missing_remote_index,
+        )
+        if remote_index:
+            logger.info("更新确认阶段远端索引预检通过：entry_count={}", len(remote_index))
+            return
+        if allow_missing_remote_index:
+            logger.info("更新确认阶段远端索引缺失，首次全量流程将自动初始化索引。")
+            return
+        logger.info("更新确认阶段远端索引为空：entry_count=0")
+    finally:
+        client.close()
+
+
 def _upload_archives_and_manifest(
     config: PipelineConfig,
     game_version: str,
@@ -1076,6 +1204,12 @@ def _upload_archives_and_manifest(
 ) -> Path | None:
     """将打包产物上传到百度网盘，并同步本次上传清单。"""
 
+    logger.debug(
+        "进入上传阶段：game_version={}, archive_count={}, remote_dir={}",
+        game_version,
+        len(archives),
+        config.baidu_pan_remote_dir,
+    )
     if not archives:
         logger.warning("上传阶段跳过：无可上传压缩包。")
         return None
@@ -1103,13 +1237,16 @@ def _upload_archives_and_manifest(
         token_store=token_store,
     )
     try:
+        _initialize_remote_upload_layout(client=client)
+        logger.debug("远端上传目录初始化完成。")
+        logger.debug("开始加载远端上传索引。")
         remote_index = _load_remote_upload_manifest_index(
             client=client,
             package_root=package_root,
             allow_missing_remote_index=allow_missing_remote_index,
         )
+        logger.debug("远端上传索引加载完成：entry_count={}", len(remote_index))
         executed_at = _current_utc_timestamp()
-        _initialize_remote_upload_layout(client=client)
         default_resource_type = _resolve_default_upload_resource_type(config=config)
         for archive in archives:
             if not archive.is_file():
@@ -1173,8 +1310,19 @@ def _upload_archives_and_manifest(
 
             file_size = archive.stat().st_size
             file_sha256 = _calculate_sha256(archive)
+            logger.debug(
+                "开始上传压缩包：local={}, remote_path={}, size={}",
+                archive,
+                upload_layout.remote_relative_path,
+                file_size,
+            )
             response = client.upload_file(
                 local_path=archive, remote_path=upload_layout.remote_relative_path
+            )
+            logger.debug(
+                "压缩包上传完成：remote_path={}, response_keys={}",
+                upload_layout.remote_relative_path,
+                sorted(response.keys()) if isinstance(response, dict) else type(response),
             )
             has_index_changes = True
             remote_index[remote_path.casefold()] = {
@@ -1229,11 +1377,13 @@ def _upload_archives_and_manifest(
         if run_record_collector is not None:
             run_record_collector.extend(run_entries)
         if has_index_changes:
+            logger.debug("开始回传上传索引文件。")
             client.upload_file(local_path=manifest_file, remote_path=UPLOAD_MANIFEST_FILE_NAME)
             client.upload_file(
                 local_path=readable_manifest_file,
                 remote_path=UPLOAD_MANIFEST_TEXT_FILE_NAME,
             )
+            logger.debug("上传索引文件回传完成。")
         else:
             logger.info("远端索引无变化，跳过索引文件回传。")
         return manifest_file
@@ -1521,6 +1671,7 @@ def _ensure_remote_directory(client: BaiduPanClient, relative_dir: str) -> None:
 def _initialize_remote_upload_layout(client: BaiduPanClient) -> None:
     """初始化远端目录结构。"""
 
+    client.create_directory(dir_path=client.remote_dir)
     for resource_type in RESOURCE_TYPE_BUCKETS:
         for target_group in RESOURCE_TARGET_GROUPS:
             _ensure_remote_directory(client=client, relative_dir=f"{resource_type}/{target_group}")
@@ -1947,6 +2098,16 @@ def _load_remote_upload_manifest_index(
                 )
             logger.info("远端索引不存在，将创建新索引：{}", UPLOAD_MANIFEST_FILE_NAME)
             return {}
+        except BaiduPanApiError as error:
+            if error.errno == -9:
+                if not allow_missing_remote_index:
+                    raise RuntimeError(
+                        "上传阶段终止：远端缺少上传索引 upload_manifest.json，"
+                        "当前为差异更新流程，可能存在文件被手工移动或索引丢失，请先修复索引。"
+                    ) from error
+                logger.info("远端索引不存在（errno=-9），将创建新索引：{}", UPLOAD_MANIFEST_FILE_NAME)
+                return {}
+            raise
 
         try:
             payload = json.loads(temp_file.read_text(encoding="utf-8"))
@@ -2132,6 +2293,8 @@ def _cleanup_simulated_runtime_files(
                 removed_runtime_wads += 1
 
     removed_download_cache = 0
+    if runtime_download_dir.expanduser().resolve() == runtime_game_path.expanduser().resolve():
+        return removed_runtime_wads, removed_download_cache
     if runtime_download_dir.exists():
         for item in runtime_download_dir.rglob("*"):
             if item.is_file():
@@ -2152,6 +2315,18 @@ def _merge_runtime_wad_paths(*groups: tuple[str, ...]) -> tuple[str, ...]:
                 continue
             deduped.setdefault(normalized.casefold(), normalized)
     return tuple(sorted(deduped.values(), key=str.casefold))
+
+
+def _normalize_pipeline_game_version(game_version: str) -> str:
+    """将版本号标准化为 `major.minor`，用于本地路径与打包命名。"""
+
+    normalized = game_version.strip()
+    if not normalized:
+        return normalized
+    parts = normalized.split(".")
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        return f"{parts[0]}.{parts[1]}"
+    return normalized
 
 
 def _build_runtime_wad_paths_from_manifest_paths(

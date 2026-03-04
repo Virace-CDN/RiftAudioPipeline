@@ -483,7 +483,12 @@ class BaiduPanClient:
 
         path_obj = PurePosixPath(normalized_path)
         parent_dir = str(path_obj.parent) if str(path_obj.parent) else "/"
-        listing = self.list_files(dir_path=parent_dir)
+        try:
+            listing = self.list_files(dir_path=parent_dir)
+        except BaiduPanApiError as error:
+            if error.errno == -9:
+                raise FileNotFoundError(f"网盘路径不存在：{normalized_path}") from error
+            raise
         for entry in listing.get("list", []):
             if isinstance(entry, dict) and entry.get("path") == normalized_path:
                 return entry
