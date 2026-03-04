@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -31,6 +33,8 @@ WAD_CLIENT_FILE_PATTERN = r"wad\.client$"
 LOCALIZED_WAD_SEGMENT = "/localized/"
 DEFAULT_MAX_CHAMPION_SKIN_BIN_INDEX = 260
 BIN_PROBE_BATCH_SIZE = 80
+DEFAULT_VOICE_FILTER_UNIT_MAX_WORKERS = 4
+DEFAULT_VOICE_FILTER_EXTRACTOR_PREFETCH_CONCURRENCY = 6
 
 VOICE_AUDIO_SUFFIXES = ("_vo_audio.bnk", "_vo_audio.wpk")
 VOICE_EVENTS_SUFFIX = "_vo_events.bnk"
@@ -422,6 +426,10 @@ def filter_wad_changes_by_bin_voice_paths(
     region: str,
     update_paths: Sequence[str],
     max_champion_skin_bin_index: int = DEFAULT_MAX_CHAMPION_SKIN_BIN_INDEX,
+    unit_max_workers: int = DEFAULT_VOICE_FILTER_UNIT_MAX_WORKERS,
+    extractor_prefetch_chunk_concurrency: int = (
+        DEFAULT_VOICE_FILTER_EXTRACTOR_PREFETCH_CONCURRENCY
+    ),
     bin_output_dir: Path | None = None,
 ) -> ManifestVoiceFilterResult:
     """基于根 WAD 的 BIN 解析结果筛选真正需要解包的区域 WAD。
@@ -438,6 +446,9 @@ def filter_wad_changes_by_bin_voice_paths(
         region: 语言区域（例如 `zh_CN`）。
         update_paths: 来自 manifest diff 的区域 WAD 变化路径（通常为 `added + changed`）。
         max_champion_skin_bin_index: 英雄 BIN 探测上限（包含该值）。
+        unit_max_workers: 以英雄/地图为单位并发筛选时的最大并发数。
+        extractor_prefetch_chunk_concurrency: WADExtractor 内部预取下载并发
+            （映射 `prefetch_chunk_concurrency`）。
         bin_output_dir: 可选 BIN 落地目录；传入后会在筛选阶段直接写入 BIN 文件。
 
     Returns:
@@ -451,6 +462,13 @@ def filter_wad_changes_by_bin_voice_paths(
     if max_champion_skin_bin_index < 0:
         raise ValueError(
             f"max_champion_skin_bin_index 必须为非负整数，当前值={max_champion_skin_bin_index}"
+        )
+    if unit_max_workers < 1:
+        raise ValueError(f"unit_max_workers 必须 >= 1，当前值={unit_max_workers}")
+    if extractor_prefetch_chunk_concurrency < 1:
+        raise ValueError(
+            "extractor_prefetch_chunk_concurrency 必须 >= 1，"
+            f"当前值={extractor_prefetch_chunk_concurrency}"
         )
 
     normalized_paths = _normalize_update_paths(update_paths)
@@ -491,19 +509,61 @@ def filter_wad_changes_by_bin_voice_paths(
 
         on_bin_payloads = _on_bin_payloads
 
-    with WADExtractor(new_manifest) as new_extractor, WADExtractor(old_manifest) as old_extractor:
-        for wad_path in normalized_paths:
-            decision = _build_wad_voice_filter_decision(
-                old_extractor=old_extractor,
-                new_extractor=new_extractor,
+    grouped_wad_paths = _group_update_paths_by_root_wad(update_paths=normalized_paths, region=region)
+    effective_workers = min(unit_max_workers, len(grouped_wad_paths))
+    collected_bin_payloads: list[tuple[WadVoiceFilterDecision, dict[str, bytes]]] = []
+    if effective_workers <= 1:
+        for wad_paths in grouped_wad_paths:
+            group_decisions, group_payloads = _build_wad_voice_filter_decisions_for_group(
+                old_manifest=old_manifest,
+                new_manifest=new_manifest,
                 old_file_index=old_file_index,
                 new_file_index=new_file_index,
                 region=region,
-                wad_path=wad_path,
+                wad_paths=wad_paths,
                 max_champion_skin_bin_index=max_champion_skin_bin_index,
-                on_bin_payloads=on_bin_payloads,
+                extractor_prefetch_chunk_concurrency=extractor_prefetch_chunk_concurrency,
+                collect_bin_payloads=on_bin_payloads is not None,
             )
-            decisions.append(decision)
+            decisions.extend(group_decisions)
+            collected_bin_payloads.extend(group_payloads)
+    else:
+        grouped_results: dict[
+            int,
+            tuple[
+                tuple[WadVoiceFilterDecision, ...],
+                tuple[tuple[WadVoiceFilterDecision, dict[str, bytes]], ...],
+            ],
+        ] = {}
+        with ThreadPoolExecutor(
+            max_workers=effective_workers,
+            thread_name_prefix="wad-bin-filter",
+        ) as executor:
+            future_to_index = {
+                executor.submit(
+                    _build_wad_voice_filter_decisions_for_group,
+                    old_manifest=old_manifest,
+                    new_manifest=new_manifest,
+                    old_file_index=old_file_index,
+                    new_file_index=new_file_index,
+                    region=region,
+                    wad_paths=wad_paths,
+                    max_champion_skin_bin_index=max_champion_skin_bin_index,
+                    extractor_prefetch_chunk_concurrency=extractor_prefetch_chunk_concurrency,
+                    collect_bin_payloads=on_bin_payloads is not None,
+                ): index
+                for index, wad_paths in enumerate(grouped_wad_paths)
+            }
+            for future in as_completed(future_to_index):
+                grouped_results[future_to_index[future]] = future.result()
+        for group_index in sorted(grouped_results):
+            group_decisions, group_payloads = grouped_results[group_index]
+            decisions.extend(group_decisions)
+            collected_bin_payloads.extend(group_payloads)
+
+    if on_bin_payloads is not None:
+        for decision_item, bin_payloads in collected_bin_payloads:
+            on_bin_payloads(decision_item, bin_payloads)
 
     unpack_paths = tuple(
         sorted(
@@ -1040,6 +1100,80 @@ def _normalize_update_paths(update_paths: Sequence[str]) -> tuple[str, ...]:
             key=str.casefold,
         )
     )
+
+
+def _group_update_paths_by_root_wad(
+    update_paths: Sequence[str],
+    region: str,
+) -> tuple[tuple[str, ...], ...]:
+    """按根 WAD（英雄/地图单位）对区域 WAD 路径分组。"""
+
+    grouped: dict[str, list[str]] = {}
+    for raw_path in update_paths:
+        normalized_path = _normalize_manifest_path(raw_path)
+        root_wad_path = _resolve_root_wad_path(region_wad_path=normalized_path, region=region)
+        if root_wad_path is None:
+            group_key = f"path::{normalized_path.casefold()}"
+        else:
+            group_key = f"root::{_normalize_manifest_path(root_wad_path).casefold()}"
+        grouped.setdefault(group_key, []).append(normalized_path)
+    return tuple(
+        tuple(sorted(set(paths), key=str.casefold))
+        for _, paths in sorted(grouped.items(), key=lambda item: item[0].casefold())
+    )
+
+
+def _build_wad_voice_filter_decisions_for_group(
+    old_manifest: PatcherManifest,
+    new_manifest: PatcherManifest,
+    old_file_index: Mapping[str, Any],
+    new_file_index: Mapping[str, Any],
+    region: str,
+    wad_paths: Sequence[str],
+    max_champion_skin_bin_index: int,
+    extractor_prefetch_chunk_concurrency: int,
+    collect_bin_payloads: bool,
+) -> tuple[
+    tuple[WadVoiceFilterDecision, ...],
+    tuple[tuple[WadVoiceFilterDecision, dict[str, bytes]], ...],
+]:
+    """按单个单位分组执行 WAD 二次筛选。"""
+
+    decisions: list[WadVoiceFilterDecision] = []
+    captured_payloads: list[tuple[WadVoiceFilterDecision, dict[str, bytes]]] = []
+
+    def _capture_bin_payloads(
+        decision: WadVoiceFilterDecision,
+        bin_payloads: Mapping[str, bytes],
+    ) -> None:
+        normalized_payloads = {
+            str(path): bytes(content)
+            for path, content in bin_payloads.items()
+            if isinstance(path, str) and isinstance(content, (bytes, bytearray)) and content
+        }
+        if normalized_payloads:
+            captured_payloads.append((decision, normalized_payloads))
+
+    with WADExtractor(
+        new_manifest,
+        prefetch_chunk_concurrency=extractor_prefetch_chunk_concurrency,
+    ) as new_extractor, WADExtractor(
+        old_manifest,
+        prefetch_chunk_concurrency=extractor_prefetch_chunk_concurrency,
+    ) as old_extractor:
+        for wad_path in wad_paths:
+            decision = _build_wad_voice_filter_decision(
+                old_extractor=old_extractor,
+                new_extractor=new_extractor,
+                old_file_index=old_file_index,
+                new_file_index=new_file_index,
+                region=region,
+                wad_path=wad_path,
+                max_champion_skin_bin_index=max_champion_skin_bin_index,
+                on_bin_payloads=_capture_bin_payloads if collect_bin_payloads else None,
+            )
+            decisions.append(decision)
+    return tuple(decisions), tuple(captured_payloads)
 
 
 def _normalize_manifest_path(path: str) -> str:

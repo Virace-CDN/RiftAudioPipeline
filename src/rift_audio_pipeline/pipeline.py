@@ -64,6 +64,8 @@ RESOURCE_TARGET_GROUPS = ("champions", "maps")
 UPLOAD_DATABASE_SCHEMA_VERSION = 1
 UPDATE_LOG_SCHEMA_VERSION = 1
 UPDATE_LOG_REMOTE_DIR = "update_logs"
+PENDING_MANIFEST_SYNC_QUEUE_FILE_NAME = "pending_manifest_sync_queue.json"
+MANIFEST_UPLOAD_MAX_ATTEMPTS = 3
 STREAMING_UPLOAD_QUEUE_SIZE = 1
 STREAMING_DISK_SPACE_MULTIPLIER = 3
 STREAMING_MIN_REQUIRED_BYTES = 512 * 1024 * 1024
@@ -162,6 +164,7 @@ def run_pipeline(config: PipelineConfig) -> int:
     secondary_filter_result = None
     secondary_unpack_paths: tuple[str, ...] | None = None
     secondary_filter_version_dir: Path | None = None
+    target_manifest_paths_override: tuple[str, ...] | None = None
     if decision.reason == DECISION_REASON_FIRST_RUN:
         logger.info("检测到首次启动（无历史状态），将进入首次全量更新流程。")
     else:
@@ -181,59 +184,80 @@ def run_pipeline(config: PipelineConfig) -> int:
             logger.info("变更地图：{}", ", ".join(decision.changed_entities.map_ids))
 
         if decision.previous_state is not None and decision.wad_changes.update_paths:
-            try:
-                secondary_filter = filter_wad_changes_by_bin_voice_paths(
-                    old_manifest_url=decision.previous_state.game_manifest_url,
-                    new_manifest_url=latest.game_manifest_url,
-                    region=config.game_region,
-                    update_paths=decision.wad_changes.update_paths,
-                    bin_output_dir=config.output_path
-                    / "manifest"
-                    / pipeline_game_version
-                    / "bin_input",
-                )
-            except Exception as error:  # noqa: BLE001
-                logger.error("WAD 二次筛选失败，error={}", error)
-                return 1
-
-            logger.info(
-                "WAD 二次筛选结果：需解包={}, 可跳过={}",
-                len(secondary_filter.unpack_paths),
-                len(secondary_filter.skipped_paths),
-            )
-            if secondary_filter.unpack_paths:
-                logger.info("需解包 WAD：{}", ", ".join(secondary_filter.unpack_paths))
-                secondary_filter_result = secondary_filter
-                secondary_unpack_paths = secondary_filter.unpack_paths
-                secondary_filter_version_dir = (
-                    config.output_path / "manifest" / pipeline_game_version
-                )
-                create_local_bin_flag(version_dir=secondary_filter_version_dir)
-                matched_auto_bin_paths = {
-                    path.strip().replace("\\", "/").casefold()
-                    for decision_item in secondary_filter.decisions
-                    if decision_item.should_unpack
-                    for path in decision_item.matched_bin_paths
-                    if isinstance(path, str) and path.strip()
-                }
+            update_wad_count = len(decision.wad_changes.update_paths)
+            threshold = config.diff_bin_filter_threshold
+            should_skip_secondary_filter = threshold > 0 and update_wad_count >= threshold
+            if should_skip_secondary_filter:
+                target_manifest_paths_override = tuple(decision.wad_changes.update_paths)
                 logger.info(
-                    "二次筛选 BIN 预写入完成：version_dir={}, matched_count={}",
-                    secondary_filter_version_dir,
-                    len(matched_auto_bin_paths),
+                    "清单层 WAD 更新数达到阈值，跳过 WADExtractor 二次筛选：wad_count={}, threshold={}，改走 diff 列表完整下载解包",
+                    update_wad_count,
+                    threshold,
                 )
-            if secondary_filter.skipped_paths:
-                logger.info("可跳过 WAD：{}", ", ".join(secondary_filter.skipped_paths))
-
-            if not secondary_filter.unpack_paths:
-                saved_state = build_local_state(latest_versions=latest)
-                saved_file = save_local_state(
-                    state=saved_state, state_file=DEFAULT_LOCAL_STATE_FILE
-                )
+            else:
                 logger.info(
-                    "二次筛选后无需资源更新（仅 events 或无音频变化），已同步状态文件：{}",
-                    saved_file,
+                    "开始 WAD 二次筛选：wad_count={}, threshold={}, unit_workers={}, extract_concurrency={}",
+                    update_wad_count,
+                    threshold,
+                    config.diff_bin_filter_workers,
+                    config.diff_bin_extract_concurrency,
                 )
-                return 0
+                try:
+                    secondary_filter = filter_wad_changes_by_bin_voice_paths(
+                        old_manifest_url=decision.previous_state.game_manifest_url,
+                        new_manifest_url=latest.game_manifest_url,
+                        region=config.game_region,
+                        update_paths=decision.wad_changes.update_paths,
+                        unit_max_workers=config.diff_bin_filter_workers,
+                        extractor_prefetch_chunk_concurrency=config.diff_bin_extract_concurrency,
+                        bin_output_dir=config.output_path
+                        / "manifest"
+                        / pipeline_game_version
+                        / "bin_input",
+                    )
+                except Exception as error:  # noqa: BLE001
+                    logger.error("WAD 二次筛选失败，error={}", error)
+                    return 1
+
+                logger.info(
+                    "WAD 二次筛选结果：需解包={}, 可跳过={}",
+                    len(secondary_filter.unpack_paths),
+                    len(secondary_filter.skipped_paths),
+                )
+                if secondary_filter.unpack_paths:
+                    logger.info("需解包 WAD：{}", ", ".join(secondary_filter.unpack_paths))
+                    secondary_filter_result = secondary_filter
+                    secondary_unpack_paths = secondary_filter.unpack_paths
+                    target_manifest_paths_override = secondary_filter.unpack_paths
+                    secondary_filter_version_dir = (
+                        config.output_path / "manifest" / pipeline_game_version
+                    )
+                    create_local_bin_flag(version_dir=secondary_filter_version_dir)
+                    matched_auto_bin_paths = {
+                        path.strip().replace("\\", "/").casefold()
+                        for decision_item in secondary_filter.decisions
+                        if decision_item.should_unpack
+                        for path in decision_item.matched_bin_paths
+                        if isinstance(path, str) and path.strip()
+                    }
+                    logger.info(
+                        "二次筛选 BIN 预写入完成：version_dir={}, matched_count={}",
+                        secondary_filter_version_dir,
+                        len(matched_auto_bin_paths),
+                    )
+                if secondary_filter.skipped_paths:
+                    logger.info("可跳过 WAD：{}", ", ".join(secondary_filter.skipped_paths))
+
+                if not secondary_filter.unpack_paths:
+                    saved_state = build_local_state(latest_versions=latest)
+                    saved_file = save_local_state(
+                        state=saved_state, state_file=DEFAULT_LOCAL_STATE_FILE
+                    )
+                    logger.info(
+                        "二次筛选后无需资源更新（仅 events 或无音频变化），已同步状态文件：{}",
+                        saved_file,
+                    )
+                    return 0
 
     if config.dry_run:
         logger.info("dry-run 启用：仅做更新判定，不执行后续任务。")
@@ -244,14 +268,23 @@ def run_pipeline(config: PipelineConfig) -> int:
         )
         return 1
     allow_missing_remote_index = decision.reason == DECISION_REASON_FIRST_RUN
+    package_root = _resolve_package_output_root(
+        config=config,
+        game_version=pipeline_game_version,
+    )
+    pending_manifest_sync_queue_file = (
+        config.output_path / "state" / PENDING_MANIFEST_SYNC_QUEUE_FILE_NAME
+    )
+    preloaded_remote_index: dict[str, dict[str, object]] = {}
     try:
-        _preflight_remote_upload_index(
+        preloaded_remote_index = _preflight_remote_upload_index(
             config=config,
-            package_root=_resolve_package_output_root(
-                config=config,
-                game_version=pipeline_game_version,
-            ),
+            package_root=package_root,
             allow_missing_remote_index=allow_missing_remote_index,
+        )
+        _retry_pending_manifest_sync_queue(
+            config=config,
+            queue_file=pending_manifest_sync_queue_file,
         )
     except Exception as error:  # noqa: BLE001
         logger.error("更新确认阶段远端索引预检失败，error={}", error)
@@ -363,8 +396,8 @@ def run_pipeline(config: PipelineConfig) -> int:
         )
 
     target_entities = (
-        extract_changed_entities_from_wad_paths(secondary_unpack_paths)
-        if secondary_unpack_paths is not None
+        extract_changed_entities_from_wad_paths(target_manifest_paths_override)
+        if target_manifest_paths_override is not None
         else decision.changed_entities
     )
     targets = resolve_processing_targets(
@@ -463,6 +496,8 @@ def run_pipeline(config: PipelineConfig) -> int:
                 unpack_workers=effective_unpack_workers,
                 allow_missing_remote_index=allow_missing_remote_index,
                 run_record_collector=upload_run_records,
+                preloaded_remote_index=preloaded_remote_index,
+                pending_manifest_sync_queue_file=pending_manifest_sync_queue_file,
             )
         else:
             run_unpack(
@@ -505,6 +540,8 @@ def run_pipeline(config: PipelineConfig) -> int:
                 archives=archives,
                 allow_missing_remote_index=allow_missing_remote_index,
                 run_record_collector=upload_run_records,
+                preloaded_remote_index=preloaded_remote_index,
+                pending_manifest_sync_queue_file=pending_manifest_sync_queue_file,
             )
         except Exception as error:  # noqa: BLE001
             logger.error("上传阶段失败，error={}", error)
@@ -529,7 +566,6 @@ def run_pipeline(config: PipelineConfig) -> int:
         )
     except Exception as error:  # noqa: BLE001
         logger.error("更新日志阶段失败，error={}", error)
-        return 1
 
     saved_state = build_local_state(latest_versions=latest)
     saved_file = save_local_state(state=saved_state, state_file=DEFAULT_LOCAL_STATE_FILE)
@@ -586,6 +622,8 @@ def _run_streaming_unpack_pack_upload(
     unpack_workers: int,
     allow_missing_remote_index: bool,
     run_record_collector: list[dict[str, object]],
+    preloaded_remote_index: dict[str, dict[str, object]] | None = None,
+    pending_manifest_sync_queue_file: Path | None = None,
 ) -> Path | None:
     """执行实体级流式流水线：解包 -> 打包 -> 上传 -> 清理。"""
 
@@ -627,6 +665,8 @@ def _run_streaming_unpack_pack_upload(
             "upload_manifest_holder": upload_manifest_holder,
             "allow_missing_remote_index": allow_missing_remote_index,
             "run_record_collector": run_record_collector,
+            "preloaded_remote_index": preloaded_remote_index,
+            "pending_manifest_sync_queue_file": pending_manifest_sync_queue_file,
         },
         daemon=True,
     )
@@ -666,6 +706,8 @@ def _run_streaming_unpack_pack_upload(
                 entity_audio_dir=entity_audio_dir,
                 report_file=report_file,
             )
+            # WAD 生命周期由 lol-audio-unpack 的实体解包流程判定；
+            # 单实体解包完成后即可释放该任务关联资源，外层只负责回收。
             logger.info(
                 "流式任务完成并入队上传：target={}, entity_id={}, removed_wad_count={}, removed_audio_count={}, archive={}",
                 task.target,
@@ -774,44 +816,98 @@ def _run_streaming_upload_worker(
     upload_manifest_holder: list[Path | None],
     allow_missing_remote_index: bool,
     run_record_collector: list[dict[str, object]],
+    preloaded_remote_index: dict[str, dict[str, object]] | None = None,
+    pending_manifest_sync_queue_file: Path | None = None,
 ) -> None:
     """消费流式打包产物并执行上传与压缩包清理。"""
 
     logger.debug("流式上传线程已启动：game_version={}", game_version)
-    while True:
-        artifact = upload_queue.get()
-        try:
-            if artifact is None:
-                logger.debug("流式上传线程收到停止信号。")
-                return
-            logger.debug(
-                "流式上传线程开始处理任务：target={}, entity_id={}, archive={}",
-                artifact.task.target,
-                artifact.task.entity_id,
-                artifact.archive_path,
-            )
-            manifest_file = _upload_archives_and_manifest(
-                config=config,
-                game_version=game_version,
-                archives=(artifact.archive_path,),
-                allow_missing_remote_index=allow_missing_remote_index,
-                run_record_collector=run_record_collector,
-            )
-            if manifest_file is not None:
-                upload_manifest_holder[0] = manifest_file
-            _cleanup_uploaded_archive(artifact.archive_path)
-            logger.info(
-                "流式上传完成并清理压缩包：target={}, entity_id={}, archive={}",
-                artifact.task.target,
-                artifact.task.entity_id,
-                artifact.archive_path,
-            )
-        except Exception as error:  # noqa: BLE001
-            logger.exception("流式上传线程异常：error={}", error)
-            upload_errors.append(error)
-            return
-        finally:
-            upload_queue.task_done()
+    client: BaiduPanClient | None = None
+    try:
+        if not (
+            config.baidu_pan_app_key and config.baidu_pan_secret_key and config.baidu_pan_refresh_token
+        ):
+            raise ValueError("上传阶段缺少百度凭据，请配置 app_key/secret_key/refresh_token")
+
+        package_root = _resolve_package_output_root(config=config, game_version=game_version)
+        manifest_file = package_root / UPLOAD_MANIFEST_FILE_NAME
+        readable_manifest_file = package_root / UPLOAD_MANIFEST_TEXT_FILE_NAME
+        credentials = BaiduCredentials(
+            app_key=config.baidu_pan_app_key,
+            secret_key=config.baidu_pan_secret_key,
+            refresh_token=config.baidu_pan_refresh_token,
+        )
+        token_store = resolve_token_store()
+        client = BaiduPanClient(
+            credentials=credentials,
+            remote_dir=config.baidu_pan_remote_dir,
+            token_store=token_store,
+        )
+        _initialize_remote_upload_layout(client=client)
+        remote_index = _resolve_upload_remote_index(
+            client=client,
+            package_root=package_root,
+            allow_missing_remote_index=allow_missing_remote_index,
+            preloaded_remote_index=preloaded_remote_index,
+        )
+        executed_at = _current_utc_timestamp()
+        default_resource_type = _resolve_default_upload_resource_type(config=config)
+        run_entries: list[dict[str, object]] = []
+        has_index_changes = False
+
+        while True:
+            artifact = upload_queue.get()
+            try:
+                if artifact is None:
+                    upload_manifest_holder[0] = _finalize_upload_manifest(
+                        client=client,
+                        manifest_file=manifest_file,
+                        readable_manifest_file=readable_manifest_file,
+                        game_version=game_version,
+                        remote_dir=config.baidu_pan_remote_dir,
+                        remote_index=remote_index,
+                        run_entries=run_entries,
+                        has_index_changes=has_index_changes,
+                        executed_at=executed_at,
+                        run_record_collector=run_record_collector,
+                        refresh_remote_index_before_upload=preloaded_remote_index is not None,
+                        pending_manifest_sync_queue_file=pending_manifest_sync_queue_file,
+                    )
+                    logger.debug("流式上传线程收到停止信号，已完成索引回传。")
+                    return
+                logger.debug(
+                    "流式上传线程开始处理任务：target={}, entity_id={}, archive={}",
+                    artifact.task.target,
+                    artifact.task.entity_id,
+                    artifact.archive_path,
+                )
+                current_entries, current_has_changes = _process_archives_upload(
+                    client=client,
+                    archives=(artifact.archive_path,),
+                    remote_dir=config.baidu_pan_remote_dir,
+                    game_version=game_version,
+                    remote_index=remote_index,
+                    executed_at=executed_at,
+                    default_resource_type=default_resource_type,
+                )
+                if current_has_changes:
+                    has_index_changes = True
+                run_entries.extend(current_entries)
+                _cleanup_uploaded_archive(artifact.archive_path)
+                logger.info(
+                    "流式上传完成并清理压缩包：target={}, entity_id={}, archive={}",
+                    artifact.task.target,
+                    artifact.task.entity_id,
+                    artifact.archive_path,
+                )
+            finally:
+                upload_queue.task_done()
+    except Exception as error:  # noqa: BLE001
+        logger.exception("流式上传线程异常：error={}", error)
+        upload_errors.append(error)
+    finally:
+        if client is not None:
+            client.close()
 
 
 def _enqueue_streaming_upload_job(
@@ -1158,7 +1254,7 @@ def _preflight_remote_upload_index(
     config: PipelineConfig,
     package_root: Path,
     allow_missing_remote_index: bool,
-) -> None:
+) -> dict[str, dict[str, object]]:
     """在主线更新确认阶段预检远端上传索引。"""
 
     if not (
@@ -1186,11 +1282,11 @@ def _preflight_remote_upload_index(
         )
         if remote_index:
             logger.info("更新确认阶段远端索引预检通过：entry_count={}", len(remote_index))
-            return
-        if allow_missing_remote_index:
+        elif allow_missing_remote_index:
             logger.info("更新确认阶段远端索引缺失，首次全量流程将自动初始化索引。")
-            return
-        logger.info("更新确认阶段远端索引为空：entry_count=0")
+        else:
+            logger.info("更新确认阶段远端索引为空：entry_count=0")
+        return _clone_upload_manifest_index(remote_index)
     finally:
         client.close()
 
@@ -1201,6 +1297,8 @@ def _upload_archives_and_manifest(
     archives: tuple[Path, ...],
     allow_missing_remote_index: bool = True,
     run_record_collector: list[dict[str, object]] | None = None,
+    preloaded_remote_index: dict[str, dict[str, object]] | None = None,
+    pending_manifest_sync_queue_file: Path | None = None,
 ) -> Path | None:
     """将打包产物上传到百度网盘，并同步本次上传清单。"""
 
@@ -1222,8 +1320,6 @@ def _upload_archives_and_manifest(
     package_root = _resolve_package_output_root(config=config, game_version=game_version)
     manifest_file = package_root / UPLOAD_MANIFEST_FILE_NAME
     readable_manifest_file = package_root / UPLOAD_MANIFEST_TEXT_FILE_NAME
-    run_entries: list[dict[str, object]] = []
-    has_index_changes = False
 
     credentials = BaiduCredentials(
         app_key=config.baidu_pan_app_key,
@@ -1239,156 +1335,479 @@ def _upload_archives_and_manifest(
     try:
         _initialize_remote_upload_layout(client=client)
         logger.debug("远端上传目录初始化完成。")
-        logger.debug("开始加载远端上传索引。")
-        remote_index = _load_remote_upload_manifest_index(
+        remote_index = _resolve_upload_remote_index(
             client=client,
             package_root=package_root,
             allow_missing_remote_index=allow_missing_remote_index,
+            preloaded_remote_index=preloaded_remote_index,
         )
-        logger.debug("远端上传索引加载完成：entry_count={}", len(remote_index))
         executed_at = _current_utc_timestamp()
         default_resource_type = _resolve_default_upload_resource_type(config=config)
-        for archive in archives:
-            if not archive.is_file():
-                raise FileNotFoundError(f"上传失败：压缩包不存在：{archive}")
+        run_entries, has_index_changes = _process_archives_upload(
+            client=client,
+            archives=archives,
+            remote_dir=config.baidu_pan_remote_dir,
+            game_version=game_version,
+            remote_index=remote_index,
+            executed_at=executed_at,
+            default_resource_type=default_resource_type,
+        )
+        return _finalize_upload_manifest(
+            client=client,
+            manifest_file=manifest_file,
+            readable_manifest_file=readable_manifest_file,
+            game_version=game_version,
+            remote_dir=config.baidu_pan_remote_dir,
+            remote_index=remote_index,
+            run_entries=run_entries,
+            has_index_changes=has_index_changes,
+            executed_at=executed_at,
+            run_record_collector=run_record_collector,
+            refresh_remote_index_before_upload=preloaded_remote_index is not None,
+            pending_manifest_sync_queue_file=pending_manifest_sync_queue_file,
+        )
+    finally:
+        client.close()
 
-            upload_layout = _build_archive_upload_layout(
-                archive=archive,
-                remote_dir=config.baidu_pan_remote_dir,
-                default_resource_type=default_resource_type,
-            )
-            _ensure_remote_directory(
-                client=client,
-                relative_dir=f"{upload_layout.resource_type}/{upload_layout.target_group}",
-            )
-            archived_entries = _archive_remote_old_versions(
-                client=client,
-                remote_dir=config.baidu_pan_remote_dir,
-                remote_index=remote_index,
-                layout=upload_layout,
-                expected_game_version=game_version,
-                executed_at=executed_at,
-            )
-            if archived_entries:
-                has_index_changes = True
-                run_entries.extend(archived_entries)
 
-            remote_name = upload_layout.remote_name
-            remote_path = upload_layout.remote_path
-            existing_entry = remote_index.get(remote_path.casefold())
-            if existing_entry is not None:
-                if _is_same_index_entry(
-                    entry=existing_entry,
-                    expected_remote_name=remote_name,
-                    expected_game_version=game_version,
-                ):
-                    logger.info("远端索引命中同文件，跳过上传：{}", remote_path)
-                    run_entries.append(
-                        {
-                            "local_path": str(archive),
-                            "remote_path": remote_path,
-                            "remote_name": remote_name,
-                            "game_version": game_version,
-                            "target_group": upload_layout.target_group,
-                            "resource_type": upload_layout.resource_type,
-                            "entity_key": upload_layout.entity_key,
-                            "status": "skipped",
-                            "reason": "remote_index_hit_same_version",
-                        }
-                    )
-                    continue
-                raise RuntimeError(
-                    "上传阶段终止：远端索引存在同路径但版本不一致文件，"
-                    f"remote_path={remote_path}, expected_game_version={game_version}"
-                )
+def _resolve_upload_remote_index(
+    client: BaiduPanClient,
+    package_root: Path,
+    allow_missing_remote_index: bool,
+    preloaded_remote_index: dict[str, dict[str, object]] | None,
+) -> dict[str, dict[str, object]]:
+    """解析本次上传使用的远端索引快照。"""
 
-            if _remote_file_exists(client=client, remote_path=upload_layout.remote_relative_path):
-                raise RuntimeError(
-                    "上传阶段终止：检测到远端已存在同名文件但索引缺失，"
-                    f"remote_path={remote_path}。请先修复远端索引后再重试。"
-                )
+    if preloaded_remote_index is not None:
+        cloned = _clone_upload_manifest_index(preloaded_remote_index)
+        logger.debug("上传阶段复用预加载索引快照：entry_count={}", len(cloned))
+        return cloned
+    logger.debug("开始加载远端上传索引。")
+    remote_index = _load_remote_upload_manifest_index(
+        client=client,
+        package_root=package_root,
+        allow_missing_remote_index=allow_missing_remote_index,
+    )
+    logger.debug("远端上传索引加载完成：entry_count={}", len(remote_index))
+    return remote_index
 
-            file_size = archive.stat().st_size
-            file_sha256 = _calculate_sha256(archive)
-            logger.debug(
-                "开始上传压缩包：local={}, remote_path={}, size={}",
-                archive,
-                upload_layout.remote_relative_path,
-                file_size,
-            )
-            response = client.upload_file(
-                local_path=archive, remote_path=upload_layout.remote_relative_path
-            )
-            logger.debug(
-                "压缩包上传完成：remote_path={}, response_keys={}",
-                upload_layout.remote_relative_path,
-                sorted(response.keys()) if isinstance(response, dict) else type(response),
-            )
+
+def _clone_upload_manifest_index(
+    source_index: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    """复制上传索引，避免调用方状态被就地污染。"""
+
+    cloned: dict[str, dict[str, object]] = {}
+    for key, value in source_index.items():
+        cloned[key] = dict(value)
+    return cloned
+
+
+def _process_archives_upload(
+    client: BaiduPanClient,
+    archives: tuple[Path, ...],
+    remote_dir: str,
+    game_version: str,
+    remote_index: dict[str, dict[str, object]],
+    executed_at: str,
+    default_resource_type: str,
+) -> tuple[list[dict[str, object]], bool]:
+    """处理一批压缩包上传并更新内存索引。"""
+
+    run_entries: list[dict[str, object]] = []
+    has_index_changes = False
+    for archive in archives:
+        if not archive.is_file():
+            raise FileNotFoundError(f"上传失败：压缩包不存在：{archive}")
+
+        upload_layout = _build_archive_upload_layout(
+            archive=archive,
+            remote_dir=remote_dir,
+            default_resource_type=default_resource_type,
+        )
+        _ensure_remote_directory(
+            client=client,
+            relative_dir=f"{upload_layout.resource_type}/{upload_layout.target_group}",
+        )
+        archived_entries = _archive_remote_old_versions(
+            client=client,
+            remote_dir=remote_dir,
+            remote_index=remote_index,
+            layout=upload_layout,
+            expected_game_version=game_version,
+            executed_at=executed_at,
+        )
+        if archived_entries:
             has_index_changes = True
-            remote_index[remote_path.casefold()] = {
+            run_entries.extend(archived_entries)
+
+        remote_name = upload_layout.remote_name
+        remote_path = upload_layout.remote_path
+        existing_entry = remote_index.get(remote_path.casefold())
+        if existing_entry is not None:
+            if _is_same_index_entry(
+                entry=existing_entry,
+                expected_remote_name=remote_name,
+                expected_game_version=game_version,
+            ):
+                logger.info("远端索引命中同文件，跳过上传：{}", remote_path)
+                run_entries.append(
+                    {
+                        "local_path": str(archive),
+                        "remote_path": remote_path,
+                        "remote_name": remote_name,
+                        "game_version": game_version,
+                        "target_group": upload_layout.target_group,
+                        "resource_type": upload_layout.resource_type,
+                        "entity_key": upload_layout.entity_key,
+                        "status": "skipped",
+                        "reason": "remote_index_hit_same_version",
+                    }
+                )
+                continue
+            raise RuntimeError(
+                "上传阶段终止：远端索引存在同路径但版本不一致文件，"
+                f"remote_path={remote_path}, expected_game_version={game_version}"
+            )
+
+        if _remote_file_exists(client=client, remote_path=upload_layout.remote_relative_path):
+            raise RuntimeError(
+                "上传阶段终止：检测到远端已存在同名文件但索引缺失，"
+                f"remote_path={remote_path}。请先修复远端索引后再重试。"
+            )
+
+        file_size = archive.stat().st_size
+        file_sha256 = _calculate_sha256(archive)
+        logger.debug(
+            "开始上传压缩包：local={}, remote_path={}, size={}",
+            archive,
+            upload_layout.remote_relative_path,
+            file_size,
+        )
+        response = client.upload_file(local_path=archive, remote_path=upload_layout.remote_relative_path)
+        logger.debug(
+            "压缩包上传完成：remote_path={}, response_keys={}",
+            upload_layout.remote_relative_path,
+            sorted(response.keys()) if isinstance(response, dict) else type(response),
+        )
+        has_index_changes = True
+        remote_index[remote_path.casefold()] = {
+            "remote_path": remote_path,
+            "remote_name": remote_name,
+            "bucket": upload_layout.resource_type,
+            "game_version": game_version,
+            "target_group": upload_layout.target_group,
+            "resource_type": upload_layout.resource_type,
+            "entity_key": upload_layout.entity_key,
+            "size": file_size,
+            "sha256": file_sha256,
+            "uploaded_at": executed_at,
+        }
+        run_entries.append(
+            {
+                "local_path": str(archive),
                 "remote_path": remote_path,
                 "remote_name": remote_name,
-                "bucket": upload_layout.resource_type,
-                "game_version": game_version,
+                "size": file_size,
+                "sha256": file_sha256,
                 "target_group": upload_layout.target_group,
                 "resource_type": upload_layout.resource_type,
                 "entity_key": upload_layout.entity_key,
-                "size": file_size,
-                "sha256": file_sha256,
-                "uploaded_at": executed_at,
+                "status": "uploaded",
+                "reason": "uploaded",
+                "response": response,
             }
-            run_entries.append(
-                {
-                    "local_path": str(archive),
-                    "remote_path": remote_path,
-                    "remote_name": remote_name,
-                    "size": file_size,
-                    "sha256": file_sha256,
-                    "target_group": upload_layout.target_group,
-                    "resource_type": upload_layout.resource_type,
-                    "entity_key": upload_layout.entity_key,
-                    "status": "uploaded",
-                    "reason": "uploaded",
-                    "response": response,
-                }
+        )
+    return run_entries, has_index_changes
+
+
+def _finalize_upload_manifest(
+    client: BaiduPanClient,
+    manifest_file: Path,
+    readable_manifest_file: Path,
+    game_version: str,
+    remote_dir: str,
+    remote_index: dict[str, dict[str, object]],
+    run_entries: list[dict[str, object]],
+    has_index_changes: bool,
+    executed_at: str,
+    run_record_collector: list[dict[str, object]] | None = None,
+    refresh_remote_index_before_upload: bool = False,
+    pending_manifest_sync_queue_file: Path | None = None,
+) -> Path:
+    """落地本地索引文件并按需回传到远端。"""
+
+    effective_remote_index = _clone_upload_manifest_index(remote_index)
+    if has_index_changes and refresh_remote_index_before_upload:
+        try:
+            latest_remote_index = _load_remote_upload_manifest_index(
+                client=client,
+                package_root=manifest_file.parent,
+                allow_missing_remote_index=True,
+            )
+            effective_remote_index = _merge_remote_index_for_finalize(
+                latest_remote_index=latest_remote_index,
+                working_remote_index=effective_remote_index,
+                run_entries=run_entries,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "索引回传前刷新远端快照失败，降级使用本地索引：error={}",
+                error,
             )
 
-        manifest_payload = _build_upload_manifest_payload(
+    manifest_payload = _build_upload_manifest_payload(
+        game_version=game_version,
+        index=effective_remote_index,
+        run_entries=run_entries,
+        executed_at=executed_at,
+        remote_dir=remote_dir,
+    )
+    manifest_file.parent.mkdir(parents=True, exist_ok=True)
+    manifest_file.write_text(
+        json.dumps(manifest_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    readable_manifest_file.write_text(
+        _build_readable_upload_manifest_content(
+            index=effective_remote_index,
             game_version=game_version,
-            index=remote_index,
-            run_entries=run_entries,
             executed_at=executed_at,
-            remote_dir=config.baidu_pan_remote_dir,
-        )
-        manifest_file.parent.mkdir(parents=True, exist_ok=True)
-        manifest_file.write_text(
-            json.dumps(manifest_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        readable_manifest_file.write_text(
-            _build_readable_upload_manifest_content(
-                index=remote_index,
-                game_version=game_version,
-                executed_at=executed_at,
-                remote_dir=config.baidu_pan_remote_dir,
+            remote_dir=remote_dir,
+        ),
+        encoding="utf-8",
+    )
+    if run_record_collector is not None:
+        run_record_collector.extend(run_entries)
+    if has_index_changes:
+        logger.debug("开始回传上传索引文件。")
+        upload_error: Exception | None = None
+        for attempt in range(1, MANIFEST_UPLOAD_MAX_ATTEMPTS + 1):
+            try:
+                client.upload_file(local_path=manifest_file, remote_path=UPLOAD_MANIFEST_FILE_NAME)
+                client.upload_file(
+                    local_path=readable_manifest_file,
+                    remote_path=UPLOAD_MANIFEST_TEXT_FILE_NAME,
+                )
+                upload_error = None
+                logger.debug("上传索引文件回传完成。")
+                break
+            except Exception as error:  # noqa: BLE001
+                upload_error = error
+                logger.warning(
+                    "上传索引文件失败，准备重试：attempt={}/{}, error={}",
+                    attempt,
+                    MANIFEST_UPLOAD_MAX_ATTEMPTS,
+                    error,
+                )
+                if attempt < MANIFEST_UPLOAD_MAX_ATTEMPTS:
+                    time.sleep(attempt)
+        if upload_error is not None:
+            logger.error("上传索引文件最终失败，将写入待重试队列：error={}", upload_error)
+            _enqueue_pending_manifest_sync(
+                queue_file=pending_manifest_sync_queue_file,
+                manifest_file=manifest_file,
+                readable_manifest_file=readable_manifest_file,
+                remote_dir=remote_dir,
+                error=upload_error,
+            )
+    else:
+        logger.info("远端索引无变化，跳过索引文件回传。")
+    return manifest_file
+
+
+def _merge_remote_index_for_finalize(
+    latest_remote_index: dict[str, dict[str, object]],
+    working_remote_index: dict[str, dict[str, object]],
+    run_entries: list[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    """将本次运行变更叠加到最新远端索引，降低并发覆盖风险。"""
+
+    merged = _clone_upload_manifest_index(latest_remote_index)
+    upsert_keys, removed_keys = _collect_remote_index_mutation_keys(run_entries=run_entries)
+    for key in removed_keys:
+        merged.pop(key, None)
+    for key in upsert_keys:
+        entry = working_remote_index.get(key)
+        if entry is None:
+            continue
+        merged[key] = dict(entry)
+    return merged
+
+
+def _collect_remote_index_mutation_keys(
+    run_entries: list[dict[str, object]],
+) -> tuple[set[str], set[str]]:
+    """提取本次运行对远端索引的增改键和删除键。"""
+
+    upsert_keys: set[str] = set()
+    removed_keys: set[str] = set()
+    for entry in run_entries:
+        remote_path_obj = entry.get("remote_path")
+        if isinstance(remote_path_obj, str) and remote_path_obj.strip():
+            upsert_keys.add(remote_path_obj.strip().replace("\\", "/").casefold())
+        source_remote_path_obj = entry.get("source_remote_path")
+        if isinstance(source_remote_path_obj, str) and source_remote_path_obj.strip():
+            removed_keys.add(source_remote_path_obj.strip().replace("\\", "/").casefold())
+    return upsert_keys, removed_keys
+
+
+def _retry_pending_manifest_sync_queue(
+    config: PipelineConfig,
+    queue_file: Path,
+) -> None:
+    """重试历史失败的索引回传任务（失败不阻断主流程）。"""
+
+    pending_entries = _load_pending_manifest_sync_entries(queue_file=queue_file)
+    if not pending_entries:
+        return
+    if not (
+        config.baidu_pan_app_key and config.baidu_pan_secret_key and config.baidu_pan_refresh_token
+    ):
+        logger.warning("待重试索引任务跳过：缺少百度凭据，queue_file={}", queue_file)
+        return
+
+    logger.info("检测到待重试索引任务：count={}, queue_file={}", len(pending_entries), queue_file)
+    token_store = resolve_token_store()
+    remaining_entries: list[dict[str, object]] = []
+    for entry in pending_entries:
+        remote_dir_obj = entry.get("remote_dir")
+        manifest_file_obj = entry.get("manifest_file")
+        readable_manifest_file_obj = entry.get("readable_manifest_file")
+        if not (
+            isinstance(remote_dir_obj, str)
+            and isinstance(manifest_file_obj, str)
+            and isinstance(readable_manifest_file_obj, str)
+        ):
+            logger.warning("待重试索引任务格式非法，已丢弃：entry={}", entry)
+            continue
+        manifest_file = Path(manifest_file_obj).expanduser().resolve()
+        readable_manifest_file = Path(readable_manifest_file_obj).expanduser().resolve()
+        if not (manifest_file.is_file() and readable_manifest_file.is_file()):
+            logger.warning(
+                "待重试索引任务文件缺失，已丢弃：manifest_file={}, readable_manifest_file={}",
+                manifest_file,
+                readable_manifest_file,
+            )
+            continue
+        client = BaiduPanClient(
+            credentials=BaiduCredentials(
+                app_key=config.baidu_pan_app_key,
+                secret_key=config.baidu_pan_secret_key,
+                refresh_token=config.baidu_pan_refresh_token,
             ),
-            encoding="utf-8",
+            remote_dir=remote_dir_obj,
+            token_store=token_store,
         )
-        if run_record_collector is not None:
-            run_record_collector.extend(run_entries)
-        if has_index_changes:
-            logger.debug("开始回传上传索引文件。")
+        try:
             client.upload_file(local_path=manifest_file, remote_path=UPLOAD_MANIFEST_FILE_NAME)
             client.upload_file(
                 local_path=readable_manifest_file,
                 remote_path=UPLOAD_MANIFEST_TEXT_FILE_NAME,
             )
-            logger.debug("上传索引文件回传完成。")
-        else:
-            logger.info("远端索引无变化，跳过索引文件回传。")
-        return manifest_file
-    finally:
-        client.close()
+            logger.info(
+                "待重试索引任务回传成功：manifest_file={}, remote_dir={}",
+                manifest_file,
+                remote_dir_obj,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "待重试索引任务仍失败，保留到队列：manifest_file={}, error={}",
+                manifest_file,
+                error,
+            )
+            updated_entry = dict(entry)
+            updated_entry["last_error"] = str(error)
+            updated_entry["last_attempt_at"] = _current_utc_timestamp()
+            remaining_entries.append(updated_entry)
+        finally:
+            client.close()
+
+    _save_pending_manifest_sync_entries(
+        queue_file=queue_file,
+        entries=remaining_entries,
+    )
+
+
+def _enqueue_pending_manifest_sync(
+    queue_file: Path | None,
+    manifest_file: Path,
+    readable_manifest_file: Path,
+    remote_dir: str,
+    error: Exception,
+) -> None:
+    """将索引回传失败任务追加到本地待重试队列。"""
+
+    if queue_file is None:
+        logger.warning(
+            "索引回传失败且未配置待重试队列：manifest_file={}, error={}",
+            manifest_file,
+            error,
+        )
+        return
+
+    pending_entries = _load_pending_manifest_sync_entries(queue_file=queue_file)
+    entry_key = f"{remote_dir.strip()}|{manifest_file.expanduser().resolve().as_posix()}".casefold()
+    next_entries: list[dict[str, object]] = []
+    for entry in pending_entries:
+        remote_dir_obj = entry.get("remote_dir")
+        manifest_file_obj = entry.get("manifest_file")
+        if not (isinstance(remote_dir_obj, str) and isinstance(manifest_file_obj, str)):
+            continue
+        current_key = f"{remote_dir_obj.strip()}|{Path(manifest_file_obj).expanduser().resolve().as_posix()}".casefold()
+        if current_key == entry_key:
+            continue
+        next_entries.append(entry)
+    next_entries.append(
+        {
+            "remote_dir": remote_dir,
+            "manifest_file": str(manifest_file.expanduser().resolve()),
+            "readable_manifest_file": str(readable_manifest_file.expanduser().resolve()),
+            "queued_at": _current_utc_timestamp(),
+            "last_error": str(error),
+        }
+    )
+    _save_pending_manifest_sync_entries(queue_file=queue_file, entries=next_entries)
+    logger.warning(
+        "索引回传失败已加入待重试队列：queue_file={}, manifest_file={}",
+        queue_file,
+        manifest_file,
+    )
+
+
+def _load_pending_manifest_sync_entries(queue_file: Path) -> list[dict[str, object]]:
+    """读取待重试索引回传队列。"""
+
+    if not queue_file.is_file():
+        return []
+    try:
+        payload = json.loads(queue_file.read_text(encoding="utf-8"))
+    except Exception as error:  # noqa: BLE001
+        logger.warning("读取待重试索引队列失败，按空队列处理：queue_file={}, error={}", queue_file, error)
+        return []
+    if not isinstance(payload, list):
+        return []
+    entries: list[dict[str, object]] = []
+    for item in payload:
+        if isinstance(item, dict):
+            entries.append(dict(item))
+    return entries
+
+
+def _save_pending_manifest_sync_entries(
+    queue_file: Path,
+    entries: list[dict[str, object]],
+) -> None:
+    """保存待重试索引回传队列。"""
+
+    if not entries:
+        queue_file.unlink(missing_ok=True)
+        return
+    queue_file.parent.mkdir(parents=True, exist_ok=True)
+    queue_file.write_text(
+        json.dumps(entries, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _resolve_package_output_root(config: PipelineConfig, game_version: str) -> Path:
@@ -1569,6 +1988,7 @@ def _archive_remote_old_versions(
         archived_entries.append(
             {
                 "remote_path": archived_remote_path,
+                "source_remote_path": metadata.remote_path,
                 "remote_name": metadata.remote_name,
                 "game_version": metadata.game_version,
                 "target_group": layout.target_group,

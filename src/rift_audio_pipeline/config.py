@@ -11,6 +11,9 @@ DEFAULT_GAME_REGION = "zh_CN"
 DEFAULT_LCU_DOWNLOAD_MODE = "full"
 DEFAULT_BAIDU_PAN_REMOTE_DIR = "/apps/lol-audio/"
 DEFAULT_AUDIO_TYPES: tuple[str, ...] = ("VO",)
+DEFAULT_DIFF_BIN_FILTER_WORKERS = 4
+DEFAULT_DIFF_BIN_EXTRACT_CONCURRENCY = 6
+DEFAULT_DIFF_BIN_FILTER_THRESHOLD = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +33,12 @@ class PipelineConfig:
         baidu_pan_refresh_token: 百度开放平台 refresh token。
         local_bin_dir: 本地 bin 输入目录（写入 `manifest/<version>/bin_input`）。
         download_concurrency: 模拟目录下载并发数（GAME/LCU manifest 文件下载）。
+        diff_bin_filter_workers: diff 模式二次筛选并发数（按英雄/地图单位）。
+        diff_bin_extract_concurrency: diff 模式二次筛选时 WADExtractor 内部下载并发
+            （映射 `prefetch_chunk_concurrency`）。
+        diff_bin_filter_threshold: diff 模式二次筛选降级阈值；
+            当清单层 `added+changed` 的 WAD 数 >= 该值时跳过 WADExtractor 并走完整下载解包；
+            小于等于 0 表示禁用阈值降级。
         unpack_workers: 解包并发线程数。
         low_disk_mode: 低磁盘模式；模拟目录下启用“按实体流式解包/打包/上传/清理”以降低峰值空间占用。
         enable_pack: 是否在解包后执行 7z 打包阶段。
@@ -53,6 +62,9 @@ class PipelineConfig:
     baidu_pan_refresh_token: str | None = None
     local_bin_dir: Path | None = None
     download_concurrency: int = 4
+    diff_bin_filter_workers: int = DEFAULT_DIFF_BIN_FILTER_WORKERS
+    diff_bin_extract_concurrency: int = DEFAULT_DIFF_BIN_EXTRACT_CONCURRENCY
+    diff_bin_filter_threshold: int = DEFAULT_DIFF_BIN_FILTER_THRESHOLD
     unpack_workers: int = 2
     low_disk_mode: bool = True
     enable_pack: bool = False
@@ -91,6 +103,9 @@ class PipelineConfig:
         )
         unpack_workers = max(1, int(args.unpack_workers))
         download_concurrency = max(1, int(args.download_concurrency))
+        diff_bin_filter_workers = max(1, int(args.diff_bin_filter_workers))
+        diff_bin_extract_concurrency = max(1, int(args.diff_bin_extract_concurrency))
+        diff_bin_filter_threshold = int(args.diff_bin_filter_threshold)
 
         return cls(
             output_path=output_path,
@@ -105,6 +120,9 @@ class PipelineConfig:
             baidu_pan_refresh_token=args.baidu_refresh_token or env_refresh_token,
             local_bin_dir=local_bin_dir,
             download_concurrency=download_concurrency,
+            diff_bin_filter_workers=diff_bin_filter_workers,
+            diff_bin_extract_concurrency=diff_bin_extract_concurrency,
+            diff_bin_filter_threshold=diff_bin_filter_threshold,
             unpack_workers=unpack_workers,
             low_disk_mode=bool(args.low_disk_mode),
             enable_pack=bool(args.enable_pack),

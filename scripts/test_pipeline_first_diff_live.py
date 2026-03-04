@@ -5,6 +5,7 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from argparse import BooleanOptionalAction
 import base64
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -14,17 +15,20 @@ import shutil
 import sys
 from typing import Any
 from typing import Iterator
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request
 from urllib.request import urlopen
 
 from loguru import logger
+from riotmanifest import RiotGameData
 from rift_audio_pipeline.baidu.oauth import load_baidu_app_credentials
 from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.config import PipelineConfig
 from rift_audio_pipeline.manifest_ops import LatestVersions
 from rift_audio_pipeline.manifest_ops import LOCAL_STATE_SCHEMA_VERSION
 from rift_audio_pipeline.manifest_ops import LocalRunState
+from rift_audio_pipeline.manifest_ops import ManifestVoiceFilterResult
 from rift_audio_pipeline.manifest_ops import evaluate_update_need_with_latest
 from rift_audio_pipeline.manifest_ops import get_latest_versions
 from rift_audio_pipeline.manifest_ops import load_local_state
@@ -35,6 +39,9 @@ DEFAULT_WORK_DIR = Path("temp/live_pipeline_first_diff")
 DEFAULT_REMOTE_DIR = "/apps/lol-audio/"
 GITHUB_API_BASE = (
     "https://api.github.com/repos/Morilli/riot-manifests/contents/LoL/EUW1/windows/lol-game-client"
+)
+GITHUB_RAW_BASE = (
+    "https://raw.githubusercontent.com/Morilli/riot-manifests/main/LoL/EUW1/windows/lol-game-client"
 )
 LOG_LEVEL_CHOICES = ("TRACE", "DEBUG", "INFO", "WARNING", "ERROR")
 
@@ -105,6 +112,30 @@ def _build_parser() -> ArgumentParser:
         type=int,
         default=8,
         help="模拟目录下载并发数（LCU/GAME manifest 下载）",
+    )
+    parser.add_argument(
+        "--diff-bin-filter-workers",
+        type=int,
+        default=4,
+        help="WADExtractor 二次筛选外层并发（按英雄/地图单位）",
+    )
+    parser.add_argument(
+        "--diff-bin-extract-concurrency",
+        type=int,
+        default=6,
+        help="WADExtractor 内部下载并发（prefetch_chunk_concurrency）",
+    )
+    parser.add_argument(
+        "--diff-bin-filter-threshold",
+        type=int,
+        default=100,
+        help="清单层 WAD 更新数达到阈值时跳过 WADExtractor 二次筛选",
+    )
+    parser.add_argument(
+        "--diff-smoke-single-champion",
+        action=BooleanOptionalAction,
+        default=True,
+        help="diff 联调快捷模式：命中首个可解包英雄后立即进入下载流程",
     )
     parser.add_argument(
         "--low-disk-mode",
@@ -178,10 +209,32 @@ def _http_get_json(url: str) -> dict[str, Any]:
 
 
 def _fetch_manifest_url_from_repo(version: str) -> str:
-    """从 Morilli 历史仓库读取指定版本 manifest URL。"""
+    """读取指定版本 manifest URL（优先发布源，回退 Morilli 仓库）。"""
 
     file_name = f"{version}.txt"
-    payload = _http_get_json(f"{GITHUB_API_BASE}/{quote(file_name)}")
+    releases = RiotGameData()
+    releases.load_game_data(regions=["EUW1"])
+    release_items = getattr(releases, "_game_data", {}).get("EUW1", [])
+    for item in release_items:
+        if str(item.get("version", "")).strip() != version.strip():
+            continue
+        release_url = str(item.get("url", "")).strip()
+        if release_url:
+            return release_url
+
+    try:
+        payload = _http_get_json(f"{GITHUB_API_BASE}/{quote(file_name)}")
+    except HTTPError as error:
+        if error.code != 403:
+            raise
+        fallback_url = f"{GITHUB_RAW_BASE}/{quote(file_name)}"
+        request = Request(
+            fallback_url,
+            headers={"User-Agent": "RiftAudioPipeline-PipelineLiveTest"},
+            method="GET",
+        )
+        with urlopen(request, timeout=30) as response:
+            return response.read().decode("utf-8").strip()
     encoded_content = str(payload.get("content", "")).replace("\n", "")
     if not encoded_content:
         raise RuntimeError(f"读取版本清单失败，缺少 content 字段：{file_name}")
@@ -221,11 +274,78 @@ def _build_latest_versions_override(version: str) -> LatestVersions:
     )
 
 
+def _is_champion_manifest_wad_path(path: str) -> bool:
+    """判断 manifest WAD 路径是否为英雄资源。"""
+
+    return "/champions/" in path.strip().replace("\\", "/").casefold()
+
+
+def _build_single_champion_smoke_filter(
+    original_filter: Callable[..., ManifestVoiceFilterResult],
+) -> Callable[..., ManifestVoiceFilterResult]:
+    """构建 diff 联调快捷筛选函数。
+
+    规则：
+    - 按 `update_paths` 顺序逐个探测；
+    - 优先命中“可解包英雄”并立即返回；
+    - 若无英雄可解包但存在其他可解包条目，返回首个可解包结果；
+    - 若均不可解包，返回聚合后的“全跳过”结果。
+    """
+
+    def _patched_filter(**kwargs: object) -> ManifestVoiceFilterResult:
+        update_paths_obj = kwargs.get("update_paths", tuple())
+        if not isinstance(update_paths_obj, tuple):
+            update_paths = tuple(update_paths_obj) if isinstance(update_paths_obj, list) else tuple()
+        else:
+            update_paths = update_paths_obj
+        normalized_paths = tuple(
+            path.strip().replace("\\", "/")
+            for path in update_paths
+            if isinstance(path, str) and path.strip()
+        )
+        if len(normalized_paths) <= 1:
+            return original_filter(**kwargs)
+
+        first_unpack_result: ManifestVoiceFilterResult | None = None
+        all_skipped: set[str] = set()
+        all_decisions: list[object] = []
+        for index, manifest_path in enumerate(normalized_paths):
+            single_kwargs = dict(kwargs)
+            single_kwargs["update_paths"] = (manifest_path,)
+            result = original_filter(**single_kwargs)
+            all_decisions.extend(result.decisions)
+            all_skipped.update(result.skipped_paths)
+            if not result.unpack_paths:
+                continue
+            if any(_is_champion_manifest_wad_path(path) for path in result.unpack_paths):
+                logger.info(
+                    "diff 联调快捷模式命中可解包英雄，提前进入下载流程：probe_index={}, path={}",
+                    index,
+                    manifest_path,
+                )
+                return result
+            if first_unpack_result is None:
+                first_unpack_result = result
+
+        if first_unpack_result is not None:
+            logger.info("diff 联调快捷模式未命中英雄，回退到首个可解包路径。")
+            return first_unpack_result
+
+        return ManifestVoiceFilterResult(
+            unpack_paths=tuple(),
+            skipped_paths=tuple(sorted(all_skipped or set(normalized_paths), key=str.casefold)),
+            decisions=tuple(all_decisions),
+        )
+
+    return _patched_filter
+
+
 @contextmanager
 def _patch_pipeline_for_local_live_test(
     state_file: Path,
     limit_units: int,
     latest_versions_override: LatestVersions | None,
+    diff_smoke_single_champion: bool,
 ) -> Iterator[None]:
     """临时 patch Pipeline 状态路径与目标解析函数。"""
 
@@ -233,6 +353,7 @@ def _patch_pipeline_for_local_live_test(
     original_resolve_processing_targets = pipeline_module.resolve_processing_targets
     original_resolve_all_processing_targets = pipeline_module.resolve_all_processing_targets
     original_evaluate_update_need = pipeline_module.evaluate_update_need
+    original_filter_wad_changes = pipeline_module.filter_wad_changes_by_bin_voice_paths
 
     def _limited_resolve_processing_targets(
         data_file_base: Path,
@@ -270,6 +391,10 @@ def _patch_pipeline_for_local_live_test(
     pipeline_module.resolve_processing_targets = _limited_resolve_processing_targets
     pipeline_module.resolve_all_processing_targets = _limited_resolve_all_processing_targets
     pipeline_module.evaluate_update_need = _patched_evaluate_update_need
+    if diff_smoke_single_champion:
+        pipeline_module.filter_wad_changes_by_bin_voice_paths = _build_single_champion_smoke_filter(
+            original_filter=original_filter_wad_changes
+        )
     try:
         yield
     finally:
@@ -277,6 +402,7 @@ def _patch_pipeline_for_local_live_test(
         pipeline_module.resolve_processing_targets = original_resolve_processing_targets
         pipeline_module.resolve_all_processing_targets = original_resolve_all_processing_targets
         pipeline_module.evaluate_update_need = original_evaluate_update_need
+        pipeline_module.filter_wad_changes_by_bin_voice_paths = original_filter_wad_changes
 
 
 def _prepare_first_run_state(state_file: Path) -> None:
@@ -316,6 +442,9 @@ def _build_pipeline_config(
     temp_game_dir: Path,
     audio_type: str,
     download_concurrency: int,
+    diff_bin_filter_workers: int,
+    diff_bin_extract_concurrency: int,
+    diff_bin_filter_threshold: int,
     unpack_workers: int,
     low_disk_mode: bool,
     remote_dir: str,
@@ -338,6 +467,9 @@ def _build_pipeline_config(
         baidu_pan_secret_key=secret_key,
         baidu_pan_refresh_token=refresh_token,
         download_concurrency=max(1, download_concurrency),
+        diff_bin_filter_workers=max(1, diff_bin_filter_workers),
+        diff_bin_extract_concurrency=max(1, diff_bin_extract_concurrency),
+        diff_bin_filter_threshold=diff_bin_filter_threshold,
         unpack_workers=max(1, unpack_workers),
         low_disk_mode=low_disk_mode,
         enable_pack=True,
@@ -419,6 +551,9 @@ def main() -> int:
         temp_game_dir=temp_game_dir,
         audio_type=str(args.audio_type).upper(),
         download_concurrency=int(args.download_concurrency),
+        diff_bin_filter_workers=int(args.diff_bin_filter_workers),
+        diff_bin_extract_concurrency=int(args.diff_bin_extract_concurrency),
+        diff_bin_filter_threshold=int(args.diff_bin_filter_threshold),
         unpack_workers=int(args.unpack_workers),
         low_disk_mode=bool(args.low_disk_mode),
         remote_dir=str(args.remote_dir),
@@ -437,6 +572,10 @@ def main() -> int:
     print(f"remote_dir={args.remote_dir}")
     print(f"limit_units={max(1, int(args.limit_units))}")
     print(f"download_concurrency={max(1, int(args.download_concurrency))}")
+    print(f"diff_bin_filter_workers={max(1, int(args.diff_bin_filter_workers))}")
+    print(f"diff_bin_extract_concurrency={max(1, int(args.diff_bin_extract_concurrency))}")
+    print(f"diff_bin_filter_threshold={int(args.diff_bin_filter_threshold)}")
+    print(f"diff_smoke_single_champion={bool(args.diff_smoke_single_champion)}")
     print(f"game_path={game_path}")
     print(f"temp_game_dir={temp_game_dir}")
     print(f"latest_version_override={args.latest_version_override}")
@@ -473,6 +612,7 @@ def main() -> int:
         state_file=state_file,
         limit_units=max(1, int(args.limit_units)),
         latest_versions_override=latest_versions_override,
+        diff_smoke_single_champion=bool(args.diff_smoke_single_champion),
     ):
         if args.mode in ("first", "both"):
             _prepare_first_run_state(state_file=state_file)

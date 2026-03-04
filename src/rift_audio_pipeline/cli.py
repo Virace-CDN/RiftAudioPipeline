@@ -51,6 +51,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="模拟目录下载并发数（LCU/GAME WAD 下载）",
     )
     parser.add_argument(
+        "--diff-bin-filter-workers",
+        type=int,
+        default=4,
+        help="diff 二次筛选并发数（按英雄/地图单位，建议低并发）",
+    )
+    parser.add_argument(
+        "--diff-bin-extract-concurrency",
+        type=int,
+        default=6,
+        help="diff 二次筛选中 WADExtractor 内部下载并发（prefetch_chunk_concurrency）",
+    )
+    parser.add_argument(
+        "--diff-bin-filter-threshold",
+        type=int,
+        default=100,
+        help="diff 清单层 WAD 更新数达到阈值时跳过 WADExtractor 二次筛选；<=0 表示禁用阈值降级",
+    )
+    parser.add_argument(
         "--low-disk-mode",
         action=BooleanOptionalAction,
         default=True,

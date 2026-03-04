@@ -12,6 +12,120 @@ from rift_audio_pipeline.config import PipelineConfig
 import rift_audio_pipeline.pipeline as pipeline
 
 
+def _build_diff_update_decision(
+    update_paths: tuple[str, ...],
+    champion_aliases: tuple[str, ...] = tuple(),
+    map_ids: tuple[str, ...] = tuple(),
+) -> SimpleNamespace:
+    """构造 diff 场景下的更新判定对象。"""
+
+    return SimpleNamespace(
+        should_update=True,
+        reason="region_manifest_changed",
+        latest_versions=SimpleNamespace(
+            game_version="16.4.7480682",
+            game_manifest_url="https://example.test/game-new.manifest",
+            lcu_version="16.4",
+            lcu_manifest_url="https://example.test/lcu-new.manifest",
+        ),
+        previous_state=SimpleNamespace(
+            game_manifest_url="https://example.test/game-old.manifest",
+        ),
+        changed_entities=SimpleNamespace(
+            champion_aliases=champion_aliases,
+            map_ids=map_ids,
+        ),
+        wad_changes=SimpleNamespace(
+            added_paths=update_paths,
+            changed_paths=tuple(),
+            removed_paths=tuple(),
+            update_paths=update_paths,
+        ),
+    )
+
+
+def test_run_pipeline_should_skip_secondary_filter_when_update_wad_count_reaches_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """清单层 WAD 更新数达到阈值时应跳过 WADExtractor 二次筛选。"""
+
+    update_paths = tuple(
+        f"DATA/FINAL/Champions/Hero{index}.zh_CN.wad.client" for index in range(101)
+    )
+    decision = _build_diff_update_decision(
+        update_paths=update_paths,
+        champion_aliases=tuple(f"Hero{index}" for index in range(101)),
+    )
+
+    monkeypatch.setattr(pipeline, "ensure_official_sdk_path", lambda: tmp_path / "sdk")
+    monkeypatch.setattr(pipeline, "evaluate_update_need", lambda **_: decision)
+    monkeypatch.setattr(
+        pipeline,
+        "filter_wad_changes_by_bin_voice_paths",
+        lambda **_: (_ for _ in ()).throw(AssertionError("阈值分支不应触发二次筛选")),
+    )
+
+    config = PipelineConfig(
+        output_path=tmp_path / "output",
+        dry_run=True,
+        diff_bin_filter_threshold=100,
+    )
+    assert pipeline.run_pipeline(config=config) == 0
+
+
+def test_run_pipeline_should_pass_unit_workers_to_secondary_filter_when_not_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """未触发阈值降级时，应按配置并发数执行二次筛选。"""
+
+    update_paths = (
+        "DATA/FINAL/Champions/Annie.zh_CN.wad.client",
+        "DATA/FINAL/Maps/Shipping/Map11/Map11.zh_CN.wad.client",
+    )
+    decision = _build_diff_update_decision(
+        update_paths=update_paths,
+        champion_aliases=("Annie",),
+        map_ids=("11",),
+    )
+    captured_call_kwargs: dict[str, object] = {}
+
+    def _fake_filter_wad_changes_by_bin_voice_paths(**kwargs: object) -> SimpleNamespace:
+        captured_call_kwargs.update(kwargs)
+        return SimpleNamespace(
+            unpack_paths=(update_paths[0],),
+            skipped_paths=(update_paths[1],),
+            decisions=(
+                SimpleNamespace(
+                    should_unpack=True,
+                    matched_bin_paths=("data/characters/annie/skins/skin0.bin",),
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(pipeline, "ensure_official_sdk_path", lambda: tmp_path / "sdk")
+    monkeypatch.setattr(pipeline, "evaluate_update_need", lambda **_: decision)
+    monkeypatch.setattr(
+        pipeline,
+        "filter_wad_changes_by_bin_voice_paths",
+        _fake_filter_wad_changes_by_bin_voice_paths,
+    )
+    monkeypatch.setattr(pipeline, "create_local_bin_flag", lambda version_dir: version_dir)
+
+    config = PipelineConfig(
+        output_path=tmp_path / "output",
+        dry_run=True,
+        diff_bin_filter_threshold=100,
+        diff_bin_filter_workers=3,
+        diff_bin_extract_concurrency=5,
+    )
+    assert pipeline.run_pipeline(config=config) == 0
+    assert captured_call_kwargs["unit_max_workers"] == 3
+    assert captured_call_kwargs["extractor_prefetch_chunk_concurrency"] == 5
+    assert captured_call_kwargs["update_paths"] == update_paths
+
+
 def test_pack_unpacked_outputs_should_pack_existing_targets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -414,6 +528,108 @@ def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
     assert payload["last_run"]["skipped_count"] == 1
 
 
+def test_upload_archives_and_manifest_should_reuse_preloaded_remote_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """传入预加载索引时，不应重复下载远端 upload_manifest。"""
+
+    class _FakeClient:
+        def __init__(self, credentials, remote_dir, token_store) -> None:
+            del credentials, token_store
+            self.remote_dir = remote_dir
+            self.upload_calls: list[tuple[Path, str]] = []
+            self.remote_dirs: set[str] = {self.remote_dir}
+
+        def _normalize_remote_path(self, remote_path: str) -> str:
+            if remote_path.startswith("/"):
+                return remote_path
+            return f"{self.remote_dir.rstrip('/')}/{remote_path.lstrip('/')}"
+
+        def upload_file(
+            self, local_path: Path, remote_path: str, rtype: int = 3
+        ) -> dict[str, object]:
+            del rtype
+            self.upload_calls.append((local_path, remote_path))
+            return {"path": remote_path, "errno": 0}
+
+        def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
+            del local_path
+            raise AssertionError(f"复用预加载索引后不应下载远端索引：{remote_path}")
+
+        def get_path_entry(self, remote_path: str) -> dict[str, object]:
+            normalized = self._normalize_remote_path(remote_path)
+            if normalized in self.remote_dirs:
+                return {"path": normalized, "isdir": 1}
+            raise FileNotFoundError(remote_path)
+
+        def create_directory(self, dir_path: str) -> dict[str, object]:
+            self.remote_dirs.add(self._normalize_remote_path(dir_path))
+            return {"path": dir_path, "isdir": 1}
+
+        def move_path(
+            self,
+            source_path: str,
+            destination_dir: str,
+            new_name: str | None = None,
+            ondup: str = "newcopy",
+        ) -> dict[str, object]:
+            raise AssertionError(
+                f"同版本命中跳过上传时不应触发 move：{source_path} -> {destination_dir}/{new_name}/{ondup}"
+            )
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "output"
+    package_root = output_path / "packages" / "16.4"
+    package_root.mkdir(parents=True, exist_ok=True)
+    archive = package_root / "champions" / "1·annie·黑暗之女·安妮-16.4-VO.7z"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"annie-audio")
+    preloaded_remote_index = {
+        "/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z".casefold(): {
+            "remote_path": "/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.4-VO.7z",
+            "remote_name": "1·annie·黑暗之女·安妮-16.4-VO.7z",
+            "game_version": "16.4",
+            "target_group": "champions",
+            "resource_type": "VO",
+            "entity_key": "1·annie·黑暗之女·安妮",
+            "uploaded_at": "2026-03-04T00:00:00Z",
+        }
+    }
+
+    fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
+    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "BaiduPanClient",
+        lambda credentials, remote_dir, token_store: fake_client,
+    )
+
+    config = PipelineConfig(
+        output_path=output_path,
+        baidu_pan_remote_dir="/apps/test",
+        baidu_pan_app_key="app",
+        baidu_pan_secret_key="secret",
+        baidu_pan_refresh_token="refresh",
+        enable_upload=True,
+    )
+    manifest_file = pipeline._upload_archives_and_manifest(
+        config=config,
+        game_version="16.4",
+        archives=(archive,),
+        preloaded_remote_index=preloaded_remote_index,
+    )
+
+    assert manifest_file == package_root / "upload_manifest.json"
+    assert fake_client.upload_calls == []
+    payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    assert payload["entry_count"] == 1
+    assert payload["last_run"]["uploaded_count"] == 0
+    assert payload["last_run"]["skipped_count"] == 1
+
+
 def test_upload_archives_and_manifest_should_archive_old_version_before_upload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -562,6 +778,110 @@ def test_upload_archives_and_manifest_should_archive_old_version_before_upload(
     )
 
 
+def test_upload_archives_and_manifest_should_enqueue_pending_sync_when_manifest_upload_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """索引回传失败时应写入待重试队列且不阻断上传主流程。"""
+
+    class _FakeClient:
+        def __init__(self, credentials, remote_dir, token_store) -> None:
+            del credentials, token_store
+            self.remote_dir = remote_dir
+            self.upload_calls: list[tuple[Path, str]] = []
+            self.remote_dirs: set[str] = {self.remote_dir}
+            self.remote_files: set[str] = set()
+
+        def _normalize_remote_path(self, remote_path: str) -> str:
+            if remote_path.startswith("/"):
+                return remote_path
+            return f"{self.remote_dir.rstrip('/')}/{remote_path.lstrip('/')}"
+
+        def upload_file(
+            self, local_path: Path, remote_path: str, rtype: int = 3
+        ) -> dict[str, object]:
+            del rtype
+            self.upload_calls.append((local_path, remote_path))
+            if remote_path in {"upload_manifest.json", "upload_manifest_readable.txt"}:
+                raise RuntimeError(f"模拟索引回传失败：{remote_path}")
+            self.remote_files.add(self._normalize_remote_path(remote_path))
+            return {"path": remote_path, "errno": 0}
+
+        def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
+            del local_path
+            raise FileNotFoundError(remote_path)
+
+        def get_path_entry(self, remote_path: str) -> dict[str, object]:
+            normalized = self._normalize_remote_path(remote_path)
+            if normalized in self.remote_dirs:
+                return {"path": normalized, "isdir": 1}
+            if normalized in self.remote_files:
+                return {"path": normalized, "isdir": 0}
+            raise FileNotFoundError(remote_path)
+
+        def create_directory(self, dir_path: str) -> dict[str, object]:
+            self.remote_dirs.add(self._normalize_remote_path(dir_path))
+            return {"path": dir_path, "isdir": 1}
+
+        def move_path(
+            self,
+            source_path: str,
+            destination_dir: str,
+            new_name: str | None = None,
+            ondup: str = "newcopy",
+        ) -> dict[str, object]:
+            raise AssertionError(
+                f"新增上传场景不应触发 move：{source_path} -> {destination_dir}/{new_name}/{ondup}"
+            )
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "output"
+    package_root = output_path / "packages" / "16.4"
+    queue_file = output_path / "state" / "pending_manifest_sync_queue.json"
+    package_root.mkdir(parents=True, exist_ok=True)
+    archive = package_root / "champions" / "1·annie·黑暗之女·安妮-16.4-VO.7z"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"a")
+
+    fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
+    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "BaiduPanClient",
+        lambda credentials, remote_dir, token_store: fake_client,
+    )
+
+    config = PipelineConfig(
+        output_path=output_path,
+        baidu_pan_remote_dir="/apps/test",
+        baidu_pan_app_key="app",
+        baidu_pan_secret_key="secret",
+        baidu_pan_refresh_token="refresh",
+        enable_upload=True,
+    )
+    manifest_file = pipeline._upload_archives_and_manifest(
+        config=config,
+        game_version="16.4",
+        archives=(archive,),
+        pending_manifest_sync_queue_file=queue_file,
+    )
+
+    assert manifest_file == package_root / "upload_manifest.json"
+    assert manifest_file.exists()
+    assert queue_file.exists()
+    queue_payload = json.loads(queue_file.read_text(encoding="utf-8"))
+    assert isinstance(queue_payload, list)
+    assert len(queue_payload) == 1
+    queue_entry = queue_payload[0]
+    assert queue_entry["remote_dir"] == "/apps/test"
+    assert Path(queue_entry["manifest_file"]) == manifest_file.resolve()
+    assert Path(queue_entry["readable_manifest_file"]) == (
+        package_root / "upload_manifest_readable.txt"
+    ).resolve()
+
+
 def test_upload_archives_and_manifest_should_fail_when_remote_file_exists_without_index(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -682,11 +1002,24 @@ def test_upload_archives_and_manifest_should_fail_when_index_missing_in_diff_mod
 
     class _FakeClient:
         def __init__(self, credentials, remote_dir, token_store) -> None:
-            del credentials, remote_dir, token_store
+            del credentials, token_store
+            self.remote_dir = remote_dir
+            self.remote_dirs: set[str] = {self.remote_dir}
 
         def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
             del local_path
             raise FileNotFoundError(remote_path)
+
+        def get_path_entry(self, remote_path: str) -> dict[str, object]:
+            normalized = remote_path if remote_path.startswith("/") else f"{self.remote_dir}/{remote_path}"
+            if normalized in self.remote_dirs:
+                return {"path": normalized, "isdir": 1}
+            raise FileNotFoundError(remote_path)
+
+        def create_directory(self, dir_path: str) -> dict[str, object]:
+            normalized = dir_path if dir_path.startswith("/") else f"{self.remote_dir}/{dir_path}"
+            self.remote_dirs.add(normalized)
+            return {"path": normalized, "isdir": 1}
 
         def close(self) -> None:
             return None
@@ -839,7 +1172,7 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
 
     unpack_calls: list[tuple[tuple[int, ...], tuple[int, ...], int]] = []
     pack_calls: list[tuple[Path, Path, str, Path | None]] = []
-    upload_calls: list[tuple[str, ...]] = []
+    upload_run_records: list[dict[str, object]] = []
 
     def _fake_resolve_runtime_wad_paths(
         data_file_base: Path,
@@ -896,33 +1229,82 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
         pack_calls.append((champion_dir, output_path, str(archive_name), report_file))
         return archive_path
 
-    def _fake_upload_archives_and_manifest(
-        config: PipelineConfig,
-        game_version: str,
-        archives: tuple[Path, ...],
-        allow_missing_remote_index: bool = True,
-        run_record_collector: list[dict[str, object]] | None = None,
-    ) -> Path:
-        del allow_missing_remote_index, config, game_version, run_record_collector
-        upload_calls.append(tuple(path.name for path in archives))
-        manifest_file = output_path / "packages" / "16.4" / "upload_manifest.json"
-        manifest_file.parent.mkdir(parents=True, exist_ok=True)
-        manifest_file.write_text("{}", encoding="utf-8")
-        return manifest_file
+    class _FakeClient:
+        def __init__(self, credentials, remote_dir, token_store) -> None:
+            del credentials, token_store
+            self.remote_dir = remote_dir
+            self.upload_calls: list[tuple[Path, str]] = []
+            self.download_calls: list[tuple[str, Path]] = []
+            self.create_dir_calls: list[str] = []
+            self.remote_dirs: set[str] = {self.remote_dir}
+            self.remote_files: set[str] = set()
+
+        def _normalize_remote_path(self, remote_path: str) -> str:
+            if remote_path.startswith("/"):
+                return remote_path
+            return f"{self.remote_dir.rstrip('/')}/{remote_path.lstrip('/')}"
+
+        def upload_file(
+            self, local_path: Path, remote_path: str, rtype: int = 3
+        ) -> dict[str, object]:
+            del rtype
+            self.upload_calls.append((local_path, remote_path))
+            self.remote_files.add(self._normalize_remote_path(remote_path))
+            return {"path": remote_path, "errno": 0}
+
+        def download_file(self, remote_path: str, local_path: Path) -> dict[str, object]:
+            self.download_calls.append((remote_path, local_path))
+            raise FileNotFoundError(remote_path)
+
+        def get_path_entry(self, remote_path: str) -> dict[str, object]:
+            normalized = self._normalize_remote_path(remote_path)
+            if normalized in self.remote_dirs:
+                return {"path": normalized, "isdir": 1}
+            if normalized in self.remote_files:
+                return {"path": normalized, "isdir": 0}
+            raise FileNotFoundError(remote_path)
+
+        def create_directory(self, dir_path: str) -> dict[str, object]:
+            normalized = self._normalize_remote_path(dir_path)
+            self.create_dir_calls.append(dir_path)
+            self.remote_dirs.add(normalized)
+            return {"path": normalized, "isdir": 1}
+
+        def move_path(
+            self,
+            source_path: str,
+            destination_dir: str,
+            new_name: str | None = None,
+            ondup: str = "newcopy",
+        ) -> dict[str, object]:
+            raise AssertionError(
+                f"流式新增上传场景不应触发 move：{source_path} -> {destination_dir}/{new_name}/{ondup}"
+            )
+
+        def close(self) -> None:
+            return None
 
     monkeypatch.setattr(pipeline, "resolve_runtime_wad_paths", _fake_resolve_runtime_wad_paths)
     monkeypatch.setattr(pipeline, "run_unpack", _fake_run_unpack)
     monkeypatch.setattr(pipeline, "pack_champion", _fake_pack_champion)
-    monkeypatch.setattr(
-        pipeline, "_upload_archives_and_manifest", _fake_upload_archives_and_manifest
-    )
     monkeypatch.setattr(pipeline, "_resolve_pack_extra_files", lambda config: tuple())
     monkeypatch.setattr(pipeline, "_resolve_pack_archive_type", lambda config: "VO")
     monkeypatch.setattr(pipeline, "check_disk_space", lambda path, required_bytes: True)
+    fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
+    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "BaiduPanClient",
+        lambda credentials, remote_dir, token_store: fake_client,
+    )
 
     config = PipelineConfig(
         output_path=output_path,
         game_region="zh_CN",
+        baidu_pan_remote_dir="/apps/test",
+        baidu_pan_app_key="app",
+        baidu_pan_secret_key="secret",
+        baidu_pan_refresh_token="refresh",
         pack_password=None,
         pack_encrypt_filenames=True,
     )
@@ -939,7 +1321,7 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
         include_root_wad=True,
         unpack_workers=2,
         allow_missing_remote_index=True,
-        run_record_collector=[],
+        run_record_collector=upload_run_records,
     )
 
     assert manifest_file == output_path / "packages" / "16.4" / "upload_manifest.json"
@@ -948,7 +1330,16 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
         (tuple(), (11,), 2),
     ]
     assert [item[2] for item in pack_calls] == ["1·Annie-16.4-VO.7z", "11·Map11-16.4-VO.7z"]
-    assert upload_calls == [("1·Annie-16.4-VO.7z",), ("11·Map11-16.4-VO.7z",)]
+    assert fake_client.download_calls == [
+        ("upload_manifest.json", output_path / "packages" / "16.4" / ".remote_upload_manifest.json")
+    ]
+    assert [item[1] for item in fake_client.upload_calls] == [
+        "VO/champions/1·Annie-16.4-VO.7z",
+        "VO/maps/11·Map11-16.4-VO.7z",
+        "upload_manifest.json",
+        "upload_manifest_readable.txt",
+    ]
+    assert [item.get("status") for item in upload_run_records] == ["uploaded", "uploaded"]
     assert not champion_wad.exists()
     assert not map_wad.exists()
     assert not (output_path / "audios" / "16.4" / "champions" / "1·Annie").exists()
@@ -983,3 +1374,80 @@ def test_resolve_effective_unpack_workers_should_expand_for_real_game_path(
         runtime_is_simulated=False,
     )
     assert effective == 8
+
+
+def test_run_pipeline_should_continue_when_update_log_stage_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """更新日志阶段失败时不应阻断主流程状态提交。"""
+
+    latest_versions = SimpleNamespace(
+        game_version="16.4.7480682",
+        game_manifest_url="https://example.test/game-new.manifest",
+        lcu_version="16.4",
+        lcu_manifest_url="https://example.test/lcu-new.manifest",
+    )
+    decision = SimpleNamespace(
+        should_update=True,
+        reason="first_run",
+        latest_versions=latest_versions,
+        previous_state=None,
+        changed_entities=SimpleNamespace(champion_aliases=tuple(), map_ids=tuple()),
+        wad_changes=SimpleNamespace(
+            added_paths=tuple(),
+            changed_paths=tuple(),
+            removed_paths=tuple(),
+            update_paths=tuple(),
+        ),
+    )
+
+    data_file_base = tmp_path / "output" / "manifest" / "16.4" / "data"
+    data_file_base.parent.mkdir(parents=True, exist_ok=True)
+    saved_state_file = tmp_path / "state" / "run_history.json"
+
+    monkeypatch.setattr(pipeline, "ensure_official_sdk_path", lambda: tmp_path / "sdk")
+    monkeypatch.setattr(pipeline, "evaluate_update_need", lambda **_: decision)
+    monkeypatch.setattr(pipeline, "_preflight_remote_upload_index", lambda **_: {})
+    monkeypatch.setattr(pipeline, "_retry_pending_manifest_sync_queue", lambda **_: None)
+    monkeypatch.setattr(
+        pipeline,
+        "_resolve_runtime_game_path",
+        lambda **_: (tmp_path / "real_game", False),
+    )
+    monkeypatch.setattr(pipeline, "check_local_game_path", lambda runtime_game_path: True)
+    monkeypatch.setattr(pipeline, "run_data_updater", lambda **_: data_file_base)
+    monkeypatch.setattr(
+        pipeline,
+        "resolve_processing_targets",
+        lambda **_: SimpleNamespace(champion_ids=tuple(), map_ids=tuple()),
+    )
+    monkeypatch.setattr(pipeline, "run_bin_updater", lambda **_: None)
+    monkeypatch.setattr(pipeline, "run_unpack", lambda **_: None)
+    monkeypatch.setattr(pipeline, "_pack_unpacked_outputs", lambda **_: tuple())
+    monkeypatch.setattr(pipeline, "_cleanup_version_audio_outputs", lambda **_: 0)
+    monkeypatch.setattr(pipeline, "_upload_archives_and_manifest", lambda **_: None)
+    monkeypatch.setattr(
+        pipeline,
+        "_write_and_upload_update_log_files",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("模拟更新日志上传失败")),
+    )
+    monkeypatch.setattr(pipeline, "build_local_state", lambda latest_versions: object())
+    monkeypatch.setattr(
+        pipeline,
+        "save_local_state",
+        lambda state, state_file: saved_state_file,
+    )
+
+    config = PipelineConfig(
+        output_path=tmp_path / "output",
+        game_path=tmp_path / "real_game",
+        baidu_pan_remote_dir="/apps/test",
+        baidu_pan_app_key="app",
+        baidu_pan_secret_key="secret",
+        baidu_pan_refresh_token="refresh",
+        low_disk_mode=False,
+        enable_pack=True,
+        enable_upload=True,
+    )
+    assert pipeline.run_pipeline(config=config) == 0

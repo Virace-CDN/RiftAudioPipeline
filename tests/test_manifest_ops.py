@@ -401,7 +401,7 @@ def test_filter_wad_changes_by_bin_voice_paths_should_aggregate_unpack_paths(
             self.files: dict[str, Any] = {}
 
     class _FakeExtractor:
-        def __init__(self, manifest: _FakeManifest) -> None:
+        def __init__(self, manifest: _FakeManifest, **_: Any) -> None:
             self.manifest = manifest
 
         def __enter__(self) -> _FakeExtractor:
@@ -506,7 +506,7 @@ def test_filter_wad_changes_by_bin_voice_paths_should_write_bin_output_dir(
             self.files: dict[str, Any] = {}
 
     class _FakeExtractor:
-        def __init__(self, manifest: _FakeManifest) -> None:
+        def __init__(self, manifest: _FakeManifest, **_: Any) -> None:
             self.manifest = manifest
 
         def __enter__(self) -> _FakeExtractor:
@@ -563,3 +563,29 @@ def test_filter_wad_changes_by_bin_voice_paths_should_write_bin_output_dir(
     assert result.unpack_paths == ("DATA/FINAL/Champions/Annie.zh_CN.wad.client",)
     assert (bin_output_dir / "data" / "characters" / "annie" / "skins" / "skin0.bin").read_bytes() == b"annie-bin"
     assert (bin_output_dir / "data" / "maps" / "shipping" / "map11" / "map11.bin").read_bytes() == b"map-bin"
+
+
+def test_filter_wad_changes_by_bin_voice_paths_should_reject_invalid_unit_workers() -> None:
+    """并发数小于 1 时应直接拒绝。"""
+
+    with pytest.raises(ValueError, match="unit_max_workers"):
+        filter_wad_changes_by_bin_voice_paths(
+            old_manifest_url="https://example.test/old.manifest",
+            new_manifest_url="https://example.test/new.manifest",
+            region="zh_CN",
+            update_paths=("DATA/FINAL/Champions/Annie.zh_CN.wad.client",),
+            unit_max_workers=0,
+        )
+
+
+def test_filter_wad_changes_by_bin_voice_paths_should_reject_invalid_extract_concurrency() -> None:
+    """WADExtractor 内部下载并发小于 1 时应直接拒绝。"""
+
+    with pytest.raises(ValueError, match="extractor_prefetch_chunk_concurrency"):
+        filter_wad_changes_by_bin_voice_paths(
+            old_manifest_url="https://example.test/old.manifest",
+            new_manifest_url="https://example.test/new.manifest",
+            region="zh_CN",
+            update_paths=("DATA/FINAL/Champions/Annie.zh_CN.wad.client",),
+            extractor_prefetch_chunk_concurrency=0,
+        )
