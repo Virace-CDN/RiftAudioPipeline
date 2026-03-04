@@ -43,10 +43,15 @@ def download_game_content_metadata(
         download_dir,
         game_path,
     )
-    downloaded = download_manifest_exact_paths(
-        manifest_url=game_manifest_url,
-        download_dir=download_dir,
+    manifest = PatcherManifest(file=game_manifest_url, path=str(download_dir))
+    selected_files = _resolve_manifest_files_by_exact_paths(
+        manifest=manifest,
         exact_paths=("content-metadata.json",),
+    )
+    downloaded = _download_manifest_files(
+        manifest=manifest,
+        files=selected_files,
+        download_dir=download_dir,
         concurrency_limit=concurrency_limit,
     )
     staged = stage_runtime_file(
@@ -85,10 +90,15 @@ def download_lcu_data_wads(
         concurrency_limit,
     )
     region_pattern = rf"^Plugins/rcp-be-lol-game-data/{re.escape(region)}-assets\.wad$"
-    downloaded = download_manifest_patterns(
-        manifest_url=lcu_manifest_url,
-        download_dir=download_dir,
+    manifest = PatcherManifest(file=lcu_manifest_url, path=str(download_dir))
+    selected_files = _resolve_manifest_files_by_patterns(
+        manifest=manifest,
         patterns=(LCU_DEFAULT_ASSETS_PATTERN, region_pattern),
+    )
+    downloaded = _download_manifest_files(
+        manifest=manifest,
+        files=selected_files,
+        download_dir=download_dir,
         concurrency_limit=concurrency_limit,
     )
 
@@ -137,10 +147,15 @@ def download_game_wads_by_runtime_paths(
         len(runtime_wad_paths),
     )
     manifest_paths = tuple(_to_game_manifest_path(path) for path in runtime_wad_paths)
-    downloaded = download_manifest_exact_paths(
-        manifest_url=game_manifest_url,
-        download_dir=download_dir,
+    manifest = PatcherManifest(file=game_manifest_url, path=str(download_dir))
+    selected_files = _resolve_manifest_files_by_exact_paths(
+        manifest=manifest,
         exact_paths=manifest_paths,
+    )
+    downloaded = _download_manifest_files(
+        manifest=manifest,
+        files=selected_files,
+        download_dir=download_dir,
         concurrency_limit=concurrency_limit,
     )
 
@@ -158,59 +173,28 @@ def download_game_wads_by_runtime_paths(
     return tuple(staged)
 
 
-def download_manifest_patterns(
-    manifest_url: str,
-    download_dir: Path,
+def _resolve_manifest_files_by_patterns(
+    manifest: PatcherManifest,
     patterns: Sequence[str],
-    concurrency_limit: int = DEFAULT_DOWNLOAD_CONCURRENCY,
-) -> tuple[Path, ...]:
-    """按正则模式批量下载 manifest 文件。
+) -> tuple[Any, ...]:
+    """按正则模式筛选 manifest 文件。"""
 
-    Args:
-        manifest_url: manifest URL。
-        download_dir: 下载目录。
-        patterns: 正则模式集合。
-        concurrency_limit: 并发下载数。
-
-    Returns:
-        已下载文件路径集合（按路径排序）。
-    """
-
-    manifest = PatcherManifest(file=manifest_url, path=str(download_dir))
     files: list[Any] = []
     for pattern in patterns:
         files.extend(manifest.filter_files(pattern=pattern))
-    deduped = _dedupe_manifest_files(files)
-    return _download_selected_files(
-        manifest=manifest,
-        files=deduped,
-        download_dir=download_dir,
-        concurrency_limit=concurrency_limit,
-    )
+    return _dedupe_manifest_files(files)
 
 
-def download_manifest_exact_paths(
-    manifest_url: str,
-    download_dir: Path,
+def _resolve_manifest_files_by_exact_paths(
+    manifest: PatcherManifest,
     exact_paths: Sequence[str],
-    concurrency_limit: int = DEFAULT_DOWNLOAD_CONCURRENCY,
-) -> tuple[Path, ...]:
-    """按精确路径批量下载 manifest 文件。
-
-    Args:
-        manifest_url: manifest URL。
-        download_dir: 下载目录。
-        exact_paths: 清单内精确路径集合。
-        concurrency_limit: 并发下载数。
-
-    Returns:
-        已下载文件路径集合（按路径排序）。
+) -> tuple[Any, ...]:
+    """按精确路径筛选 manifest 文件。
 
     Raises:
         FileNotFoundError: 指定路径不在清单中时抛出。
     """
 
-    manifest = PatcherManifest(file=manifest_url, path=str(download_dir))
     index = {
         str(file_obj.name).replace("\\", "/").casefold(): file_obj
         for file_obj in manifest.files.values()
@@ -230,16 +214,10 @@ def download_manifest_exact_paths(
     if missing:
         raise FileNotFoundError(f"以下路径不在 manifest 中：{missing}")
 
-    deduped = _dedupe_manifest_files(selected)
-    return _download_selected_files(
-        manifest=manifest,
-        files=deduped,
-        download_dir=download_dir,
-        concurrency_limit=concurrency_limit,
-    )
+    return _dedupe_manifest_files(selected)
 
 
-def _download_selected_files(
+def _download_manifest_files(
     manifest: PatcherManifest,
     files: Sequence[Any],
     download_dir: Path,

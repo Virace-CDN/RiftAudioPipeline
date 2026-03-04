@@ -92,35 +92,42 @@ def test_to_runtime_relative_path_should_map_core_paths() -> None:
     )
 
 
-def test_download_manifest_exact_paths_should_download_expected_files(
-    monkeypatch: pytest.MonkeyPatch,
+def test_resolve_manifest_files_by_exact_paths_should_download_expected_files(
     tmp_path: Path,
 ) -> None:
-    """精确路径下载应写入目标文件。"""
+    """精确路径筛选后应可下载写入目标文件。"""
 
-    monkeypatch.setattr(downloader, "PatcherManifest", _FakeManifest)
-
-    files = downloader.download_manifest_exact_paths(
-        manifest_url="https://example.test/game.manifest",
-        download_dir=tmp_path / "downloads",
+    manifest = _FakeManifest(
+        file="https://example.test/game.manifest",
+        path=str(tmp_path / "downloads"),
+    )
+    selected = downloader._resolve_manifest_files_by_exact_paths(
+        manifest=manifest,
         exact_paths=("content-metadata.json",),
+    )
+    files = downloader._download_manifest_files(
+        manifest=manifest,
+        files=selected,
+        download_dir=tmp_path / "downloads",
+        concurrency_limit=4,
     )
     assert len(files) == 1
     assert files[0].exists()
     assert files[0].read_text(encoding="utf-8") == "downloaded:content-metadata.json"
 
 
-def test_download_manifest_exact_paths_should_raise_when_missing(
-    monkeypatch: pytest.MonkeyPatch,
+def test_resolve_manifest_files_by_exact_paths_should_raise_when_missing(
     tmp_path: Path,
 ) -> None:
     """指定路径不在清单中时应抛错。"""
 
-    monkeypatch.setattr(downloader, "PatcherManifest", _FakeManifest)
+    manifest = _FakeManifest(
+        file="https://example.test/game.manifest",
+        path=str(tmp_path / "downloads"),
+    )
 
     with pytest.raises(FileNotFoundError):
-        downloader.download_manifest_exact_paths(
-            manifest_url="https://example.test/game.manifest",
-            download_dir=tmp_path / "downloads",
+        downloader._resolve_manifest_files_by_exact_paths(
+            manifest=manifest,
             exact_paths=("DATA/FINAL/Champions/Missing.wad.client",),
         )

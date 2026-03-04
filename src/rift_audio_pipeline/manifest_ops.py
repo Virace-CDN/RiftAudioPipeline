@@ -24,6 +24,7 @@ from riotmanifest import PatcherManifest
 from riotmanifest import RiotGameData
 from riotmanifest import WADExtractor
 from riotmanifest import diff_manifests
+from riotmanifest import diff_wad_headers
 
 DEFAULT_GAME_RELEASE_REGION = "EUW1"
 DEFAULT_LCU_RELEASE_REGION = "EUW"
@@ -66,7 +67,6 @@ DECISION_REASON_NO_REGION_MANIFEST_CHANGES = "no_region_manifest_changes"
 DECISION_REASON_REGION_MANIFEST_CHANGED = "region_manifest_changed"
 
 VoicePathDiffStatus: TypeAlias = Literal["added", "removed", "changed", "unchanged", "missing"]
-SectionSignature: TypeAlias = tuple[int, int, int, int, bool, int | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -844,6 +844,32 @@ def _collect_voice_path_statuses(
 ) -> tuple[VoicePathStatus, ...]:
     """收集语音路径状态（added/removed/changed/unchanged/missing）。"""
 
+    focus_paths = tuple(
+        sorted(
+            {path for path in audio_paths + event_paths if isinstance(path, str) and path.strip()},
+            key=str.casefold,
+        )
+    )
+    if not focus_paths:
+        return tuple()
+
+    manifest_report = diff_manifests(
+        old_extractor.manifest,
+        new_extractor.manifest,
+        target_files=(region_wad_path,),
+        include_unchanged=True,
+        detect_moves=False,
+    )
+    wad_header_report = diff_wad_headers(
+        manifest_report=manifest_report,
+        target_wad_files=(region_wad_path,),
+        inner_paths={region_wad_path: focus_paths},
+        include_unchanged=True,
+    )
+    section_status_by_hash, missing_paths = _build_wad_focus_status_index(
+        region_wad_path=region_wad_path,
+        wad_header_report=wad_header_report,
+    )
     old_header = _load_wad_header(
         extractor=old_extractor,
         file_index=old_file_index,
@@ -854,20 +880,18 @@ def _collect_voice_path_statuses(
         file_index=new_file_index,
         wad_path=region_wad_path,
     )
-    old_sections = _build_wad_section_index(old_header) if old_header is not None else {}
-    new_sections = _build_wad_section_index(new_header) if new_header is not None else {}
 
     statuses: list[VoicePathStatus] = []
     for path in audio_paths:
         statuses.append(
             VoicePathStatus(
                 path=path,
-                status=_diff_inner_path_status(
+                status=_resolve_inner_path_status(
                     path=path,
                     old_header=old_header,
                     new_header=new_header,
-                    old_sections=old_sections,
-                    new_sections=new_sections,
+                    section_status_by_hash=section_status_by_hash,
+                    missing_paths=missing_paths,
                 ),
                 path_type="audio",
             )
@@ -876,12 +900,12 @@ def _collect_voice_path_statuses(
         statuses.append(
             VoicePathStatus(
                 path=path,
-                status=_diff_inner_path_status(
+                status=_resolve_inner_path_status(
                     path=path,
                     old_header=old_header,
                     new_header=new_header,
-                    old_sections=old_sections,
-                    new_sections=new_sections,
+                    section_status_by_hash=section_status_by_hash,
+                    missing_paths=missing_paths,
                 ),
                 path_type="event",
             )
@@ -976,64 +1000,73 @@ def _classify_voice_bank_paths(paths: Sequence[str]) -> tuple[tuple[str, ...], t
     )
 
 
-def _build_wad_section_index(header: Any) -> dict[int, tuple[SectionSignature, ...]]:
-    """为 WAD 头构建按 `path_hash` 索引的 section 签名集合。"""
+def _build_wad_focus_status_index(
+    region_wad_path: str,
+    wad_header_report: Any,
+) -> tuple[dict[int, VoicePathDiffStatus], set[str]]:
+    """从 `diff_wad_headers` 结果提取 path_hash 状态索引。"""
 
-    index: dict[int, list[SectionSignature]] = {}
-    for section in getattr(header, "files", tuple()):
-        signature: SectionSignature = (
-            int(section.size),
-            int(section.compressed_size),
-            int(section.type),
-            int(getattr(section, "subchunk_count", 0)),
-            bool(getattr(section, "duplicate", False)),
-            _as_optional_int(getattr(section, "sha256", None)),
-        )
-        path_hash = int(section.path_hash)
-        index.setdefault(path_hash, []).append(signature)
-    return {path_hash: tuple(sorted(values)) for path_hash, values in index.items()}
+    for file_diff in getattr(wad_header_report, "files", tuple()):
+        file_path = getattr(file_diff, "wad_path", "")
+        if not isinstance(file_path, str):
+            continue
+        if file_path.casefold() != region_wad_path.casefold():
+            continue
+        section_status_by_hash: dict[int, VoicePathDiffStatus] = {}
+        for section_diff in getattr(file_diff, "section_diffs", tuple()):
+            path_hash = getattr(section_diff, "path_hash", None)
+            status = getattr(section_diff, "status", None)
+            if not isinstance(path_hash, int):
+                continue
+            if status not in {"added", "removed", "changed", "unchanged"}:
+                continue
+            section_status_by_hash[path_hash] = status
+        missing_paths = {
+            str(path).strip().casefold()
+            for path in getattr(file_diff, "missing_focused_paths", tuple())
+            if isinstance(path, str) and path.strip()
+        }
+        return section_status_by_hash, missing_paths
+    return {}, set()
 
 
-def _diff_inner_path_status(
+def _resolve_inner_path_status(
     path: str,
     old_header: Any | None,
     new_header: Any | None,
-    old_sections: Mapping[int, tuple[SectionSignature, ...]],
-    new_sections: Mapping[int, tuple[SectionSignature, ...]],
+    section_status_by_hash: Mapping[int, VoicePathDiffStatus],
+    missing_paths: set[str],
 ) -> VoicePathDiffStatus:
-    """比较单一路径在旧新 WAD 中的 section 状态。"""
+    """按 `diff_wad_headers` 的 path_hash 差异结果解析单一路径状态。"""
+
+    normalized_path = _normalize_manifest_path(path)
+    if normalized_path.casefold() in missing_paths:
+        return "missing"
 
     candidate_hashes: set[int] = set()
     if old_header is not None:
-        candidate_hashes.add(_resolve_wad_path_hash(old_header, path))
+        candidate_hashes.add(_resolve_wad_path_hash(old_header, normalized_path))
     if new_header is not None:
-        candidate_hashes.add(_resolve_wad_path_hash(new_header, path))
+        candidate_hashes.add(_resolve_wad_path_hash(new_header, normalized_path))
     if not candidate_hashes:
         return "missing"
 
-    old_values = _collect_sections_by_hashes(old_sections, candidate_hashes)
-    new_values = _collect_sections_by_hashes(new_sections, candidate_hashes)
-    if not old_values and not new_values:
+    statuses = {
+        section_status_by_hash[path_hash]
+        for path_hash in candidate_hashes
+        if path_hash in section_status_by_hash
+    }
+    if not statuses:
         return "missing"
-    if not old_values:
+    if "changed" in statuses:
+        return "changed"
+    if "added" in statuses and "removed" in statuses:
+        return "changed"
+    if "added" in statuses:
         return "added"
-    if not new_values:
+    if "removed" in statuses:
         return "removed"
-    if old_values == new_values:
-        return "unchanged"
-    return "changed"
-
-
-def _collect_sections_by_hashes(
-    section_index: Mapping[int, tuple[SectionSignature, ...]],
-    path_hashes: set[int],
-) -> tuple[SectionSignature, ...]:
-    """按哈希集合聚合 section 签名。"""
-
-    values: list[SectionSignature] = []
-    for path_hash in sorted(path_hashes):
-        values.extend(section_index.get(path_hash, tuple()))
-    return tuple(sorted(values))
+    return "unchanged"
 
 
 def _resolve_wad_path_hash(header: Any, path: str) -> int:
@@ -1180,15 +1213,6 @@ def _normalize_manifest_path(path: str) -> str:
     """统一清洗 manifest 路径分隔符与首尾空白。"""
 
     return path.strip().replace("\\", "/")
-
-
-def _as_optional_int(value: Any) -> int | None:
-    """将可选整数值转为 `int | None`。"""
-
-    if value is None:
-        return None
-    return int(value)
-
 
 def _extract_diff_entry_path(entry: Any) -> str:
     """提取 diff 条目中的路径字段。"""
