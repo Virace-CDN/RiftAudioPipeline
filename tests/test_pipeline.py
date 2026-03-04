@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from rift_audio_pipeline.config import PipelineConfig
-import rift_audio_pipeline.pipeline as pipeline
+from rift_audio_pipeline.pipeline import orchestrator as pipeline_orchestrator
+from rift_audio_pipeline.pipeline import upload as pipeline_upload
+from rift_audio_pipeline.pipeline import utils as pipeline_utils
 
 
 def _build_diff_update_decision(
@@ -58,10 +60,10 @@ def test_run_pipeline_should_skip_secondary_filter_when_update_wad_count_reaches
         champion_aliases=tuple(f"Hero{index}" for index in range(101)),
     )
 
-    monkeypatch.setattr(pipeline, "ensure_official_sdk_path", lambda: tmp_path / "sdk")
-    monkeypatch.setattr(pipeline, "evaluate_update_need", lambda **_: decision)
+    monkeypatch.setattr(pipeline_orchestrator, "ensure_official_sdk_path", lambda: tmp_path / "sdk")
+    monkeypatch.setattr(pipeline_orchestrator, "evaluate_update_need", lambda **_: decision)
     monkeypatch.setattr(
-        pipeline,
+        pipeline_orchestrator,
         "filter_wad_changes_by_bin_voice_paths",
         lambda **_: (_ for _ in ()).throw(AssertionError("阈值分支不应触发二次筛选")),
     )
@@ -71,7 +73,7 @@ def test_run_pipeline_should_skip_secondary_filter_when_update_wad_count_reaches
         dry_run=True,
         diff_bin_filter_threshold=100,
     )
-    assert pipeline.run_pipeline(config=config) == 0
+    assert pipeline_orchestrator.run_pipeline(config=config) == 0
 
 
 def test_run_pipeline_should_pass_unit_workers_to_secondary_filter_when_not_fallback(
@@ -104,14 +106,14 @@ def test_run_pipeline_should_pass_unit_workers_to_secondary_filter_when_not_fall
             ),
         )
 
-    monkeypatch.setattr(pipeline, "ensure_official_sdk_path", lambda: tmp_path / "sdk")
-    monkeypatch.setattr(pipeline, "evaluate_update_need", lambda **_: decision)
+    monkeypatch.setattr(pipeline_orchestrator, "ensure_official_sdk_path", lambda: tmp_path / "sdk")
+    monkeypatch.setattr(pipeline_orchestrator, "evaluate_update_need", lambda **_: decision)
     monkeypatch.setattr(
-        pipeline,
+        pipeline_orchestrator,
         "filter_wad_changes_by_bin_voice_paths",
         _fake_filter_wad_changes_by_bin_voice_paths,
     )
-    monkeypatch.setattr(pipeline, "create_local_bin_flag", lambda version_dir: version_dir)
+    monkeypatch.setattr(pipeline_orchestrator, "create_local_bin_flag", lambda version_dir: version_dir)
 
     config = PipelineConfig(
         output_path=tmp_path / "output",
@@ -120,7 +122,7 @@ def test_run_pipeline_should_pass_unit_workers_to_secondary_filter_when_not_fall
         diff_bin_filter_workers=3,
         diff_bin_extract_concurrency=5,
     )
-    assert pipeline.run_pipeline(config=config) == 0
+    assert pipeline_orchestrator.run_pipeline(config=config) == 0
     assert captured_call_kwargs["unit_max_workers"] == 3
     assert captured_call_kwargs["extractor_prefetch_chunk_concurrency"] == 5
     assert captured_call_kwargs["update_paths"] == update_paths
@@ -168,8 +170,8 @@ def test_pack_unpacked_outputs_should_pack_existing_targets(
         return (output_dir / f"{audio_dir.name}.7z",)
 
     extra_files_expected = extra_files
-    monkeypatch.setattr(pipeline, "pack_all", _fake_pack_all)
-    monkeypatch.setattr(pipeline, "_resolve_pack_extra_files", lambda config: extra_files_expected)
+    monkeypatch.setattr(pipeline_upload, "pack_all", _fake_pack_all)
+    monkeypatch.setattr(pipeline_upload, "_resolve_pack_extra_files", lambda config: extra_files_expected)
 
     config = PipelineConfig(
         output_path=output_path,
@@ -177,7 +179,7 @@ def test_pack_unpacked_outputs_should_pack_existing_targets(
         pack_password="secret",
         pack_encrypt_filenames=True,
     )
-    archives = pipeline._pack_unpacked_outputs(config=config, game_version="16.4")
+    archives = pipeline_upload._pack_unpacked_outputs(config=config, game_version="16.4")
 
     assert calls == [
         (
@@ -208,7 +210,7 @@ def test_pack_unpacked_outputs_should_return_empty_when_version_dir_missing(
     """缺失版本音频目录时应直接返回空集合。"""
 
     monkeypatch.setattr(
-        pipeline,
+        pipeline_upload,
         "pack_all",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应触发打包")),
     )
@@ -217,7 +219,7 @@ def test_pack_unpacked_outputs_should_return_empty_when_version_dir_missing(
         output_path=tmp_path / "output",
         enable_pack=True,
     )
-    archives = pipeline._pack_unpacked_outputs(config=config, game_version="16.4")
+    archives = pipeline_upload._pack_unpacked_outputs(config=config, game_version="16.4")
     assert archives == tuple()
 
 
@@ -235,7 +237,7 @@ def test_resolve_pack_extra_files_should_use_config_dir_first(tmp_path: Path) ->
         output_path=tmp_path / "output",
         pack_extra_dir=configured_dir,
     )
-    resolved = pipeline._resolve_pack_extra_files(config=config)
+    resolved = pipeline_upload._resolve_pack_extra_files(config=config)
     assert resolved == (first.resolve(), second.resolve())
 
 
@@ -246,7 +248,7 @@ def test_resolve_pack_extra_files_should_return_empty_when_missing(tmp_path: Pat
         output_path=tmp_path / "output",
         pack_extra_dir=tmp_path / "missing",
     )
-    resolved = pipeline._resolve_pack_extra_files(config=config)
+    resolved = pipeline_upload._resolve_pack_extra_files(config=config)
     assert resolved == tuple()
 
 
@@ -263,9 +265,9 @@ def test_resolve_pack_extra_files_should_use_bundled_default(
     first.write_text("readme", encoding="utf-8")
     second.write_text("license", encoding="utf-8")
 
-    monkeypatch.setattr(pipeline, "DEFAULT_BUNDLED_PACK_EXTRA_DIR", bundled_dir)
+    monkeypatch.setattr(pipeline_upload, "DEFAULT_BUNDLED_PACK_EXTRA_DIR", bundled_dir)
     config = PipelineConfig(output_path=tmp_path / "output")
-    resolved = pipeline._resolve_pack_extra_files(config=config)
+    resolved = pipeline_upload._resolve_pack_extra_files(config=config)
     assert resolved == (first.resolve(), second.resolve())
 
 
@@ -276,7 +278,7 @@ def test_resolve_pack_archive_type_should_return_single_type(tmp_path: Path) -> 
         output_path=tmp_path / "output",
         audio_types=("vo",),
     )
-    assert pipeline._resolve_pack_archive_type(config=config) == "VO"
+    assert pipeline_upload._resolve_pack_archive_type(config=config) == "VO"
 
 
 def test_resolve_pack_archive_type_should_return_none_when_multiple(tmp_path: Path) -> None:
@@ -286,7 +288,7 @@ def test_resolve_pack_archive_type_should_return_none_when_multiple(tmp_path: Pa
         output_path=tmp_path / "output",
         audio_types=("VO", "SFX"),
     )
-    assert pipeline._resolve_pack_archive_type(config=config) is None
+    assert pipeline_upload._resolve_pack_archive_type(config=config) is None
 
 
 def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
@@ -353,9 +355,9 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
             return None
 
     fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
-    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(pipeline_upload, "resolve_token_store", lambda: object())
     monkeypatch.setattr(
-        pipeline,
+        pipeline_upload,
         "BaiduPanClient",
         lambda credentials, remote_dir, token_store: fake_client,
     )
@@ -378,7 +380,7 @@ def test_upload_archives_and_manifest_should_upload_archives_and_manifest(
         baidu_pan_refresh_token="refresh",
         enable_upload=True,
     )
-    manifest_file = pipeline._upload_archives_and_manifest(
+    manifest_file = pipeline_upload._upload_archives_and_manifest(
         config=config,
         game_version="16.4",
         archives=(first_archive, second_archive),
@@ -496,9 +498,9 @@ def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
     }
 
     fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
-    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(pipeline_upload, "resolve_token_store", lambda: object())
     monkeypatch.setattr(
-        pipeline,
+        pipeline_upload,
         "BaiduPanClient",
         lambda credentials, remote_dir, token_store: fake_client,
     )
@@ -511,7 +513,7 @@ def test_upload_archives_and_manifest_should_skip_when_remote_index_hit(
         baidu_pan_refresh_token="refresh",
         enable_upload=True,
     )
-    manifest_file = pipeline._upload_archives_and_manifest(
+    manifest_file = pipeline_upload._upload_archives_and_manifest(
         config=config,
         game_version="16.4",
         archives=(archive,),
@@ -600,9 +602,9 @@ def test_upload_archives_and_manifest_should_reuse_preloaded_remote_index(
     }
 
     fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
-    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(pipeline_upload, "resolve_token_store", lambda: object())
     monkeypatch.setattr(
-        pipeline,
+        pipeline_upload,
         "BaiduPanClient",
         lambda credentials, remote_dir, token_store: fake_client,
     )
@@ -615,7 +617,7 @@ def test_upload_archives_and_manifest_should_reuse_preloaded_remote_index(
         baidu_pan_refresh_token="refresh",
         enable_upload=True,
     )
-    manifest_file = pipeline._upload_archives_and_manifest(
+    manifest_file = pipeline_upload._upload_archives_and_manifest(
         config=config,
         game_version="16.4",
         archives=(archive,),
@@ -723,9 +725,9 @@ def test_upload_archives_and_manifest_should_archive_old_version_before_upload(
     }
 
     fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
-    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(pipeline_upload, "resolve_token_store", lambda: object())
     monkeypatch.setattr(
-        pipeline,
+        pipeline_upload,
         "BaiduPanClient",
         lambda credentials, remote_dir, token_store: fake_client,
     )
@@ -738,7 +740,7 @@ def test_upload_archives_and_manifest_should_archive_old_version_before_upload(
         baidu_pan_refresh_token="refresh",
         enable_upload=True,
     )
-    manifest_file = pipeline._upload_archives_and_manifest(
+    manifest_file = pipeline_upload._upload_archives_and_manifest(
         config=config,
         game_version="16.4",
         archives=(archive,),
@@ -846,9 +848,9 @@ def test_upload_archives_and_manifest_should_enqueue_pending_sync_when_manifest_
     archive.write_bytes(b"a")
 
     fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
-    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(pipeline_upload, "resolve_token_store", lambda: object())
     monkeypatch.setattr(
-        pipeline,
+        pipeline_upload,
         "BaiduPanClient",
         lambda credentials, remote_dir, token_store: fake_client,
     )
@@ -861,7 +863,7 @@ def test_upload_archives_and_manifest_should_enqueue_pending_sync_when_manifest_
         baidu_pan_refresh_token="refresh",
         enable_upload=True,
     )
-    manifest_file = pipeline._upload_archives_and_manifest(
+    manifest_file = pipeline_upload._upload_archives_and_manifest(
         config=config,
         game_version="16.4",
         archives=(archive,),
@@ -948,9 +950,9 @@ def test_upload_archives_and_manifest_should_fail_when_remote_file_exists_withou
     archive.write_bytes(b"a")
 
     fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
-    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(pipeline_upload, "resolve_token_store", lambda: object())
     monkeypatch.setattr(
-        pipeline,
+        pipeline_upload,
         "BaiduPanClient",
         lambda credentials, remote_dir, token_store: fake_client,
     )
@@ -964,7 +966,7 @@ def test_upload_archives_and_manifest_should_fail_when_remote_file_exists_withou
         enable_upload=True,
     )
     with pytest.raises(RuntimeError, match="索引缺失"):
-        pipeline._upload_archives_and_manifest(
+        pipeline_upload._upload_archives_and_manifest(
             config=config,
             game_version="16.4",
             archives=(archive,),
@@ -987,7 +989,7 @@ def test_upload_archives_and_manifest_should_raise_when_credentials_missing(
         enable_upload=True,
     )
     with pytest.raises(ValueError, match="缺少百度凭据"):
-        pipeline._upload_archives_and_manifest(
+        pipeline_upload._upload_archives_and_manifest(
             config=config,
             game_version="16.4",
             archives=(archive,),
@@ -1030,9 +1032,9 @@ def test_upload_archives_and_manifest_should_fail_when_index_missing_in_diff_mod
     archive.write_bytes(b"a")
 
     fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
-    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(pipeline_upload, "resolve_token_store", lambda: object())
     monkeypatch.setattr(
-        pipeline,
+        pipeline_upload,
         "BaiduPanClient",
         lambda credentials, remote_dir, token_store: fake_client,
     )
@@ -1046,7 +1048,7 @@ def test_upload_archives_and_manifest_should_fail_when_index_missing_in_diff_mod
         enable_upload=True,
     )
     with pytest.raises(RuntimeError, match="远端缺少上传索引"):
-        pipeline._upload_archives_and_manifest(
+        pipeline_upload._upload_archives_and_manifest(
             config=config,
             game_version="16.4",
             archives=(archive,),
@@ -1084,7 +1086,7 @@ def test_cleanup_simulated_runtime_files_should_remove_wads_and_downloads(
     (runtime_download_dir / "game" / "a.bin").write_bytes(b"a")
     (runtime_download_dir / "lcu" / "b.bin").write_bytes(b"b")
 
-    removed_wads, removed_downloads = pipeline._cleanup_simulated_runtime_files(
+    removed_wads, removed_downloads = pipeline_utils._cleanup_simulated_runtime_files(
         runtime_game_path=runtime_game_path,
         runtime_download_dir=runtime_download_dir,
     )
@@ -1129,7 +1131,7 @@ def test_build_update_log_payload_should_include_diff_details() -> None:
         },
     ]
 
-    payload = pipeline._build_update_log_payload(
+    payload = pipeline_upload._build_update_log_payload(
         decision=decision,
         game_version="16.4",
         executed_at="2026-03-04T00:00:00Z",
@@ -1147,7 +1149,7 @@ def test_build_update_log_payload_should_include_diff_details() -> None:
     assert payload["upload_summary"]["skipped_count"] == 1
     assert payload["upload_summary"]["archived_count"] == 1
 
-    readable = pipeline._build_update_log_text(payload=payload)
+    readable = pipeline_utils._build_update_log_text(payload=payload)
     assert "版本区间: 16.3 -> 16.4" in readable
     assert "## WAD 变更" in readable
     assert "## 上传结果" in readable
@@ -1284,16 +1286,16 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr(pipeline, "resolve_runtime_wad_paths", _fake_resolve_runtime_wad_paths)
-    monkeypatch.setattr(pipeline, "run_unpack", _fake_run_unpack)
-    monkeypatch.setattr(pipeline, "pack_champion", _fake_pack_champion)
-    monkeypatch.setattr(pipeline, "_resolve_pack_extra_files", lambda config: tuple())
-    monkeypatch.setattr(pipeline, "_resolve_pack_archive_type", lambda config: "VO")
-    monkeypatch.setattr(pipeline, "check_disk_space", lambda path, required_bytes: True)
+    monkeypatch.setattr(pipeline_orchestrator, "resolve_runtime_wad_paths", _fake_resolve_runtime_wad_paths)
+    monkeypatch.setattr(pipeline_orchestrator, "run_unpack", _fake_run_unpack)
+    monkeypatch.setattr(pipeline_orchestrator, "pack_champion", _fake_pack_champion)
+    monkeypatch.setattr(pipeline_orchestrator, "_resolve_pack_extra_files", lambda config: tuple())
+    monkeypatch.setattr(pipeline_orchestrator, "_resolve_pack_archive_type", lambda config: "VO")
+    monkeypatch.setattr(pipeline_orchestrator, "check_disk_space", lambda path, required_bytes: True)
     fake_client = _FakeClient(credentials=None, remote_dir="/apps/test", token_store=None)
-    monkeypatch.setattr(pipeline, "resolve_token_store", lambda: object())
+    monkeypatch.setattr(pipeline_orchestrator, "resolve_token_store", lambda: object())
     monkeypatch.setattr(
-        pipeline,
+        pipeline_orchestrator,
         "BaiduPanClient",
         lambda credentials, remote_dir, token_store: fake_client,
     )
@@ -1308,7 +1310,7 @@ def test_run_streaming_unpack_pack_upload_should_upload_and_cleanup_per_entity(
         pack_password=None,
         pack_encrypt_filenames=True,
     )
-    manifest_file = pipeline._run_streaming_unpack_pack_upload(
+    manifest_file = pipeline_orchestrator._run_streaming_unpack_pack_upload(
         config=config,
         game_version="16.4",
         data_file_base=output_path / "manifest" / "16.4" / "data",
@@ -1354,7 +1356,7 @@ def test_should_enable_streaming_mode_should_disable_for_real_game_path(tmp_path
     config = PipelineConfig(output_path=tmp_path / "output", low_disk_mode=True)
     targets = SimpleNamespace(champion_ids=(1,), map_ids=tuple())
     assert (
-        pipeline._should_enable_streaming_mode(
+        pipeline_orchestrator._should_enable_streaming_mode(
             config=config,
             runtime_is_simulated=False,
             targets=targets,
@@ -1368,8 +1370,8 @@ def test_resolve_effective_unpack_workers_should_expand_for_real_game_path(
 ) -> None:
     """真实目录场景应提升解包并发到 CPU 核心数。"""
 
-    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 8)
-    effective = pipeline._resolve_effective_unpack_workers(
+    monkeypatch.setattr(pipeline_orchestrator.os, "cpu_count", lambda: 8)
+    effective = pipeline_orchestrator._resolve_effective_unpack_workers(
         configured_workers=2,
         runtime_is_simulated=False,
     )
@@ -1406,35 +1408,35 @@ def test_run_pipeline_should_continue_when_update_log_stage_failed(
     data_file_base.parent.mkdir(parents=True, exist_ok=True)
     saved_state_file = tmp_path / "state" / "run_history.json"
 
-    monkeypatch.setattr(pipeline, "ensure_official_sdk_path", lambda: tmp_path / "sdk")
-    monkeypatch.setattr(pipeline, "evaluate_update_need", lambda **_: decision)
-    monkeypatch.setattr(pipeline, "_preflight_remote_upload_index", lambda **_: {})
-    monkeypatch.setattr(pipeline, "_retry_pending_manifest_sync_queue", lambda **_: None)
+    monkeypatch.setattr(pipeline_orchestrator, "ensure_official_sdk_path", lambda: tmp_path / "sdk")
+    monkeypatch.setattr(pipeline_orchestrator, "evaluate_update_need", lambda **_: decision)
+    monkeypatch.setattr(pipeline_orchestrator, "_preflight_remote_upload_index", lambda **_: {})
+    monkeypatch.setattr(pipeline_orchestrator, "_retry_pending_manifest_sync_queue", lambda **_: None)
     monkeypatch.setattr(
-        pipeline,
+        pipeline_orchestrator,
         "_resolve_runtime_game_path",
         lambda **_: (tmp_path / "real_game", False),
     )
-    monkeypatch.setattr(pipeline, "check_local_game_path", lambda runtime_game_path: True)
-    monkeypatch.setattr(pipeline, "run_data_updater", lambda **_: data_file_base)
+    monkeypatch.setattr(pipeline_orchestrator, "check_local_game_path", lambda runtime_game_path: True)
+    monkeypatch.setattr(pipeline_orchestrator, "run_data_updater", lambda **_: data_file_base)
     monkeypatch.setattr(
-        pipeline,
+        pipeline_orchestrator,
         "resolve_processing_targets",
         lambda **_: SimpleNamespace(champion_ids=tuple(), map_ids=tuple()),
     )
-    monkeypatch.setattr(pipeline, "run_bin_updater", lambda **_: None)
-    monkeypatch.setattr(pipeline, "run_unpack", lambda **_: None)
-    monkeypatch.setattr(pipeline, "_pack_unpacked_outputs", lambda **_: tuple())
-    monkeypatch.setattr(pipeline, "_cleanup_version_audio_outputs", lambda **_: 0)
-    monkeypatch.setattr(pipeline, "_upload_archives_and_manifest", lambda **_: None)
+    monkeypatch.setattr(pipeline_orchestrator, "run_bin_updater", lambda **_: None)
+    monkeypatch.setattr(pipeline_orchestrator, "run_unpack", lambda **_: None)
+    monkeypatch.setattr(pipeline_orchestrator, "_pack_unpacked_outputs", lambda **_: tuple())
+    monkeypatch.setattr(pipeline_orchestrator, "_cleanup_version_audio_outputs", lambda **_: 0)
+    monkeypatch.setattr(pipeline_orchestrator, "_upload_archives_and_manifest", lambda **_: None)
     monkeypatch.setattr(
-        pipeline,
+        pipeline_orchestrator,
         "_write_and_upload_update_log_files",
         lambda **_: (_ for _ in ()).throw(RuntimeError("模拟更新日志上传失败")),
     )
-    monkeypatch.setattr(pipeline, "build_local_state", lambda latest_versions: object())
+    monkeypatch.setattr(pipeline_orchestrator, "build_local_state", lambda latest_versions: object())
     monkeypatch.setattr(
-        pipeline,
+        pipeline_orchestrator,
         "save_local_state",
         lambda state, state_file: saved_state_file,
     )
@@ -1450,4 +1452,4 @@ def test_run_pipeline_should_continue_when_update_log_stage_failed(
         enable_pack=True,
         enable_upload=True,
     )
-    assert pipeline.run_pipeline(config=config) == 0
+    assert pipeline_orchestrator.run_pipeline(config=config) == 0

@@ -33,7 +33,8 @@ from rift_audio_pipeline.manifest_ops import evaluate_update_need_with_latest
 from rift_audio_pipeline.manifest_ops import get_latest_versions
 from rift_audio_pipeline.manifest_ops import load_local_state
 from rift_audio_pipeline.manifest_ops import save_local_state
-import rift_audio_pipeline.pipeline as pipeline_module
+from rift_audio_pipeline.pipeline import orchestrator as pipeline_orchestrator
+from rift_audio_pipeline.pipeline import upload as pipeline_upload
 
 DEFAULT_WORK_DIR = Path("temp/live_pipeline_first_diff")
 DEFAULT_REMOTE_DIR = "/apps/lol-audio/"
@@ -349,11 +350,11 @@ def _patch_pipeline_for_local_live_test(
 ) -> Iterator[None]:
     """临时 patch Pipeline 状态路径与目标解析函数。"""
 
-    original_state_file = pipeline_module.DEFAULT_LOCAL_STATE_FILE
-    original_resolve_processing_targets = pipeline_module.resolve_processing_targets
-    original_resolve_all_processing_targets = pipeline_module.resolve_all_processing_targets
-    original_evaluate_update_need = pipeline_module.evaluate_update_need
-    original_filter_wad_changes = pipeline_module.filter_wad_changes_by_bin_voice_paths
+    original_state_file = pipeline_orchestrator.DEFAULT_LOCAL_STATE_FILE
+    original_resolve_processing_targets = pipeline_orchestrator.resolve_processing_targets
+    original_resolve_all_processing_targets = pipeline_orchestrator.resolve_all_processing_targets
+    original_evaluate_update_need = pipeline_orchestrator.evaluate_update_need
+    original_filter_wad_changes = pipeline_orchestrator.filter_wad_changes_by_bin_voice_paths
 
     def _limited_resolve_processing_targets(
         data_file_base: Path,
@@ -373,7 +374,7 @@ def _patch_pipeline_for_local_live_test(
 
     def _patched_evaluate_update_need(
         region: str,
-        state_file: Path = pipeline_module.DEFAULT_LOCAL_STATE_FILE,
+        state_file: Path = pipeline_orchestrator.DEFAULT_LOCAL_STATE_FILE,
         game_release_region: str = "EUW1",
         lcu_release_region: str = "EUW",
     ) -> object:
@@ -387,22 +388,22 @@ def _patch_pipeline_for_local_live_test(
             previous_state=previous_state,
         )
 
-    pipeline_module.DEFAULT_LOCAL_STATE_FILE = state_file
-    pipeline_module.resolve_processing_targets = _limited_resolve_processing_targets
-    pipeline_module.resolve_all_processing_targets = _limited_resolve_all_processing_targets
-    pipeline_module.evaluate_update_need = _patched_evaluate_update_need
+    pipeline_orchestrator.DEFAULT_LOCAL_STATE_FILE = state_file
+    pipeline_orchestrator.resolve_processing_targets = _limited_resolve_processing_targets
+    pipeline_orchestrator.resolve_all_processing_targets = _limited_resolve_all_processing_targets
+    pipeline_orchestrator.evaluate_update_need = _patched_evaluate_update_need
     if diff_smoke_single_champion:
-        pipeline_module.filter_wad_changes_by_bin_voice_paths = _build_single_champion_smoke_filter(
+        pipeline_orchestrator.filter_wad_changes_by_bin_voice_paths = _build_single_champion_smoke_filter(
             original_filter=original_filter_wad_changes
         )
     try:
         yield
     finally:
-        pipeline_module.DEFAULT_LOCAL_STATE_FILE = original_state_file
-        pipeline_module.resolve_processing_targets = original_resolve_processing_targets
-        pipeline_module.resolve_all_processing_targets = original_resolve_all_processing_targets
-        pipeline_module.evaluate_update_need = original_evaluate_update_need
-        pipeline_module.filter_wad_changes_by_bin_voice_paths = original_filter_wad_changes
+        pipeline_orchestrator.DEFAULT_LOCAL_STATE_FILE = original_state_file
+        pipeline_orchestrator.resolve_processing_targets = original_resolve_processing_targets
+        pipeline_orchestrator.resolve_all_processing_targets = original_resolve_all_processing_targets
+        pipeline_orchestrator.evaluate_update_need = original_evaluate_update_need
+        pipeline_orchestrator.filter_wad_changes_by_bin_voice_paths = original_filter_wad_changes
 
 
 def _prepare_first_run_state(state_file: Path) -> None:
@@ -596,7 +597,7 @@ def main() -> int:
         print(f"archive_count={len(upload_archives)}")
         for archive in upload_archives:
             print(f"- {archive}")
-        manifest_file = pipeline_module._upload_archives_and_manifest(
+        manifest_file = pipeline_upload._upload_archives_and_manifest(
             config=config,
             game_version=upload_version,
             archives=upload_archives,
@@ -617,7 +618,7 @@ def main() -> int:
         if args.mode in ("first", "both"):
             _prepare_first_run_state(state_file=state_file)
             print("=== 开始首次模式 ===")
-            first_code = pipeline_module.run_pipeline(config=config)
+            first_code = pipeline_orchestrator.run_pipeline(config=config)
             run_results.append(("first", first_code))
             if first_code != 0:
                 print(f"首次模式失败，exit_code={first_code}")
@@ -634,7 +635,7 @@ def main() -> int:
                 f"game_version={diff_state.game_version}, "
                 f"manifest_url={diff_state.game_manifest_url}"
             )
-            diff_code = pipeline_module.run_pipeline(config=config)
+            diff_code = pipeline_orchestrator.run_pipeline(config=config)
             run_results.append(("diff", diff_code))
             if diff_code != 0:
                 print(f"diff 模式失败，exit_code={diff_code}")
