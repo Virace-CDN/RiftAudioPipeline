@@ -798,7 +798,7 @@ requires-dist = [
     { name = "loguru", specifier = "==0.7.3" },
     { name = "lol-audio-unpack", git = "https://github.com/Virace/lol_extract_voice.git?rev=v3-test" },
     { name = "python-dateutil", specifier = "==2.9.0.post0" },
-    { name = "riotmanifest", specifier = "==2.1.0" },
+    { name = "riotmanifest", specifier = "==2.2.1" },
     { name = "urllib3", specifier = "==2.6.3" },
 ]
 
@@ -807,7 +807,7 @@ dev = [{ name = "pytest", specifier = "==9.0.2" }]
 
 [[package]]
 name = "riotmanifest"
-version = "2.1.0"
+version = "2.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -817,9 +817,9 @@ dependencies = [
     { name = "pyzstd" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a8/76/63dfe23f9c7ca3e8f55ebd409359a5f6fa66af761d40c03b2fc198130649/riotmanifest-2.1.0.tar.gz", hash = "sha256:26bfcf454fd4f67f86caba1b1c3c6a7e00882f1a8b603def1ae3d5f18ab85455", size = 48020, upload-time = "2026-03-03T15:07:10.301Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/2d/8b74460861b78289958e8250db6f1ba4892a29d0f9201ec07e53dd7d45f3/riotmanifest-2.2.1.tar.gz", hash = "sha256:0f8bd17fa532910e2a52a1456761f06fb6a9eeca4c2ef05b815f7fe0a08aa539", size = 57444, upload-time = "2026-03-05T07:45:02.715Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c7/b5/5832620db011926f016cba265116b4ccf590ea6f2ed4021add4faded6f6a/riotmanifest-2.1.0-py3-none-any.whl", hash = "sha256:16cbf301e9fc62a95c38e5c70bc31be090755be97acce22f416a3be2efae616b", size = 56846, upload-time = "2026-03-03T15:07:08.995Z" },
+    { url = "https://files.pythonhosted.org/packages/21/00/b6164f8e0befe414836bdc6ea5dcd53baf415182a7c0253c2a0dfaee0253/riotmanifest-2.2.1-py3-none-any.whl", hash = "sha256:0cce979fc658091fc1c672e9acbcc40180241df9bfd951fbc9518072e1b47f6a", size = 67785, upload-time = "2026-03-05T07:45:01.49Z" },
 ]
 
 [[package]]

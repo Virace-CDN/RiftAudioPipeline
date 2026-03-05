@@ -12,7 +12,7 @@ dependencies = [
     "httpx==0.28.1",
     "loguru==0.7.3",
     "python-dateutil==2.9.0.post0",
-    "riotmanifest==2.1.0",
+    "riotmanifest==2.2.1",
     "urllib3==2.6.3",
     "lol-audio-unpack @ git+https://github.com/Virace/lol_extract_voice.git@v3-test",
 ]
@@ -20,6 +20,7 @@ dependencies = [
 [project.scripts]
 rift-audio-pipeline = "rift_audio_pipeline.cli:main"
 rift-baidu-oauth = "rift_audio_pipeline.baidu.cli:main"
+rift-diff-collect = "rift_audio_pipeline.workflows.diff_cli:main"
 
 [dependency-groups]
 dev = [
