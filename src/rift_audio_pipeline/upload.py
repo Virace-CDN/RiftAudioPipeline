@@ -1,4 +1,4 @@
-"""Pipeline 上传、索引与日志模块。"""
+"""打包产物上传、远端索引与更新日志模块。"""
 
 from __future__ import annotations
 
@@ -13,15 +13,17 @@ from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.baidu.pan import BaiduPanApiError
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
 from rift_audio_pipeline.baidu.pan import BaiduPanClient
-from rift_audio_pipeline.config import PipelineConfig
 from rift_audio_pipeline.packer import pack_all
-from rift_audio_pipeline.pipeline.utils import _build_update_log_text
-from rift_audio_pipeline.pipeline.utils import _build_upload_manifest_index
-from rift_audio_pipeline.pipeline.utils import _calculate_sha256
-from rift_audio_pipeline.pipeline.utils import _current_utc_timestamp
-from rift_audio_pipeline.pipeline.utils import _is_same_index_entry
-from rift_audio_pipeline.pipeline.utils import _join_remote_file_path
-from rift_audio_pipeline.pipeline.utils import _parse_game_version_sort_key
+from rift_audio_pipeline.upload_utils import _build_update_log_text
+from rift_audio_pipeline.upload_utils import _build_upload_manifest_index
+from rift_audio_pipeline.upload_utils import _calculate_sha256
+from rift_audio_pipeline.upload_utils import _current_utc_timestamp
+from rift_audio_pipeline.upload_utils import _is_same_index_entry
+from rift_audio_pipeline.upload_utils import _join_remote_file_path
+from rift_audio_pipeline.upload_utils import _parse_game_version_sort_key
+
+DEFAULT_BAIDU_PAN_REMOTE_DIR = "/apps/lol-audio/"
+DEFAULT_AUDIO_TYPES: tuple[str, ...] = ("VO",)
 
 DEFAULT_BUNDLED_PACK_EXTRA_DIR = Path(__file__).resolve().parents[1] / "pack_extra"
 
@@ -49,6 +51,22 @@ PENDING_MANIFEST_SYNC_QUEUE_FILE_NAME = "pending_manifest_sync_queue.json"
 
 MANIFEST_UPLOAD_MAX_ATTEMPTS = 3
 
+
+@dataclass(frozen=True, slots=True)
+class UploadConfig:
+    """上传与打包配置。"""
+
+    output_path: Path
+    audio_types: tuple[str, ...] = DEFAULT_AUDIO_TYPES
+    pack_output_dir: Path | None = None
+    pack_password: str | None = None
+    pack_encrypt_filenames: bool = True
+    pack_extra_dir: Path | None = None
+    baidu_pan_remote_dir: str = DEFAULT_BAIDU_PAN_REMOTE_DIR
+    baidu_pan_app_key: str | None = None
+    baidu_pan_secret_key: str | None = None
+    baidu_pan_refresh_token: str | None = None
+
 @dataclass(frozen=True, slots=True)
 class _ArchiveUploadLayout:
     """压缩包上传路由信息。"""
@@ -72,7 +90,7 @@ class _IndexedArchiveMetadata:
     entity_key: str | None
     is_old_bucket: bool
 
-def _pack_unpacked_outputs(config: PipelineConfig, game_version: str) -> tuple[Path, ...]:
+def _pack_unpacked_outputs(config: UploadConfig, game_version: str) -> tuple[Path, ...]:
     """将当前版本解包产物按目录批量打包。"""
 
     version_audio_dir = config.output_path / "audios" / game_version
@@ -129,7 +147,7 @@ def _pack_unpacked_outputs(config: PipelineConfig, game_version: str) -> tuple[P
     return tuple(sorted(archives, key=lambda path: path.as_posix().casefold()))
 
 def _preflight_remote_upload_index(
-    config: PipelineConfig,
+    config: UploadConfig,
     package_root: Path,
     allow_missing_remote_index: bool,
 ) -> dict[str, dict[str, object]]:
@@ -169,7 +187,7 @@ def _preflight_remote_upload_index(
         client.close()
 
 def _upload_archives_and_manifest(
-    config: PipelineConfig,
+    config: UploadConfig,
     game_version: str,
     archives: tuple[Path, ...],
     allow_missing_remote_index: bool = True,
@@ -523,7 +541,7 @@ def _collect_remote_index_mutation_keys(
     return upsert_keys, removed_keys
 
 def _retry_pending_manifest_sync_queue(
-    config: PipelineConfig,
+    config: UploadConfig,
     queue_file: Path,
 ) -> None:
     """重试历史失败的索引回传任务（失败不阻断主流程）。"""
@@ -676,14 +694,14 @@ def _save_pending_manifest_sync_entries(
         encoding="utf-8",
     )
 
-def _resolve_package_output_root(config: PipelineConfig, game_version: str) -> Path:
+def _resolve_package_output_root(config: UploadConfig, game_version: str) -> Path:
     """解析当前版本打包产物根目录。"""
 
     if config.pack_output_dir is not None:
         return config.pack_output_dir
     return config.output_path / "packages" / game_version
 
-def _resolve_pack_extra_files(config: PipelineConfig) -> tuple[Path, ...]:
+def _resolve_pack_extra_files(config: UploadConfig) -> tuple[Path, ...]:
     """解析打包附加文件列表。"""
 
     candidate_dirs: list[Path] = []
@@ -705,7 +723,7 @@ def _resolve_pack_extra_files(config: PipelineConfig) -> tuple[Path, ...]:
             return tuple(files)
     return tuple()
 
-def _resolve_pack_archive_type(config: PipelineConfig) -> str | None:
+def _resolve_pack_archive_type(config: UploadConfig) -> str | None:
     """解析压缩包命名的类型后缀。"""
 
     normalized_types = sorted(
@@ -719,7 +737,7 @@ def _resolve_pack_archive_type(config: PipelineConfig) -> str | None:
         return normalized_types[0]
     return None
 
-def _resolve_default_upload_resource_type(config: PipelineConfig) -> str:
+def _resolve_default_upload_resource_type(config: UploadConfig) -> str:
     """解析上传阶段默认资源类型目录。"""
 
     archive_type = _resolve_pack_archive_type(config=config)
@@ -1080,7 +1098,7 @@ def _build_upload_database_payload(
     return normalized_grouped
 
 def _write_and_upload_update_log_files(
-    config: PipelineConfig,
+    config: UploadConfig,
     decision: object,
     game_version: str,
     target_entities: object,

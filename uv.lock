@@ -114,18 +114,6 @@ wheels = [
 ]
 
 [[package]]
-name = "anyio"
-version = "4.12.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "idna" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/96/f0/5eb65b2bb0d09ac6776f2eb54adee6abe8228ea05b20a5ad0e4945de8aac/anyio-4.12.1.tar.gz", hash = "sha256:41cfcc3a4c85d3f05c932da7c26d0201ac36f72abd4435ba90d0464a3ffed703", size = 228685, upload-time = "2026-01-06T11:45:21.246Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/38/0e/27be9fdef66e72d64c0cdc3cc2823101b80585f8119b5c112c2e8f5f7dab/anyio-4.12.1-py3-none-any.whl", hash = "sha256:d405828884fc140aa80a3c667b8beed277f1dfedec42ba031bd6ac3db606ab6c", size = 113592, upload-time = "2026-01-06T11:45:19.497Z" },
-]
-
-[[package]]
 name = "attrs"
 version = "25.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -233,15 +221,6 @@ wheels = [
 ]
 
 [[package]]
-name = "certifi"
-version = "2026.2.25"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/af/2d/7bf41579a8986e348fa033a31cdd0e4121114f6bce2457e8876010b092dd/certifi-2026.2.25.tar.gz", hash = "sha256:e887ab5cee78ea814d3472169153c2d12cd43b14bd03329a39a9c6e2e80bfba7", size = 155029, upload-time = "2026-02-25T02:54:17.342Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9a/3c/c17fb3ca2d9c3acff52e30b309f538586f9f5b9c9cf454f3845fc9af4881/certifi-2026.2.25-py3-none-any.whl", hash = "sha256:027692e4402ad994f1c42e52a4997a9763c646b73e4096e4d5d6db8af1d6f0fa", size = 153684, upload-time = "2026-02-25T02:54:15.766Z" },
-]
-
-[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -333,43 +312,6 @@ wheels = [
 ]
 
 [[package]]
-name = "h11"
-version = "0.16.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6fb3c75474d40b3052059d95df7e73351460c8588d963/h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1", size = 101250, upload-time = "2025-04-24T03:35:25.427Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86", size = 37515, upload-time = "2025-04-24T03:35:24.344Z" },
-]
-
-[[package]]
-name = "httpcore"
-version = "1.0.9"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "certifi" },
-    { name = "h11" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/06/94/82699a10bca87a5556c9c59b5963f2d039dbd239f25bc2a63907a05a14cb/httpcore-1.0.9.tar.gz", hash = "sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8", size = 85484, upload-time = "2025-04-24T22:06:22.219Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl", hash = "sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55", size = 78784, upload-time = "2025-04-24T22:06:20.566Z" },
-]
-
-[[package]]
-name = "httpx"
-version = "0.28.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio" },
-    { name = "certifi" },
-    { name = "httpcore" },
-    { name = "idna" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b1/df/48c586a5fe32a0f01324ee087459e112ebb7224f646c0b5023f5e79e9956/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc", size = 141406, upload-time = "2024-12-06T15:37:23.222Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517, upload-time = "2024-12-06T15:37:21.509Z" },
-]
-
-[[package]]
 name = "idna"
 version = "3.11"
 source = { registry = "https://pypi.org/simple" }
@@ -420,12 +362,13 @@ wheels = [
 [[package]]
 name = "lol-audio-unpack"
 version = "3.5.1.dev0+test"
-source = { git = "https://github.com/Virace/lol_extract_voice.git?rev=v3-test#0f8fa40c15fc4212b2b0d492ccfa9ef436470f81" }
+source = { git = "https://github.com/Virace/lol_extract_voice.git?rev=v3-test#b76c34e8399741868cb7a06b9dd19c565f017932" }
 dependencies = [
     { name = "alive-progress" },
     { name = "league-tools" },
     { name = "msgpack" },
     { name = "python-dotenv" },
+    { name = "riotmanifest" },
     { name = "ruamel-yaml" },
 ]
 
@@ -779,7 +722,6 @@ name = "rift-audio-pipeline"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "httpx" },
     { name = "loguru" },
     { name = "lol-audio-unpack" },
     { name = "python-dateutil" },
@@ -794,11 +736,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = "==0.28.1" },
     { name = "loguru", specifier = "==0.7.3" },
     { name = "lol-audio-unpack", git = "https://github.com/Virace/lol_extract_voice.git?rev=v3-test" },
     { name = "python-dateutil", specifier = "==2.9.0.post0" },
-    { name = "riotmanifest", specifier = "==2.2.1" },
+    { name = "riotmanifest", specifier = "==2.4.0" },
     { name = "urllib3", specifier = "==2.6.3" },
 ]
 
@@ -807,7 +748,7 @@ dev = [{ name = "pytest", specifier = "==9.0.2" }]
 
 [[package]]
 name = "riotmanifest"
-version = "2.2.1"
+version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -817,9 +758,9 @@ dependencies = [
     { name = "pyzstd" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/eb/2d/8b74460861b78289958e8250db6f1ba4892a29d0f9201ec07e53dd7d45f3/riotmanifest-2.2.1.tar.gz", hash = "sha256:0f8bd17fa532910e2a52a1456761f06fb6a9eeca4c2ef05b815f7fe0a08aa539", size = 57444, upload-time = "2026-03-05T07:45:02.715Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a0/7f/a54457d00fff4d9c42a2987b94efe6e3e3a78b0f7570319e44dc5497f4a0/riotmanifest-2.4.0.tar.gz", hash = "sha256:ad7a7a929c869f758e7fa4dccbc530fdd1f8cd3cfe48d6c2c8164d2448091a1a", size = 70268, upload-time = "2026-03-07T21:44:25.29Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/21/00/b6164f8e0befe414836bdc6ea5dcd53baf415182a7c0253c2a0dfaee0253/riotmanifest-2.2.1-py3-none-any.whl", hash = "sha256:0cce979fc658091fc1c672e9acbcc40180241df9bfd951fbc9518072e1b47f6a", size = 67785, upload-time = "2026-03-05T07:45:01.49Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/68/f8c0518b806d5dfb78aadaf45b508d6aaa681b16b0ae63dc9d51face41fc/riotmanifest-2.4.0-py3-none-any.whl", hash = "sha256:7728d1b96b6a6f95bcc93795e2875997ecab255634eff22c203e01eb5a63c659", size = 82176, upload-time = "2026-03-07T21:44:24.191Z" },
 ]
 
 [[package]]

@@ -6,7 +6,6 @@ from datetime import datetime
 from datetime import timezone
 import hashlib
 from pathlib import Path
-import shutil
 
 
 def _parse_game_version_sort_key(game_version: str, fallback: str) -> tuple[int, ...]:
@@ -39,6 +38,14 @@ def _build_update_log_text(payload: dict[str, object]) -> str:
     wad_changes = wad_changes_obj if isinstance(wad_changes_obj, dict) else {}
     upload_summary_obj = payload.get("upload_summary")
     upload_summary = upload_summary_obj if isinstance(upload_summary_obj, dict) else {}
+    champion_aliases_obj = changed_entities.get("champion_aliases", [])
+    champion_aliases = (
+        [str(item) for item in champion_aliases_obj]
+        if isinstance(champion_aliases_obj, list)
+        else []
+    )
+    map_ids_obj = changed_entities.get("map_ids", [])
+    map_ids = [str(item) for item in map_ids_obj] if isinstance(map_ids_obj, list) else []
     lines = [
         "# RiftAudioPipeline 差异更新日志",
         "",
@@ -47,8 +54,8 @@ def _build_update_log_text(payload: dict[str, object]) -> str:
         f"版本区间: {payload.get('from_game_version')} -> {payload.get('to_game_version')}",
         "",
         "## 变更实体",
-        f"- champions(alias): {', '.join(changed_entities.get('champion_aliases', [])) or '无'}",
-        f"- maps(id): {', '.join(changed_entities.get('map_ids', [])) or '无'}",
+        f"- champions(alias): {', '.join(champion_aliases) or '无'}",
+        f"- maps(id): {', '.join(map_ids) or '无'}",
         "",
         "## WAD 变更",
         f"- added: {len(wad_changes.get('added_paths', []))}",
@@ -212,103 +219,3 @@ def _coerce_non_negative_int(value: object) -> int | None:
             return None
         return parsed if parsed >= 0 else None
     return None
-
-
-def _cleanup_simulated_runtime_files(
-    runtime_game_path: Path,
-    runtime_download_dir: Path,
-) -> tuple[int, int]:
-    """清理模拟目录下临时 WAD 与下载缓存。"""
-
-    runtime_wad_dirs = (
-        runtime_game_path / "Game" / "DATA" / "FINAL" / "Champions",
-        runtime_game_path / "Game" / "DATA" / "FINAL" / "Maps" / "Shipping",
-    )
-    removed_runtime_wads = 0
-    for directory in runtime_wad_dirs:
-        if not directory.is_dir():
-            continue
-        for item in directory.rglob("*"):
-            if item.is_file() and item.name.casefold().endswith(".wad.client"):
-                item.unlink()
-                removed_runtime_wads += 1
-
-    removed_download_cache = 0
-    if runtime_download_dir.expanduser().resolve() == runtime_game_path.expanduser().resolve():
-        return removed_runtime_wads, removed_download_cache
-    if runtime_download_dir.exists():
-        for item in runtime_download_dir.rglob("*"):
-            if item.is_file():
-                removed_download_cache += 1
-        shutil.rmtree(runtime_download_dir, ignore_errors=True)
-
-    return removed_runtime_wads, removed_download_cache
-
-
-def _merge_runtime_wad_paths(*groups: tuple[str, ...]) -> tuple[str, ...]:
-    """合并运行时 WAD 路径并去重排序。"""
-
-    deduped: dict[str, str] = {}
-    for group in groups:
-        for path in group:
-            normalized = path.strip().replace("\\", "/")
-            if not normalized:
-                continue
-            deduped.setdefault(normalized.casefold(), normalized)
-    return tuple(sorted(deduped.values(), key=str.casefold))
-
-
-def _normalize_pipeline_game_version(game_version: str) -> str:
-    """将版本号标准化为 `major.minor`，用于本地路径与打包命名。"""
-
-    normalized = game_version.strip()
-    if not normalized:
-        return normalized
-    parts = normalized.split(".")
-    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-        return f"{parts[0]}.{parts[1]}"
-    return normalized
-
-
-def _build_runtime_wad_paths_from_manifest_paths(
-    manifest_paths: tuple[str, ...],
-    region: str,
-    include_root_wad: bool = True,
-) -> tuple[str, ...]:
-    """将 manifest WAD 路径转换为运行时根/区域路径集合。"""
-
-    runtime_paths: dict[str, str] = {}
-    region_suffix = f".{region}.wad.client"
-    for raw_path in manifest_paths:
-        normalized = raw_path.strip().replace("\\", "/")
-        if not normalized:
-            continue
-        if normalized.startswith("Game/"):
-            normalized = normalized.removeprefix("Game/")
-        if not normalized.startswith("DATA/"):
-            continue
-
-        region_runtime_path = f"Game/{normalized}"
-        runtime_paths.setdefault(region_runtime_path.casefold(), region_runtime_path)
-
-        lowered = normalized.casefold()
-        if include_root_wad and lowered.endswith(region_suffix.casefold()):
-            root_manifest_path = f"{normalized[: len(normalized) - len(region_suffix)]}.wad.client"
-            root_runtime_path = f"Game/{root_manifest_path}"
-            runtime_paths.setdefault(root_runtime_path.casefold(), root_runtime_path)
-
-    return tuple(sorted(runtime_paths.values(), key=str.casefold))
-
-
-def _cleanup_version_audio_outputs(version_audio_dir: Path) -> int:
-    """清理已打包版本的音频目录，降低上传阶段磁盘占用。"""
-
-    if not version_audio_dir.is_dir():
-        return 0
-
-    removed_files = 0
-    for item in version_audio_dir.rglob("*"):
-        if item.is_file():
-            removed_files += 1
-    shutil.rmtree(version_audio_dir, ignore_errors=True)
-    return removed_files

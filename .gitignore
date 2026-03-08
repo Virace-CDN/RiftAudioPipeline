@@ -19,6 +19,7 @@ temp/
 # Codex memory and local style
 .ai_memory/
 .CODING_STYLE.md
+.serena/
 
 # Local secrets and runtime config
 .config/
