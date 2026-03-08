@@ -45,6 +45,16 @@ UPLOAD_DATABASE_SCHEMA_VERSION = 1
 
 UPDATE_LOG_SCHEMA_VERSION = 1
 
+UPLOAD_INDEX_ENTRY_SCHEMA_VERSION = 1
+
+UPLOAD_DATABASE_ENTRY_SCHEMA_VERSION = 1
+
+UPLOAD_DATABASE_VERSION_ENTRY_SCHEMA_VERSION = 1
+
+UPLOAD_RUN_ENTRY_SCHEMA_VERSION = 1
+
+PENDING_MANIFEST_SYNC_SCHEMA_VERSION = 1
+
 UPDATE_LOG_REMOTE_DIR = "update_logs"
 
 PENDING_MANIFEST_SYNC_QUEUE_FILE_NAME = "pending_manifest_sync_queue.json"
@@ -292,7 +302,9 @@ def _clone_upload_manifest_index(
 
     cloned: dict[str, dict[str, object]] = {}
     for key, value in source_index.items():
-        cloned[key] = dict(value)
+        cloned_value = dict(value)
+        cloned_value.setdefault("schema_version", UPLOAD_INDEX_ENTRY_SCHEMA_VERSION)
+        cloned[key] = cloned_value
     return cloned
 
 def _process_archives_upload(
@@ -345,6 +357,7 @@ def _process_archives_upload(
                 logger.info("远端索引命中同文件，跳过上传：{}", remote_path)
                 run_entries.append(
                     {
+                        "schema_version": UPLOAD_RUN_ENTRY_SCHEMA_VERSION,
                         "local_path": str(archive),
                         "remote_path": remote_path,
                         "remote_name": remote_name,
@@ -384,6 +397,7 @@ def _process_archives_upload(
         )
         has_index_changes = True
         remote_index[remote_path.casefold()] = {
+            "schema_version": UPLOAD_INDEX_ENTRY_SCHEMA_VERSION,
             "remote_path": remote_path,
             "remote_name": remote_name,
             "bucket": upload_layout.resource_type,
@@ -397,6 +411,7 @@ def _process_archives_upload(
         }
         run_entries.append(
             {
+                "schema_version": UPLOAD_RUN_ENTRY_SCHEMA_VERSION,
                 "local_path": str(archive),
                 "remote_path": remote_path,
                 "remote_name": remote_name,
@@ -647,6 +662,7 @@ def _enqueue_pending_manifest_sync(
         next_entries.append(entry)
     next_entries.append(
         {
+            "schema_version": PENDING_MANIFEST_SYNC_SCHEMA_VERSION,
             "remote_dir": remote_dir,
             "manifest_file": str(manifest_file.expanduser().resolve()),
             "readable_manifest_file": str(readable_manifest_file.expanduser().resolve()),
@@ -845,6 +861,7 @@ def _archive_remote_old_versions(
         updated_entry = dict(index_entry)
         updated_entry.update(
             {
+                "schema_version": UPLOAD_INDEX_ENTRY_SCHEMA_VERSION,
                 "remote_path": archived_remote_path,
                 "remote_name": metadata.remote_name,
                 "game_version": metadata.game_version,
@@ -864,6 +881,7 @@ def _archive_remote_old_versions(
         )
         archived_entries.append(
             {
+                "schema_version": UPLOAD_RUN_ENTRY_SCHEMA_VERSION,
                 "remote_path": archived_remote_path,
                 "source_remote_path": metadata.remote_path,
                 "remote_name": metadata.remote_name,
@@ -1049,6 +1067,7 @@ def _build_upload_database_payload(
         bucket_obj = grouped.get(db_key)
         if bucket_obj is None:
             bucket_obj = {
+                "schema_version": UPLOAD_DATABASE_ENTRY_SCHEMA_VERSION,
                 "entity_key": entity_key,
                 "target_group": metadata.target_group,
                 "resource_type": metadata.resource_type,
@@ -1060,6 +1079,7 @@ def _build_upload_database_payload(
             continue
         versions.append(
             {
+                "schema_version": UPLOAD_DATABASE_VERSION_ENTRY_SCHEMA_VERSION,
                 "game_version": metadata.game_version,
                 "remote_name": metadata.remote_name,
                 "remote_path": metadata.remote_path,
@@ -1088,6 +1108,7 @@ def _build_upload_database_payload(
             sorted_versions[-1] if sorted_versions else None,
         )
         normalized_grouped[key] = {
+            "schema_version": UPLOAD_DATABASE_ENTRY_SCHEMA_VERSION,
             "entity_key": value.get("entity_key"),
             "target_group": value.get("target_group"),
             "resource_type": value.get("resource_type"),

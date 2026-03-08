@@ -362,7 +362,7 @@ wheels = [
 [[package]]
 name = "lol-audio-unpack"
 version = "3.5.1.dev0+test"
-source = { git = "https://github.com/Virace/lol_extract_voice.git?rev=v3-test#b76c34e8399741868cb7a06b9dd19c565f017932" }
+source = { git = "https://github.com/Virace/lol_extract_voice.git?rev=v3-test#56fed2ac53ecba4d28feb8c3dc6e7428c0769360" }
 dependencies = [
     { name = "alive-progress" },
     { name = "league-tools" },

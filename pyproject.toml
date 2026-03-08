@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 rift-baidu-oauth = "rift_audio_pipeline.baidu.cli:main"
+rift-audio-pipeline = "rift_audio_pipeline.pipeline.cli:main"
 
 [dependency-groups]
 dev = [
@@ -39,3 +40,8 @@ exclude = [
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pytest.ini_options]
+markers = [
+    "real_data: 需要联网并使用本地缓存的真实链路测试",
+]

@@ -172,6 +172,12 @@ def test_upload_archives_and_manifest_should_reuse_preloaded_remote_index(
     assert fake_client.upload_calls == []
     assert payload["last_run"]["uploaded_count"] == 0
     assert payload["last_run"]["skipped_count"] == 1
+    assert payload["entries"][0]["schema_version"] == 1
+    assert payload["database_entry_count"] == 1
+    db_entry = next(iter(payload["database"].values()))
+    assert db_entry["schema_version"] == 1
+    assert db_entry["versions"][0]["schema_version"] == 1
+    assert payload["last_run"]["entries"][0]["schema_version"] == 1
 
 
 def test_upload_archives_and_manifest_should_enqueue_pending_sync_when_manifest_upload_failed(
@@ -263,6 +269,7 @@ def test_upload_archives_and_manifest_should_enqueue_pending_sync_when_manifest_
     assert manifest_file == package_root / "upload_manifest.json"
     queue_payload = json.loads(queue_file.read_text(encoding="utf-8"))
     assert len(queue_payload) == 1
+    assert queue_payload[0]["schema_version"] == 1
     assert Path(queue_payload[0]["manifest_file"]) == manifest_file.resolve()
 
 
@@ -301,6 +308,7 @@ def test_build_update_log_payload_should_include_diff_details() -> None:
     assert payload["from_game_version"] == "16.4"
     assert payload["to_game_version"] == "16.5"
     assert payload["changed_entities"]["champion_aliases"] == ["ahri"]
+    assert payload["schema_version"] == 1
     assert payload["upload_summary"]["uploaded_count"] == 1
     assert payload["upload_summary"]["skipped_count"] == 1
     readable = upload_utils._build_update_log_text(payload=payload)
