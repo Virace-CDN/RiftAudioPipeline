@@ -24,8 +24,10 @@ temp/
 # Local secrets and runtime config
 .config/
 .dev.baidu
+.envrc
 state/voice_filter_results/
 
 # Local planning docs (not committed)
+docs/
 docs/LOL语音资源自动化计划书.md
 docs/执行计划.md
