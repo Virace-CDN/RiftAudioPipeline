@@ -127,18 +127,22 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
             {
                 "ref": "main",
                 "inputs": {
-                    "schema_version": "2026-03-11",
-                    "request": {"stage": "extract"},
-                    "game": {"region": "euw"},
-                    "manifests": {
-                        "current": {
-                            "version": "16.5",
-                            "lcu_url": "https://lcu.example/16.5",
-                            "game_url": "https://game.example/16.5"
+                    "payload": json.dumps(
+                        {
+                            "schema_version": "2026-03-11",
+                            "request": {"stage": "extract"},
+                            "game": {"region": "euw"},
+                            "manifests": {
+                                "current": {
+                                    "version": "16.5",
+                                    "lcu_url": "https://lcu.example/16.5",
+                                    "game_url": "https://game.example/16.5"
+                                }
+                            },
+                            "targets": {"champions": {"ids": "266,103"}},
+                            "metadata": {"requested_by": "plane-test"},
                         }
-                    },
-                    "targets": {"champions": {"ids": "266,103"}},
-                    "metadata": {"requested_by": "plane-test"},
+                    ),
                 },
             }
         ).encode("utf-8")
@@ -201,9 +205,13 @@ def test_faker_github_server_dry_run_should_not_launch_process(tmp_path: Path) -
             {
                 "ref": "main",
                 "inputs": {
-                    "request": {"mode": "remote"},
-                    "game": {"region": "euw"},
-                    "execution": {"force_update": False},
+                    "payload": json.dumps(
+                        {
+                            "request": {"mode": "remote"},
+                            "game": {"region": "euw"},
+                            "execution": {"force_update": False},
+                        }
+                    ),
                 },
             }
         ).encode("utf-8")
@@ -252,8 +260,12 @@ def test_faker_github_server_should_log_request_and_response_when_enabled(
             {
                 "ref": "main",
                 "inputs": {
-                    "game": {"region": "euw"},
-                    "metadata": {"requested_by": "frontend-test"},
+                    "payload": json.dumps(
+                        {
+                            "game": {"region": "euw"},
+                            "metadata": {"requested_by": "frontend-test"},
+                        }
+                    ),
                 },
             }
         ).encode("utf-8")
@@ -279,7 +291,7 @@ def test_faker_github_server_should_log_request_and_response_when_enabled(
             "workflow_inputs",
             "dispatch_response",
         ]
-        assert events[0]["request_payload"]["inputs"]["metadata"]["requested_by"] == "frontend-test"
+        assert json.loads(events[0]["request_payload"]["inputs"]["payload"])["metadata"]["requested_by"] == "frontend-test"
         assert events[1]["inputs"]["metadata"]["requested_by"] == "frontend-test"
         assert events[2]["status"] == 204
         assert events[2]["response_summary"]["dispatch_id"]
@@ -331,8 +343,12 @@ def test_parse_dispatch_payload_should_reject_runtime_secret_fields() -> None:
             {
                 "ref": "main",
                 "inputs": {
-                    "request": {"mode": "remote"},
-                    "worker_token": "secret",
+                    "payload": json.dumps(
+                        {
+                            "request": {"mode": "remote"},
+                            "worker_token": "secret",
+                        }
+                    ),
                 },
             }
         )

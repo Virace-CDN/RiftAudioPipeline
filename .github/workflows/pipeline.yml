@@ -1,0 +1,56 @@
+name: Pipeline Dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: "结构化 dispatch payload JSON，内容遵循 docs/control_plane/faker_github_api.md"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-dispatch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      RIFT_CONTROL_PLANE_BASE_URL: ${{ vars.RIFT_CONTROL_PLANE_BASE_URL }}
+      RIFT_CONTROL_PLANE_BEARER_TOKEN: ${{ secrets.RIFT_CONTROL_PLANE_BEARER_TOKEN }}
+      RIFT_CONTROL_PLANE_ACCESS_CLIENT_ID: ${{ secrets.RIFT_CONTROL_PLANE_ACCESS_CLIENT_ID }}
+      RIFT_CONTROL_PLANE_ACCESS_CLIENT_SECRET: ${{ secrets.RIFT_CONTROL_PLANE_ACCESS_CLIENT_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        run: python -m pip install uv
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Write dispatch payload
+        env:
+          DISPATCH_PAYLOAD_JSON: ${{ github.event.inputs.payload }}
+        run: |
+          printf '%s' "$DISPATCH_PAYLOAD_JSON" > "$RUNNER_TEMP/dispatch-payload.json"
+
+      - name: Run pipeline
+        run: >
+          uv run python -m rift_audio_pipeline.cloudflare.github_actions_workflow
+          --ref "${{ github.ref_name }}"
+          --dispatch-inputs-file "$RUNNER_TEMP/dispatch-payload.json"
+          --control-plane-base-url "$RIFT_CONTROL_PLANE_BASE_URL"
+          --control-plane-bearer-token "$RIFT_CONTROL_PLANE_BEARER_TOKEN"
+          --control-plane-access-client-id "$RIFT_CONTROL_PLANE_ACCESS_CLIENT_ID"
+          --control-plane-access-client-secret "$RIFT_CONTROL_PLANE_ACCESS_CLIENT_SECRET"

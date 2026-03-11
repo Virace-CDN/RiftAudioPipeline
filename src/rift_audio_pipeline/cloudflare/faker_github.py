@@ -30,7 +30,12 @@ _HEALTH_PATH = "/healthz"
 
 PipelineLauncher = Callable[[list[str], Path, Path], int]
 
-_ALLOWED_INPUT_FIELDS = frozenset(
+_ALLOWED_INPUT_WRAPPER_FIELDS = frozenset(
+    {
+        "payload",
+    }
+)
+_ALLOWED_PAYLOAD_FIELDS = frozenset(
     {
         "schema_version",
         "request",
@@ -267,6 +272,19 @@ def _coerce_optional_integer(value: object, *, field_name: str) -> int | None:
     return _coerce_integer(value, field_name=field_name)
 
 
+def _coerce_json_string_mapping(value: object, *, field_name: str) -> dict[str, Any]:
+    """把 JSON 字符串解析为 object。"""
+
+    raw_text = _coerce_string(value, field_name=field_name)
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError as exc:  # noqa: PERF203
+        raise ValueError(f"{field_name} 必须是 JSON object 字符串。") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{field_name} 必须是 JSON object 字符串。")
+    return dict(parsed)
+
+
 def _coerce_string(value: object, *, field_name: str) -> str:
     """校验对象为非空字符串。"""
 
@@ -348,72 +366,92 @@ def _parse_id_targets(raw_inputs: dict[str, Any], *, field_name: str) -> Dispatc
 def _validate_dispatch_inputs(raw_inputs: dict[str, Any]) -> DispatchInputs:
     """校验结构化 workflow inputs schema。"""
 
-    _validate_known_fields(raw_inputs, field_name="inputs", allowed_fields=_ALLOWED_INPUT_FIELDS)
-    request_inputs = _coerce_mapping(raw_inputs.get("request"), field_name="inputs.request")
-    game_inputs = _coerce_mapping(raw_inputs.get("game"), field_name="inputs.game")
-    manifests_inputs = _coerce_mapping(raw_inputs.get("manifests"), field_name="inputs.manifests")
-    targets_inputs = _coerce_mapping(raw_inputs.get("targets"), field_name="inputs.targets")
-    execution_inputs = _coerce_mapping(raw_inputs.get("execution"), field_name="inputs.execution")
-    metadata_inputs = _coerce_mapping(raw_inputs.get("metadata"), field_name="inputs.metadata")
+    _validate_known_fields(
+        raw_inputs, field_name="inputs.payload", allowed_fields=_ALLOWED_PAYLOAD_FIELDS
+    )
+    request_inputs = _coerce_mapping(raw_inputs.get("request"), field_name="inputs.payload.request")
+    game_inputs = _coerce_mapping(raw_inputs.get("game"), field_name="inputs.payload.game")
+    manifests_inputs = _coerce_mapping(
+        raw_inputs.get("manifests"), field_name="inputs.payload.manifests"
+    )
+    targets_inputs = _coerce_mapping(raw_inputs.get("targets"), field_name="inputs.payload.targets")
+    execution_inputs = _coerce_mapping(
+        raw_inputs.get("execution"), field_name="inputs.payload.execution"
+    )
+    metadata_inputs = _coerce_mapping(
+        raw_inputs.get("metadata"), field_name="inputs.payload.metadata"
+    )
 
     _validate_known_fields(
-        request_inputs, field_name="inputs.request", allowed_fields=_REQUEST_INPUT_FIELDS
+        request_inputs, field_name="inputs.payload.request", allowed_fields=_REQUEST_INPUT_FIELDS
     )
-    _validate_known_fields(game_inputs, field_name="inputs.game", allowed_fields=_GAME_INPUT_FIELDS)
+    _validate_known_fields(
+        game_inputs, field_name="inputs.payload.game", allowed_fields=_GAME_INPUT_FIELDS
+    )
     _validate_known_fields(
         manifests_inputs,
-        field_name="inputs.manifests",
+        field_name="inputs.payload.manifests",
         allowed_fields=_MANIFESTS_INPUT_FIELDS,
     )
     _validate_known_fields(
-        targets_inputs, field_name="inputs.targets", allowed_fields=_TARGETS_INPUT_FIELDS
+        targets_inputs, field_name="inputs.payload.targets", allowed_fields=_TARGETS_INPUT_FIELDS
     )
     _validate_known_fields(
         execution_inputs,
-        field_name="inputs.execution",
+        field_name="inputs.payload.execution",
         allowed_fields=_EXECUTION_INPUT_FIELDS,
     )
     _validate_known_fields(
-        metadata_inputs, field_name="inputs.metadata", allowed_fields=_METADATA_INPUT_FIELDS
+        metadata_inputs,
+        field_name="inputs.payload.metadata",
+        allowed_fields=_METADATA_INPUT_FIELDS,
     )
 
     return DispatchInputs(
         schema_version=_coerce_optional_string(
-            raw_inputs.get("schema_version"), field_name="inputs.schema_version"
+            raw_inputs.get("schema_version"), field_name="inputs.payload.schema_version"
         ),
         request=DispatchRequestInputs(
-            mode=_coerce_optional_string(request_inputs.get("mode"), field_name="inputs.request.mode"),
+            mode=_coerce_optional_string(
+                request_inputs.get("mode"), field_name="inputs.payload.request.mode"
+            ),
             stage=_coerce_optional_string(
-                request_inputs.get("stage"), field_name="inputs.request.stage"
+                request_inputs.get("stage"), field_name="inputs.payload.request.stage"
             ),
         ),
         game=DispatchGameInputs(
-            region=_coerce_optional_string(game_inputs.get("region"), field_name="inputs.game.region")
+            region=_coerce_optional_string(
+                game_inputs.get("region"), field_name="inputs.payload.game.region"
+            )
         ),
         manifests=DispatchManifestsInputs(
             current=_parse_manifest_inputs(
                 _coerce_mapping(
-                    manifests_inputs.get("current"), field_name="inputs.manifests.current"
+                    manifests_inputs.get("current"), field_name="inputs.payload.manifests.current"
                 ),
-                field_name="inputs.manifests.current",
+                field_name="inputs.payload.manifests.current",
             ),
             previous=_parse_manifest_inputs(
                 _coerce_mapping(
-                    manifests_inputs.get("previous"), field_name="inputs.manifests.previous"
+                    manifests_inputs.get("previous"),
+                    field_name="inputs.payload.manifests.previous",
                 ),
-                field_name="inputs.manifests.previous",
+                field_name="inputs.payload.manifests.previous",
             ),
         ),
         targets=DispatchTargetsInputs(
             champions=_parse_id_targets(
                 _coerce_mapping(
-                    targets_inputs.get("champions"), field_name="inputs.targets.champions"
+                    targets_inputs.get("champions"),
+                    field_name="inputs.payload.targets.champions",
                 ),
-                field_name="inputs.targets.champions",
+                field_name="inputs.payload.targets.champions",
             ),
             maps=_parse_id_targets(
-                _coerce_mapping(targets_inputs.get("maps"), field_name="inputs.targets.maps"),
-                field_name="inputs.targets.maps",
+                _coerce_mapping(
+                    targets_inputs.get("maps"), field_name="inputs.payload.targets.maps"
+                ),
+                field_name="inputs.payload.targets.maps",
             ),
         ),
         execution=DispatchExecutionInputs(
@@ -422,30 +460,30 @@ def _validate_dispatch_inputs(raw_inputs: dict[str, Any]) -> DispatchInputs:
                 if execution_inputs.get("force_update") is None
                 else _parse_bool_input(
                     execution_inputs.get("force_update"),
-                    field_name="inputs.execution.force_update",
+                    field_name="inputs.payload.execution.force_update",
                 )
             ),
             max_workers=_coerce_optional_integer(
                 execution_inputs.get("max_workers"),
-                field_name="inputs.execution.max_workers",
+                field_name="inputs.payload.execution.max_workers",
             ),
             download_retry_attempts=_coerce_optional_integer(
                 execution_inputs.get("download_retry_attempts"),
-                field_name="inputs.execution.download_retry_attempts",
+                field_name="inputs.payload.execution.download_retry_attempts",
             ),
             entity_retry_attempts=_coerce_optional_integer(
                 execution_inputs.get("entity_retry_attempts"),
-                field_name="inputs.execution.entity_retry_attempts",
+                field_name="inputs.payload.execution.entity_retry_attempts",
             ),
             log_level=_coerce_optional_string(
                 execution_inputs.get("log_level"),
-                field_name="inputs.execution.log_level",
+                field_name="inputs.payload.execution.log_level",
             ),
         ),
         metadata=DispatchMetadataInputs(
             requested_by=_coerce_optional_string(
                 metadata_inputs.get("requested_by"),
-                field_name="inputs.metadata.requested_by",
+                field_name="inputs.payload.metadata.requested_by",
             )
         ),
     )
@@ -534,10 +572,14 @@ def parse_dispatch_payload(raw_payload: dict[str, Any]) -> DispatchPayload:
         ValueError: 当 payload 不满足最小 workflow_dispatch 约束时抛出。
     """
 
+    raw_inputs = _coerce_mapping(raw_payload.get("inputs"), field_name="inputs")
+    _validate_known_fields(
+        raw_inputs, field_name="inputs", allowed_fields=_ALLOWED_INPUT_WRAPPER_FIELDS
+    )
     return DispatchPayload(
         ref=_coerce_string(raw_payload.get("ref"), field_name="ref"),
         inputs=_validate_dispatch_inputs(
-            _coerce_mapping(raw_payload.get("inputs"), field_name="inputs")
+            _coerce_json_string_mapping(raw_inputs.get("payload"), field_name="inputs.payload")
         ),
     )
 
