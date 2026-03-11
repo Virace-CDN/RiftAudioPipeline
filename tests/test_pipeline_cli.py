@@ -27,6 +27,12 @@ def test_build_run_config_should_parse_cli_args(tmp_path: Path) -> None:
             "/apps/demo",
             "--remote-live-region",
             "NA1",
+            "--current-version",
+            "16.5",
+            "--current-lcu-manifest-url",
+            "https://lcu.example/16.5",
+            "--current-game-manifest-url",
+            "https://game.example/16.5",
             "--champion-ids",
             "1,103",
             "--map-ids",
@@ -45,6 +51,9 @@ def test_build_run_config_should_parse_cli_args(tmp_path: Path) -> None:
     assert config.temp_root == tmp_path / "temp"
     assert config.log_root == tmp_path / "output" / "logs"
     assert config.remote_live_region == "NA1"
+    assert config.current_version == "16.5"
+    assert config.current_lcu_manifest_url == "https://lcu.example/16.5"
+    assert config.current_game_manifest_url == "https://game.example/16.5"
     assert config.champion_ids == (1, 103)
     assert config.map_ids == (11,)
     assert config.run_mapping is True

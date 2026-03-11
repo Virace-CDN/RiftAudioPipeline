@@ -324,6 +324,29 @@ def test_bootstrap_control_plane_should_fill_runtime_config(tmp_path: Path) -> N
     assert runtime_config.baidu_refresh_token == "refresh"
 
 
+def test_resolve_current_manifest_pair_should_prefer_explicit_runtime_config(tmp_path: Path) -> None:
+    """显式 current pair 存在时应直接采用运行配置。"""
+
+    config = PipelineRunConfig(
+        mode=PipelineMode.REMOTE,
+        game_region="zh_CN",
+        output_root=tmp_path / "output",
+        temp_root=tmp_path / "temp",
+        log_root=tmp_path / "output" / "logs",
+        baidu_remote_root="/apps/test",
+        current_version="16.5",
+        current_lcu_manifest_url="https://lcu.example/16.5",
+        current_game_manifest_url="https://game.example/16.5",
+    )
+
+    current_pair = orchestrator._resolve_current_manifest_pair(config)
+
+    assert current_pair is not None
+    assert current_pair.version == "16.5"
+    assert current_pair.match_mode == "external_current_pair"
+    assert current_pair.match_reason == "provided_by_runtime_config"
+
+
 def test_run_pipeline_should_run_remote_and_upload_archives(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

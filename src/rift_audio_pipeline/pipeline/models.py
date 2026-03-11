@@ -62,6 +62,9 @@ class PipelineRunConfig:
         baidu_app_key: 百度 app key。
         baidu_secret_key: 百度 secret key。
         baidu_refresh_token: 百度 refresh token。
+        current_version: 当前目标版本。
+        current_lcu_manifest_url: 当前版 LCU manifest URL。
+        current_game_manifest_url: 当前版 GAME manifest URL。
         previous_version: 上一次成功版本。
         previous_lcu_manifest_url: 上一版 LCU manifest URL。
         previous_game_manifest_url: 上一版 GAME manifest URL。
@@ -102,6 +105,9 @@ class PipelineRunConfig:
     baidu_app_key: str | None = None
     baidu_secret_key: str | None = None
     baidu_refresh_token: str | None = None
+    current_version: str | None = None
+    current_lcu_manifest_url: str | None = None
+    current_game_manifest_url: str | None = None
     previous_version: str | None = None
     previous_lcu_manifest_url: str | None = None
     previous_game_manifest_url: str | None = None

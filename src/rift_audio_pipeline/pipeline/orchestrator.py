@@ -98,7 +98,11 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
         targets: tuple[ProcessingTarget, ...] = tuple()
         if runtime_config.mode is PipelineMode.REMOTE:
             active_stage = PipelineStage.RESOLVE_MANIFEST_PAIR
-            pair = bootstrapped_pair or resolve_remote_manifest_pair(runtime_config)
+            pair = (
+                _resolve_current_manifest_pair(runtime_config)
+                or bootstrapped_pair
+                or resolve_remote_manifest_pair(runtime_config)
+            )
             resolved_version = pair.version
             active_stage = PipelineStage.BUILD_TARGETS
             targets, effective_config, decision_payload = _resolve_remote_targets(
@@ -959,6 +963,24 @@ def _resolve_previous_manifest_pair(config: PipelineRunConfig) -> ManifestPairRe
         game_manifest_url=config.previous_game_manifest_url,
         match_mode=config.previous_match_mode or "external_previous_pair",
         match_reason=config.previous_match_reason or "provided_by_runtime_config",
+    )
+
+
+def _resolve_current_manifest_pair(config: PipelineRunConfig) -> ManifestPairRef | None:
+    """从运行配置中解析当前 manifest pair。"""
+
+    if not (
+        config.current_version
+        and config.current_lcu_manifest_url
+        and config.current_game_manifest_url
+    ):
+        return None
+    return ManifestPairRef(
+        version=config.current_version,
+        lcu_manifest_url=config.current_lcu_manifest_url,
+        game_manifest_url=config.current_game_manifest_url,
+        match_mode="external_current_pair",
+        match_reason="provided_by_runtime_config",
     )
 
 

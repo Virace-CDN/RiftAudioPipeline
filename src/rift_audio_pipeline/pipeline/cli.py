@@ -27,6 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baidu-app-key")
     parser.add_argument("--baidu-secret-key")
     parser.add_argument("--baidu-refresh-token")
+    parser.add_argument("--current-version")
+    parser.add_argument("--current-lcu-manifest-url")
+    parser.add_argument("--current-game-manifest-url")
     parser.add_argument("--previous-version")
     parser.add_argument("--previous-lcu-manifest-url")
     parser.add_argument("--previous-game-manifest-url")
@@ -74,6 +77,9 @@ def build_run_config(args: argparse.Namespace) -> PipelineRunConfig:
         baidu_app_key=args.baidu_app_key,
         baidu_secret_key=args.baidu_secret_key,
         baidu_refresh_token=args.baidu_refresh_token,
+        current_version=args.current_version,
+        current_lcu_manifest_url=args.current_lcu_manifest_url,
+        current_game_manifest_url=args.current_game_manifest_url,
         previous_version=args.previous_version,
         previous_lcu_manifest_url=args.previous_lcu_manifest_url,
         previous_game_manifest_url=args.previous_game_manifest_url,
