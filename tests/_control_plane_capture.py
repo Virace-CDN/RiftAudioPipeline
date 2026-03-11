@@ -70,54 +70,23 @@ class ControlPlaneCaptureServer:
                 payload = _read_request_json(self)
                 if self.path == "/api/pipeline/bootstrap":
                     outer.bootstrap_requests.append(payload)
-                    response_payload = (
-                        outer.bootstrap_payload
-                        if isinstance(outer.bootstrap_payload.get("accepted"), bool)
-                        else {
-                            "accepted": True,
-                            "persisted_at": "2026-03-11T12:00:00+08:00",
-                        }
-                    )
-                    _write_json_response(self, response_payload)
+                    _write_json_response(self, {})
                     return
                 if self.path.endswith("/heartbeat"):
                     outer.heartbeats.append(payload)
-                    _write_json_response(
-                        self,
-                        {"accepted": True, "persisted_at": "2026-03-11T12:00:00+08:00"},
-                    )
+                    _write_json_response(self, {})
                     return
                 if self.path.endswith("/report"):
                     outer.reports.append(payload)
-                    _write_json_response(
-                        self,
-                        {
-                            "accepted": True,
-                            "persisted_at": "2026-03-11T12:00:00+08:00",
-                        },
-                    )
+                    _write_json_response(self, {})
                     return
                 if self.path.endswith("/logs/finalize"):
                     outer.terminal_summaries.append(payload)
-                    _write_json_response(
-                        self,
-                        {
-                            "accepted": True,
-                            "persisted_at": "2026-03-11T12:00:00+08:00",
-                            "worker_status": "success",
-                        },
-                    )
+                    _write_json_response(self, {})
                     return
                 if self.path.endswith("/logs"):
                     outer.events.append(payload)
-                    _write_json_response(
-                        self,
-                        {
-                            "accepted": True,
-                            "persisted_at": "2026-03-11T12:00:00+08:00",
-                            "next_expected_seq": None,
-                        },
-                    )
+                    _write_json_response(self, {})
                     return
                 _write_json_response(self, {"error": f"unexpected path: {self.path}"}, status=404)
 

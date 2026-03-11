@@ -73,14 +73,6 @@ class RunBootstrapRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class RunBootstrapResponse:
-    """Worker 对启动通知的确认。"""
-
-    accepted: bool
-    persisted_at: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class RunReportRequest:
     """执行端向 Worker 回报运行结果。"""
 
@@ -101,37 +93,11 @@ class RunHeartbeatRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class RunReportResponse:
-    """Worker 对运行回报的确认结果。"""
-
-    accepted: bool
-    persisted_at: str | None = None
-    next_head_version: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RunHeartbeatResponse:
-    """Worker 对心跳上报的确认结果。"""
-
-    accepted: bool
-    persisted_at: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class RunLogEventRequest:
     """执行端向 Worker 发送单条实时日志事件。"""
 
     run_id: str
     event: dict[str, object]
-
-
-@dataclass(frozen=True, slots=True)
-class RunLogEventResponse:
-    """Worker 对实时日志事件的确认结果。"""
-
-    accepted: bool
-    persisted_at: str | None = None
-    next_expected_seq: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,11 +107,3 @@ class RunLogFinalizeRequest:
     run_id: str
     summary: dict[str, object]
 
-
-@dataclass(frozen=True, slots=True)
-class RunLogFinalizeResponse:
-    """Worker 对终态日志摘要的确认结果。"""
-
-    accepted: bool
-    persisted_at: str | None = None
-    worker_status: str | None = None

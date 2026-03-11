@@ -52,19 +52,19 @@ class MockControlPlaneState:
         self._bootstrap_response = self._load_fixture("bootstrap.json")
         self._heartbeat_response = self._load_optional_fixture(
             "heartbeat_response.json",
-            default_payload={"accepted": True},
+            default_payload={},
         )
         self._report_response = self._load_optional_fixture(
             "report_response.json",
-            default_payload={"accepted": True},
+            default_payload={},
         )
         self._log_event_response = self._load_optional_fixture(
             "log_event_response.json",
-            default_payload={"accepted": True},
+            default_payload={},
         )
         self._log_finalize_response = self._load_optional_fixture(
             "log_finalize_response.json",
-            default_payload={"accepted": True},
+            default_payload={},
         )
         self._baidu_token_response = self._load_optional_fixture(
             "baidu_token.json",
@@ -78,7 +78,7 @@ class MockControlPlaneState:
     def bootstrap_response(self) -> dict[str, object]:
         """返回 bootstrap 启动通知响应。"""
 
-        return {"accepted": True, "persisted_at": _current_timestamp()}
+        return {}
 
     def baidu_token_response(self) -> dict[str, object]:
         """返回百度 token fixture。"""
@@ -89,8 +89,6 @@ class MockControlPlaneState:
         """返回 heartbeat 响应。"""
 
         response = dict(self._heartbeat_response)
-        response.setdefault("accepted", True)
-        response.setdefault("persisted_at", _current_timestamp())
         self._record_request(
             category="heartbeats",
             run_id=run_id,
@@ -112,8 +110,6 @@ class MockControlPlaneState:
         """返回 report 响应。"""
 
         response = dict(self._report_response)
-        response.setdefault("accepted", True)
-        response.setdefault("persisted_at", _current_timestamp())
         self._record_request(
             category="report",
             run_id=run_id,
@@ -135,11 +131,6 @@ class MockControlPlaneState:
         """返回实时日志事件响应。"""
 
         response = dict(self._log_event_response)
-        response.setdefault("accepted", True)
-        response.setdefault("persisted_at", _current_timestamp())
-        event = payload.get("event")
-        if isinstance(event, dict) and isinstance(event.get("seq"), int):
-            response.setdefault("next_expected_seq", event["seq"] + 1)
         self._record_request(
             category="logs",
             run_id=run_id,
@@ -152,11 +143,7 @@ class MockControlPlaneState:
         """返回日志终态摘要响应。"""
 
         response = dict(self._log_finalize_response)
-        response.setdefault("accepted", True)
-        response.setdefault("persisted_at", _current_timestamp())
         summary = payload.get("summary")
-        if isinstance(summary, dict) and isinstance(summary.get("final_status"), str):
-            response.setdefault("worker_status", summary["final_status"])
         self._record_request(
             category="logs_finalize",
             run_id=run_id,

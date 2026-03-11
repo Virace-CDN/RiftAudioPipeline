@@ -95,13 +95,11 @@ def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> Non
     finally:
         server.close()
 
-    assert bootstrap.accepted is True
-    assert heartbeat.accepted is True
-    assert log_event.accepted is True
-    assert log_event.next_expected_seq == 2
-    assert log_finalize.accepted is True
-    assert log_finalize.worker_status == "success"
-    assert report.accepted is True
+    assert bootstrap is None
+    assert heartbeat is None
+    assert log_event is None
+    assert log_finalize is None
+    assert report is None
 
     bootstrap_payload = _read_json(storage_root / "bootstrap_requests" / "0001.json")
     heartbeat_payload = _read_json(storage_root / "runs" / "run-mock-1" / "heartbeats" / "0001.json")

@@ -23,15 +23,7 @@ class _FakeClient:
         payload: dict[str, object] | None = None,
     ) -> dict[str, object]:
         self.calls.append((method, path, payload))
-        if path == "/api/pipeline/bootstrap":
-            return {
-                "accepted": True,
-                "persisted_at": "2026-03-08T12:00:00+08:00",
-            }
-        return {
-            "accepted": True,
-            "persisted_at": "2026-03-08T12:00:00+08:00",
-        }
+        return {}
 
 
 def test_notify_pipeline_run_started_should_parse_response() -> None:
@@ -46,8 +38,7 @@ def test_notify_pipeline_run_started_should_parse_response() -> None:
         )
     )
 
-    assert response.accepted is True
-    assert response.persisted_at == "2026-03-08T12:00:00+08:00"
+    assert response is None
 
 
 def test_report_pipeline_run_result_should_parse_response() -> None:
@@ -69,8 +60,7 @@ def test_report_pipeline_run_result_should_parse_response() -> None:
         )
     )
 
-    assert response.accepted is True
-    assert response.persisted_at == "2026-03-08T12:00:00+08:00"
+    assert response is None
 
 
 def test_report_pipeline_run_heartbeat_should_parse_response() -> None:
@@ -87,8 +77,7 @@ def test_report_pipeline_run_heartbeat_should_parse_response() -> None:
         )
     )
 
-    assert response.accepted is True
-    assert response.persisted_at == "2026-03-08T12:00:00+08:00"
+    assert response is None
 
 
 def test_report_pipeline_run_log_event_should_parse_response() -> None:
@@ -103,9 +92,7 @@ def test_report_pipeline_run_log_event_should_parse_response() -> None:
         )
     )
 
-    assert response.accepted is True
-    assert response.persisted_at == "2026-03-08T12:00:00+08:00"
-    assert response.next_expected_seq is None
+    assert response is None
 
 
 def test_finalize_pipeline_run_logs_should_parse_response() -> None:
@@ -120,5 +107,4 @@ def test_finalize_pipeline_run_logs_should_parse_response() -> None:
         )
     )
 
-    assert response.accepted is True
-    assert response.persisted_at == "2026-03-08T12:00:00+08:00"
+    assert response is None

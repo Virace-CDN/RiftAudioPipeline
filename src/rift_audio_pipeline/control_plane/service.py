@@ -9,15 +9,10 @@ from rift_audio_pipeline.control_plane.errors import ControlPlaneResponseValidat
 from rift_audio_pipeline.control_plane.models import BaiduAccessGrant
 from rift_audio_pipeline.control_plane.models import ControlPlaneManifestPair
 from rift_audio_pipeline.control_plane.models import RunBootstrapRequest
-from rift_audio_pipeline.control_plane.models import RunBootstrapResponse
 from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
-from rift_audio_pipeline.control_plane.models import RunHeartbeatResponse
 from rift_audio_pipeline.control_plane.models import RunLogEventRequest
-from rift_audio_pipeline.control_plane.models import RunLogEventResponse
 from rift_audio_pipeline.control_plane.models import RunLogFinalizeRequest
-from rift_audio_pipeline.control_plane.models import RunLogFinalizeResponse
 from rift_audio_pipeline.control_plane.models import RunReportRequest
-from rift_audio_pipeline.control_plane.models import RunReportResponse
 
 
 class ControlPlaneService:
@@ -29,100 +24,52 @@ class ControlPlaneService:
     def notify_pipeline_run_started(
         self,
         request: RunBootstrapRequest,
-    ) -> RunBootstrapResponse:
+    ) -> None:
         """向 Worker 发送任务启动通知。"""
 
-        response_payload = self._client.request_json(
+        self._client.request_json(
             "POST",
             "/api/pipeline/bootstrap",
             payload=_serialize_payload(asdict(request)),
         )
-        accepted = response_payload.get("accepted")
-        if not isinstance(accepted, bool):
-            raise ControlPlaneResponseValidationError(
-                "control plane bootstrap 响应缺少 accepted 布尔值。"
-            )
-        return RunBootstrapResponse(
-            accepted=accepted,
-            persisted_at=_optional_str(response_payload, "persisted_at"),
-        )
 
-    def report_pipeline_run_result(self, request: RunReportRequest) -> RunReportResponse:
+    def report_pipeline_run_result(self, request: RunReportRequest) -> None:
         """向 Worker 回报执行端运行结果。"""
 
-        response_payload = self._client.request_json(
+        self._client.request_json(
             "POST",
             f"/api/pipeline/runs/{request.run_id}/report",
             payload=_serialize_payload(asdict(request)),
         )
-        accepted = response_payload.get("accepted")
-        if not isinstance(accepted, bool):
-            raise ControlPlaneResponseValidationError(
-                "control plane run report 响应缺少 accepted 布尔值。"
-            )
-        return RunReportResponse(
-            accepted=accepted,
-            persisted_at=_optional_str(response_payload, "persisted_at"),
-            next_head_version=_optional_str(response_payload, "next_head_version"),
-        )
 
-    def report_pipeline_run_heartbeat(self, request: RunHeartbeatRequest) -> RunHeartbeatResponse:
+    def report_pipeline_run_heartbeat(self, request: RunHeartbeatRequest) -> None:
         """向 Worker 回报执行端运行中心跳。"""
 
-        response_payload = self._client.request_json(
+        self._client.request_json(
             "POST",
             f"/api/pipeline/runs/{request.run_id}/heartbeat",
             payload=_serialize_payload(asdict(request)),
         )
-        accepted = response_payload.get("accepted")
-        if not isinstance(accepted, bool):
-            raise ControlPlaneResponseValidationError(
-                "control plane heartbeat 响应缺少 accepted 布尔值。"
-            )
-        return RunHeartbeatResponse(
-            accepted=accepted,
-            persisted_at=_optional_str(response_payload, "persisted_at"),
-        )
 
-    def report_pipeline_run_log_event(self, request: RunLogEventRequest) -> RunLogEventResponse:
+    def report_pipeline_run_log_event(self, request: RunLogEventRequest) -> None:
         """向 Worker 发送单条实时运行日志。"""
 
-        response_payload = self._client.request_json(
+        self._client.request_json(
             "POST",
             f"/api/pipeline/runs/{request.run_id}/logs",
             payload=_serialize_payload(asdict(request)),
-        )
-        accepted = response_payload.get("accepted")
-        if not isinstance(accepted, bool):
-            raise ControlPlaneResponseValidationError(
-                "control plane log event 响应缺少 accepted 布尔值。"
-            )
-        return RunLogEventResponse(
-            accepted=accepted,
-            persisted_at=_optional_str(response_payload, "persisted_at"),
-            next_expected_seq=_optional_int(response_payload, "next_expected_seq"),
         )
 
     def finalize_pipeline_run_logs(
         self,
         request: RunLogFinalizeRequest,
-    ) -> RunLogFinalizeResponse:
+    ) -> None:
         """向 Worker 发送运行终态日志摘要。"""
 
-        response_payload = self._client.request_json(
+        self._client.request_json(
             "POST",
             f"/api/pipeline/runs/{request.run_id}/logs/finalize",
             payload=_serialize_payload(asdict(request)),
-        )
-        accepted = response_payload.get("accepted")
-        if not isinstance(accepted, bool):
-            raise ControlPlaneResponseValidationError(
-                "control plane log finalize 响应缺少 accepted 布尔值。"
-            )
-        return RunLogFinalizeResponse(
-            accepted=accepted,
-            persisted_at=_optional_str(response_payload, "persisted_at"),
-            worker_status=_optional_str(response_payload, "worker_status"),
         )
 
 
