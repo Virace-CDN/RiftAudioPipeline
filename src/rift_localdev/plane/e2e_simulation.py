@@ -15,9 +15,9 @@ import time
 from typing import TextIO
 from urllib import request
 
-from rift_audio_pipeline.control_plane.simulation import BAIDU_FAILURE_MODE_ENV_VAR
-from rift_audio_pipeline.control_plane.simulation import MOCK_BAIDU_ENV_VAR
-from rift_audio_pipeline.control_plane.simulation import SIMULATION_ENV_VAR
+from rift_localdev.simulation import BAIDU_FAILURE_MODE_ENV_VAR
+from rift_localdev.simulation import MOCK_BAIDU_ENV_VAR
+from rift_localdev.simulation import SIMULATION_ENV_VAR
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +84,7 @@ def run_control_plane_e2e_simulation(
         command=[
             sys.executable,
             "-m",
-            "rift_audio_pipeline.control_plane.mock_server",
+            "rift_localdev.plane.mock_server",
             "--fixture-dir",
             str(config.fixture_dir),
             "--storage-root",
@@ -111,7 +111,7 @@ def run_control_plane_e2e_simulation(
         command=[
             sys.executable,
             "-m",
-            "rift_audio_pipeline.control_plane.faker_github",
+            "rift_localdev.github.faker_github",
             "--host",
             config.host,
             "--port",

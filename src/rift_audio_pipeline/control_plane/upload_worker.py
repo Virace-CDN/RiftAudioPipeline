@@ -15,16 +15,16 @@ import uuid
 from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
 from rift_audio_pipeline.baidu.pan import BaiduPanClient
-from rift_audio_pipeline.control_plane.simulation import BAIDU_FAILURE_MODE_ENV_VAR
-from rift_audio_pipeline.control_plane.simulation import MOCK_BAIDU_ENV_VAR
-from rift_audio_pipeline.control_plane.simulation import SIMULATION_ENV_VAR
+from rift_audio_pipeline.artifact_utils import calculate_sha256
+from rift_localdev.simulation import BAIDU_FAILURE_MODE_ENV_VAR
+from rift_localdev.simulation import MOCK_BAIDU_ENV_VAR
+from rift_localdev.simulation import SIMULATION_ENV_VAR
 from rift_audio_pipeline.control_plane.state_db import claim_next_upload_task
 from rift_audio_pipeline.control_plane.state_db import complete_upload_task
 from rift_audio_pipeline.control_plane.state_db import get_run_drain_state
 from rift_audio_pipeline.control_plane.state_db import mark_upload_phase_drained
 from rift_audio_pipeline.control_plane.state_db import record_new_file_fact
 from rift_audio_pipeline.control_plane.state_db import reschedule_upload_task
-from rift_audio_pipeline.upload_utils import _calculate_sha256
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +95,11 @@ class UploadWorker:
         if not isinstance(remote_relative_path, str) or not remote_relative_path.strip():
             raise ValueError(f"上传任务缺少 remote_relative_path：task_id={task.id}")
         try:
-            self._upload_file(local_path=local_path, remote_relative_path=remote_relative_path)
+            self._upload_file(
+                local_path=local_path,
+                remote_relative_path=remote_relative_path,
+                metadata=payload,
+            )
             uploaded_at = _now()
             packaged_at = datetime.fromtimestamp(local_path.stat().st_ctime).astimezone().isoformat()
             record_new_file_fact(
@@ -104,7 +108,7 @@ class UploadWorker:
                 local_path=str(local_path),
                 remote_path=task.remote_path,
                 file_name=local_path.name,
-                sha256=_calculate_sha256(local_path),
+                sha256=calculate_sha256(local_path),
                 packaged_at=packaged_at,
                 uploaded_at=uploaded_at,
                 metadata={
@@ -130,7 +134,13 @@ class UploadWorker:
                 next_retry_at=next_retry_at,
             )
 
-    def _upload_file(self, *, local_path: Path, remote_relative_path: str) -> None:
+    def _upload_file(
+        self,
+        *,
+        local_path: Path,
+        remote_relative_path: str,
+        metadata: dict[str, object],
+    ) -> None:
         if os.getenv(SIMULATION_ENV_VAR) == "1" or os.getenv(MOCK_BAIDU_ENV_VAR) == "1":
             failure_mode = os.getenv(BAIDU_FAILURE_MODE_ENV_VAR, "none")
             if failure_mode in {"archive", "both"}:
@@ -152,6 +162,9 @@ class UploadWorker:
                 if str(local_path) not in archives:
                     archives.append(str(local_path))
                 payload["archives"] = archives
+                game_version = metadata.get("game_version")
+                if isinstance(game_version, str) and game_version.strip():
+                    payload["version"] = game_version
                 receipt_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             return
         self._client.upload_file(local_path=local_path, remote_path=remote_relative_path)

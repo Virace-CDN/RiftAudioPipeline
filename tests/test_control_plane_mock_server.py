@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 from rift_audio_pipeline.control_plane.client import ControlPlaneClient
-from rift_audio_pipeline.control_plane.mock_server import MockControlPlaneConfig
-from rift_audio_pipeline.control_plane.mock_server import MockControlPlaneServer
+from rift_localdev.plane.mock_server import MockControlPlaneConfig
+from rift_localdev.plane.mock_server import MockControlPlaneServer
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 from rift_audio_pipeline.control_plane.models import RunBootstrapRequest
 from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
@@ -15,7 +15,6 @@ from rift_audio_pipeline.control_plane.models import RunLogEventRequest
 from rift_audio_pipeline.control_plane.models import RunLogFinalizeRequest
 from rift_audio_pipeline.control_plane.models import RunReportRequest
 from rift_audio_pipeline.control_plane.service import ControlPlaneService
-from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
 
 

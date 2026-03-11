@@ -12,9 +12,9 @@ import time
 from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
 from rift_audio_pipeline.baidu.pan import BaiduPanClient
-from rift_audio_pipeline.control_plane.simulation import BAIDU_FAILURE_MODE_ENV_VAR
-from rift_audio_pipeline.control_plane.simulation import MOCK_BAIDU_ENV_VAR
-from rift_audio_pipeline.control_plane.simulation import SIMULATION_ENV_VAR
+from rift_localdev.simulation import BAIDU_FAILURE_MODE_ENV_VAR
+from rift_localdev.simulation import MOCK_BAIDU_ENV_VAR
+from rift_localdev.simulation import SIMULATION_ENV_VAR
 from rift_audio_pipeline.control_plane.state_db import build_database_entries_for_export
 from rift_audio_pipeline.control_plane.state_db import build_report_changes
 from rift_audio_pipeline.control_plane.state_db import get_upload_phase_status

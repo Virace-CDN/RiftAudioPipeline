@@ -6,7 +6,6 @@ from dataclasses import asdict
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-import json
 import re
 
 from rift_audio_pipeline.baidu import BaiduCredentials
@@ -15,6 +14,8 @@ from rift_audio_pipeline.baidu import resolve_token_store
 from rift_audio_pipeline.control_plane.state_db import enqueue_upload_task
 from rift_audio_pipeline.control_plane.state_db import mark_task_production_closed
 from rift_audio_pipeline.packer import pack_champion
+from rift_audio_pipeline.pipeline.archive_publish import build_archive_publish_layout
+from rift_audio_pipeline.pipeline.archive_publish import resolve_default_archive_resource_type
 from rift_audio_pipeline.pipeline.local import run_local_pipeline
 from rift_audio_pipeline.pipeline.logging import build_log_sink_config
 from rift_audio_pipeline.pipeline.logging import emit_event
@@ -24,7 +25,6 @@ from rift_audio_pipeline.pipeline.logging import initialize_run_logging
 from rift_audio_pipeline.pipeline.logging import load_error_snapshot
 from rift_audio_pipeline.pipeline.logging import LogRelayClient
 from rift_audio_pipeline.pipeline.logging import record_error_snapshot
-from rift_audio_pipeline.pipeline.logging import should_enable_log_relay
 from rift_audio_pipeline.pipeline.models import EntityArtifacts
 from rift_audio_pipeline.pipeline.models import ManifestPairRef
 from rift_audio_pipeline.pipeline.models import PipelineArtifactRecord
@@ -40,8 +40,6 @@ from rift_audio_pipeline.pipeline.models import PipelineStage
 from rift_audio_pipeline.pipeline.models import ProcessingTarget
 from rift_audio_pipeline.pipeline.remote import build_remote_app_context
 from rift_audio_pipeline.pipeline.remote import run_remote_pipeline
-import rift_audio_pipeline.upload as upload_module
-from rift_audio_pipeline.upload import UploadConfig
 
 CHAMPION_WAD_PATTERN = re.compile(r"/champions/(?P<alias>[^/]+)\.wad\.client$", re.IGNORECASE)
 CHAMPION_BIN_PATTERN = re.compile(r"/characters/(?P<alias>[^/]+)/", re.IGNORECASE)
@@ -61,9 +59,9 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
 
     log_ctx = initialize_run_logging(config)
     runtime_config = config
+    state_db_path = _require_state_database_path(runtime_config)
     resolved_version: str | None = None
     uploaded_archives = 0
-    manifest_queue_file = config.output_root / "state" / "pending_manifest_sync_queue.json"
     decision_payload: PipelineDecisionSnapshot | None = None
     active_stage = PipelineStage.INIT
     summary: PipelineRunSummary | None = None
@@ -88,9 +86,6 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
         )
 
         active_stage = PipelineStage.LOAD_REMOTE_INDEX
-        _retry_pending_manifest_sync_queue_if_possible(
-            config=runtime_config, queue_file=manifest_queue_file
-        )
 
         artifacts: list[EntityArtifacts]
         artifact_records: list[PipelineArtifactRecord] = []
@@ -175,6 +170,7 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             active_stage = PipelineStage.UPLOAD
             _enqueue_archive_upload_tasks_for_run(
                 config=runtime_config,
+                state_db_path=state_db_path,
                 run_id=log_ctx.run_id,
                 archives=tuple(all_archives),
                 version=resolved_version,
@@ -190,7 +186,7 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             succeeded_targets=len(artifacts),
             failed_targets=max((len(targets) if targets else len(artifacts)) - len(artifacts), 0),
             uploaded_archives=uploaded_archives,
-            pending_manifest_sync_entries=_count_json_list_entries(manifest_queue_file),
+            pending_manifest_sync_entries=0,
             pending_log_upload_entries=0,
             log_dir=log_ctx.log_dir,
         )
@@ -228,7 +224,7 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             succeeded_targets=0,
             failed_targets=1,
             uploaded_archives=uploaded_archives,
-            pending_manifest_sync_entries=_count_json_list_entries(manifest_queue_file),
+            pending_manifest_sync_entries=0,
             pending_log_upload_entries=0,
             log_dir=log_ctx.log_dir,
         )
@@ -236,7 +232,7 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
 
     if summary is None:
         raise RuntimeError("pipeline 结束时未生成运行摘要。")
-    _close_upload_task_production(config=runtime_config, summary=summary)
+    _close_upload_task_production(state_db_path=state_db_path, summary=summary)
     finalize_log_relay_delivery(
         log_ctx,
         _build_terminal_log_summary(
@@ -617,58 +613,25 @@ def _build_terminal_log_summary(
     )
 
 
-def _upload_archives_for_run(
-    config: PipelineRunConfig,
-    archives: tuple[Path, ...],
-    version: str,
-) -> Path | None:
-    """调用现有上传模块完成资源包上传与索引同步。"""
-
-    upload_config = UploadConfig(
-        output_path=config.output_root,
-        baidu_pan_remote_dir=config.baidu_remote_root,
-        baidu_pan_app_key=config.baidu_app_key,
-        baidu_pan_secret_key=config.baidu_secret_key,
-        baidu_pan_refresh_token=config.baidu_refresh_token,
-    )
-    return upload_module._upload_archives_and_manifest(
-        config=upload_config,
-        game_version=version,
-        archives=archives,
-        pending_manifest_sync_queue_file=config.output_root
-        / "state"
-        / "pending_manifest_sync_queue.json",
-    )
-
-
 def _enqueue_archive_upload_tasks_for_run(
     config: PipelineRunConfig,
     *,
+    state_db_path: Path,
     run_id: str,
     archives: tuple[Path, ...],
     version: str,
 ) -> None:
     """将 archive 上传任务写入本地状态库。"""
 
-    if config.state_db_path is None:
-        _upload_archives_for_run(config=config, archives=archives, version=version)
-        return
-    upload_config = UploadConfig(
-        output_path=config.output_root,
-        baidu_pan_remote_dir=config.baidu_remote_root,
-        baidu_pan_app_key=config.baidu_app_key,
-        baidu_pan_secret_key=config.baidu_secret_key,
-        baidu_pan_refresh_token=config.baidu_refresh_token,
-    )
-    default_resource_type = upload_module._resolve_default_upload_resource_type(config=upload_config)
+    default_resource_type = resolve_default_archive_resource_type()
     for archive in archives:
-        layout = upload_module._build_archive_upload_layout(
+        layout = build_archive_publish_layout(
             archive=archive,
-            remote_dir=config.baidu_remote_root,
+            remote_root=config.baidu_remote_root,
             default_resource_type=default_resource_type,
         )
         enqueue_upload_task(
-            database_path=config.state_db_path,
+            database_path=state_db_path,
             run_id=run_id,
             local_path=str(archive),
             remote_path=layout.remote_path,
@@ -686,39 +649,16 @@ def _enqueue_archive_upload_tasks_for_run(
 
 def _close_upload_task_production(
     *,
-    config: PipelineRunConfig,
+    state_db_path: Path,
     summary: PipelineRunSummary,
 ) -> None:
     """标记本轮不会再新增上传任务。"""
 
-    if config.state_db_path is None:
-        return
     mark_task_production_closed(
-        database_path=config.state_db_path,
+        database_path=state_db_path,
         run_id=summary.run_id,
         pipeline_status=summary.status.value,
         final_summary_path=str(summary.log_dir / "run.json"),
-    )
-
-
-def _retry_pending_manifest_sync_queue_if_possible(
-    config: PipelineRunConfig,
-    queue_file: Path,
-) -> None:
-    """若百度凭据齐全，则优先重试 manifest 补偿队列。"""
-
-    if not _has_baidu_credentials(config):
-        return
-    upload_config = UploadConfig(
-        output_path=config.output_root,
-        baidu_pan_remote_dir=config.baidu_remote_root,
-        baidu_pan_app_key=config.baidu_app_key,
-        baidu_pan_secret_key=config.baidu_secret_key,
-        baidu_pan_refresh_token=config.baidu_refresh_token,
-    )
-    upload_module._retry_pending_manifest_sync_queue(
-        config=upload_config,
-        queue_file=queue_file,
     )
 
 
@@ -1035,12 +975,9 @@ def _has_baidu_credentials(config: PipelineRunConfig) -> bool:
     return bool(config.baidu_app_key and config.baidu_secret_key and config.baidu_refresh_token)
 
 
-def _count_json_list_entries(file_path: Path) -> int:
-    """统计 JSON 数组文件条目数。"""
+def _require_state_database_path(config: PipelineRunConfig) -> Path:
+    """要求当前运行必须显式提供状态库路径。"""
 
-    if not file_path.exists():
-        return 0
-    payload = json.loads(file_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError(f"JSON 队列格式非法：{file_path}")
-    return len(payload)
+    if config.state_db_path is None:
+        raise ValueError("当前 runtime worker 主路径要求显式提供 state_db_path。")
+    return config.state_db_path

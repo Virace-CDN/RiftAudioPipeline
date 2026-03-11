@@ -5,17 +5,24 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 from dataclasses import dataclass
+from datetime import datetime
 import json
 from pathlib import Path
+import uuid
 
-from rift_audio_pipeline.control_plane.mock_server import MockControlPlaneConfig
-from rift_audio_pipeline.control_plane.mock_server import MockControlPlaneServer
-from rift_audio_pipeline.control_plane.simulation import patch_pipeline_for_simulation
+from rift_audio_pipeline.control_plane.client import ControlPlaneClient
+from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
+from rift_audio_pipeline.control_plane.state_db import bootstrap_state_database
+from rift_audio_pipeline.control_plane.upload_worker import UploadWorker
+from rift_audio_pipeline.control_plane.upload_worker import UploadWorkerConfig
 from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunConfig
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
 from rift_audio_pipeline.pipeline.models import PipelineRunSummary
 from rift_audio_pipeline.pipeline.orchestrator import run_pipeline
+from rift_localdev.plane.mock_server import MockControlPlaneConfig
+from rift_localdev.plane.mock_server import MockControlPlaneServer
+from rift_localdev.simulation import patch_pipeline_for_simulation
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +64,26 @@ def run_mock_control_plane_smoke(config: MockSmokeConfig) -> MockSmokeResult:
     )
     server.start()
     try:
+        run_id = f"mock-smoke-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        runtime_root = config.output_root / "runtime" / run_id
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        token_payload = ControlPlaneClient(
+            ControlPlaneConfig(base_url=server.base_url)
+        ).request_json("GET", "/api/baidu/token")
+        baidu_token_file = runtime_root / "baidu-token.json"
+        baidu_token_file.write_text(
+            json.dumps(token_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (runtime_root / "database.json").write_text(
+            json.dumps({"schema_version": 1, "entry_count": 0, "entries": []}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        state_db_result = bootstrap_state_database(
+            database_path=runtime_root / "state.sqlite3",
+            run_id=run_id,
+            remote_database_payload={"schema_version": 1, "entry_count": 0, "entries": []},
+        )
         runtime_config = PipelineRunConfig(
             mode=PipelineMode.REMOTE,
             game_region=config.game_region,
@@ -64,16 +91,31 @@ def run_mock_control_plane_smoke(config: MockSmokeConfig) -> MockSmokeResult:
             temp_root=config.temp_root,
             log_root=config.output_root / "logs",
             baidu_remote_root=config.baidu_remote_root,
+            run_id=run_id,
+            state_db_path=state_db_result.database_path,
             control_plane_base_url=server.base_url,
             control_plane_requested_by=config.requested_by,
             champion_ids=config.champion_ids,
             include_maps=False,
+            baidu_app_key=str(token_payload["app_key"]),
+            baidu_secret_key=str(token_payload["secret_key"]),
+            baidu_refresh_token=str(token_payload["refresh_token"]),
         )
         with patch_pipeline_for_simulation(
             runtime_config,
             receipt_dir=config.output_root / "smoke",
-        ) as artifact_paths:
+        ):
             summary = run_pipeline(runtime_config)
+            UploadWorker(
+                UploadWorkerConfig(
+                    run_id=run_id,
+                    state_db_path=state_db_result.database_path,
+                    baidu_token_file=baidu_token_file,
+                    baidu_remote_root=config.baidu_remote_root,
+                    worker_id="mock-smoke-upload-worker",
+                    output_root=config.output_root,
+                )
+            ).serve()
     finally:
         server.close()
 
@@ -81,7 +123,7 @@ def run_mock_control_plane_smoke(config: MockSmokeConfig) -> MockSmokeResult:
         base_url=server.base_url,
         summary=summary,
         received_root=config.storage_root,
-        archive_upload_receipt=artifact_paths.archive_upload_receipt,
+        archive_upload_receipt=config.output_root / "simulation" / "archive_upload.json",
     )
 
 

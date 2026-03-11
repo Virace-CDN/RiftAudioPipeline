@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 from datetime import datetime
-import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import uuid
 
-from rift_audio_pipeline.control_plane.faker_github import DispatchPayload
+from rift_localdev.github.faker_github import DispatchPayload
 from rift_audio_pipeline.control_plane.github_actions_workflow import load_dispatch_payload
-from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
-from rift_audio_pipeline.pipeline.logging import _LOG_RELAY_SOCKET_ROOT
-from rift_audio_pipeline.pipeline.logging import LogSinkConfig
-from rift_audio_pipeline.pipeline.logging import spawn_log_relay_process
-from rift_audio_pipeline.pipeline.logging import write_log_relay_config
+from rift_audio_pipeline.control_plane.runtime.job_support import JobRunnerResult
+from rift_audio_pipeline.control_plane.runtime.job_support import RuntimePlan
+from rift_audio_pipeline.control_plane.runtime.job_support import build_pipeline_environment
+from rift_audio_pipeline.control_plane.runtime.job_support import build_runtime_plan as build_runtime_plan_impl
+from rift_audio_pipeline.control_plane.runtime.job_support import emit_run_result
+from rift_audio_pipeline.control_plane.runtime.job_support import prepare_relay
+from rift_audio_pipeline.control_plane.runtime.job_support import run_finalize_worker
+from rift_audio_pipeline.control_plane.runtime.job_support import run_pipeline_main
+from rift_audio_pipeline.control_plane.runtime.job_support import start_upload_worker
+from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
 
 _REQUEST_STAGE_TO_FLAGS = {
     None: (True, True, False),
@@ -52,152 +54,112 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """按固定顺序调度 runtime worker 主路径。"""
+
     args = build_parser().parse_args(argv)
     payload = load_dispatch_payload(ref=args.ref, dispatch_inputs_file=args.dispatch_inputs_file)
-    run_id = _resolve_run_id(args.run_id)
-    runtime_root = _resolve_runtime_root(storage_root=args.storage_root, output_root=args.output_root, run_id=run_id)
+    plan = build_runtime_plan(args=args, run_id=_resolve_run_id(args.run_id))
     init_result = initialize_runtime(
-        run_id=run_id,
-        runtime_dir=runtime_root,
-        baidu_remote_root=args.baidu_remote_root,
-        plane_config=ControlPlaneConfig(
-            base_url=args.control_plane_base_url,
-            bearer_token=args.control_plane_bearer_token,
-            access_client_id=args.control_plane_access_client_id,
-            access_client_secret=args.control_plane_access_client_secret,
-            timeout_seconds=args.control_plane_timeout_seconds,
-        ),
+        run_id=plan.run_id,
+        runtime_dir=plan.runtime_root,
+        baidu_remote_root=plan.baidu_remote_root,
+        plane_config=_build_control_plane_config(args),
     )
-    log_root = args.log_root or args.output_root / "logs"
-    log_dir = _resolve_log_dir(log_root=log_root, run_id=run_id)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    relay_socket_path = _LOG_RELAY_SOCKET_ROOT / f"{run_id}.sock"
-    relay_config_file = runtime_root / "relay-config.json"
-    relay_stdout_file = runtime_root / "relay.stdout.log"
-    write_log_relay_config(
-        relay_config_file=relay_config_file,
-        run_id=run_id,
-        relay_state_file=log_dir / "log_relay_state.json",
-        relay_socket_file=relay_socket_path,
-        config=LogSinkConfig(
-            enabled=True,
-            control_plane_base_url=args.control_plane_base_url,
-            bearer_token=args.control_plane_bearer_token,
-            access_client_id=args.control_plane_access_client_id,
-            access_client_secret=args.control_plane_access_client_secret,
-            timeout_seconds=args.control_plane_timeout_seconds,
-            spool_dir=log_dir / "spool",
-        ),
+    pipeline_command = build_pipeline_command(
+        payload=payload,
+        run_id=plan.run_id,
+        output_root=plan.output_root,
+        temp_root=plan.temp_root,
+        log_root=plan.log_root,
+        baidu_remote_root=plan.baidu_remote_root,
+        relay_socket_path=plan.relay_socket_path,
+        state_db_path=init_result.state_db_file,
+        default_mode=plan.default_mode,
+        default_game_region=plan.default_game_region,
+        default_log_level=plan.default_log_level,
     )
-    relay_process, relay_stdout_handle = spawn_log_relay_process(
-        relay_config_file=relay_config_file,
-        relay_stdout_file=relay_stdout_file,
+    relay_process, relay_stdout_handle = prepare_relay(
+        plan=plan,
+        control_plane_base_url=args.control_plane_base_url,
+        control_plane_bearer_token=args.control_plane_bearer_token,
+        control_plane_access_client_id=args.control_plane_access_client_id,
+        control_plane_access_client_secret=args.control_plane_access_client_secret,
+        control_plane_timeout_seconds=args.control_plane_timeout_seconds,
     )
-    upload_stdout_file = runtime_root / "upload-worker.stdout.log"
-    upload_stdout_handle = upload_stdout_file.open("a", encoding="utf-8")
-    upload_process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "rift_audio_pipeline.control_plane.upload_worker",
-            "--run-id",
-            run_id,
-            "--state-db-path",
-            str(init_result.state_db_file),
-            "--baidu-token-file",
-            str(init_result.baidu_token_file),
-            "--baidu-remote-root",
-            args.baidu_remote_root,
-            "--output-root",
-            str(args.output_root),
-        ],
-        stdout=upload_stdout_handle,
-        stderr=subprocess.STDOUT,
-        text=True,
+    upload_process, upload_stdout_handle = start_upload_worker(
+        plan=plan,
+        init_result=init_result,
     )
-    pipeline_returncode = 1
-    relay_returncode = 1
-    upload_returncode = 1
-    finalize_returncode = 1
+    result = JobRunnerResult(
+        run_id=plan.run_id,
+        runtime_dir=plan.runtime_root,
+        pipeline_command=tuple(pipeline_command),
+        pipeline_returncode=1,
+        relay_returncode=1,
+        upload_returncode=1,
+        finalize_returncode=1,
+        database_file=init_result.database_file,
+        state_db_file=init_result.state_db_file,
+        imported_remote_entries=init_result.imported_remote_entries,
+        baidu_token_file=init_result.baidu_token_file,
+        relay_socket_path=plan.relay_socket_path,
+    )
     try:
-        pipeline_env = dict(os.environ)
-        pipeline_env["RIFT_BAIDU_APP_KEY"] = str(init_result.token_payload["app_key"])
-        pipeline_env["RIFT_BAIDU_SECRET_KEY"] = str(init_result.token_payload["secret_key"])
-        pipeline_env["RIFT_BAIDU_REFRESH_TOKEN"] = str(init_result.token_payload["refresh_token"])
-        pipeline_env["RIFT_BAIDU_DATABASE_FILE"] = str(init_result.database_file)
-        pipeline_command = build_pipeline_command(
-            payload=payload,
-            run_id=run_id,
-            output_root=args.output_root,
-            temp_root=args.temp_root,
-            log_root=log_root,
-            baidu_remote_root=args.baidu_remote_root,
-            relay_socket_path=relay_socket_path,
-            state_db_path=init_result.state_db_file,
-            default_mode=args.default_mode,
-            default_game_region=args.default_game_region,
-            default_log_level=args.default_log_level,
+        pipeline_returncode = run_pipeline_main(
+            pipeline_command=pipeline_command,
+            pipeline_env=build_pipeline_environment(init_result=init_result),
         )
-        pipeline_process = subprocess.Popen(  # noqa: S603
-            pipeline_command,
-            env=pipeline_env,
-            text=True,
-        )
-        pipeline_returncode = pipeline_process.wait()
         upload_returncode = upload_process.wait(timeout=60.0)
-        finalize_completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "rift_audio_pipeline.control_plane.finalize_worker",
-                "--run-id",
-                run_id,
-                "--state-db-path",
-                str(init_result.state_db_file),
-                "--baidu-token-file",
-                str(init_result.baidu_token_file),
-                "--baidu-remote-root",
-                args.baidu_remote_root,
-                "--database-file",
-                str(init_result.database_file),
-                "--log-root",
-                str(log_root),
-                "--relay-state-file",
-                str(log_dir / "log_relay_state.json"),
-                "--relay-socket-path",
-                str(relay_socket_path),
-                "--final-status",
-                "success" if pipeline_returncode == 0 else "failed",
-            ],
-            check=False,
-            text=True,
+        finalize_returncode = run_finalize_worker(
+            plan=plan,
+            init_result=init_result,
+            final_status="success" if pipeline_returncode == 0 else "failed",
         )
-        finalize_returncode = finalize_completed.returncode
         relay_returncode = relay_process.wait(timeout=30.0)
+        result = JobRunnerResult(
+            run_id=result.run_id,
+            runtime_dir=result.runtime_dir,
+            pipeline_command=result.pipeline_command,
+            pipeline_returncode=pipeline_returncode,
+            relay_returncode=relay_returncode,
+            upload_returncode=upload_returncode,
+            finalize_returncode=finalize_returncode,
+            database_file=result.database_file,
+            state_db_file=result.state_db_file,
+            imported_remote_entries=result.imported_remote_entries,
+            baidu_token_file=result.baidu_token_file,
+            relay_socket_path=result.relay_socket_path,
+        )
     finally:
         relay_stdout_handle.close()
         upload_stdout_handle.close()
-    print(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "runtime_dir": str(runtime_root),
-                "pipeline_command": pipeline_command,
-                "pipeline_returncode": pipeline_returncode,
-                "relay_returncode": relay_returncode,
-                "upload_returncode": upload_returncode,
-                "finalize_returncode": finalize_returncode,
-                "database_file": str(init_result.database_file),
-                "state_db_file": str(init_result.state_db_file),
-                "imported_remote_entries": init_result.imported_remote_entries,
-                "baidu_token_file": str(init_result.baidu_token_file),
-                "relay_socket_path": str(relay_socket_path),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+    emit_run_result(result)
+    return result.pipeline_returncode
+
+
+def build_runtime_plan(*, args: argparse.Namespace, run_id: str) -> RuntimePlan:
+    """兼容导出：基于 CLI 参数组装本地 runtime 布局。"""
+
+    return build_runtime_plan_impl(
+        args=args,
+        run_id=run_id,
+        resolve_runtime_root=_resolve_runtime_root,
+        resolve_log_dir=_resolve_log_dir,
     )
-    return pipeline_returncode
+
+
+def _build_control_plane_config(args: argparse.Namespace) -> ControlPlaneConfig:
+    """根据 CLI 参数构造 plane 配置。"""
+
+    return ControlPlaneConfig(
+        base_url=args.control_plane_base_url,
+        bearer_token=args.control_plane_bearer_token,
+        access_client_id=args.control_plane_access_client_id,
+        access_client_secret=args.control_plane_access_client_secret,
+        timeout_seconds=args.control_plane_timeout_seconds,
+    )
+
+
 
 
 def build_pipeline_command(
@@ -297,5 +259,7 @@ def _resolve_runtime_root(*, storage_root: Path | None, output_root: Path, run_i
 def _resolve_log_dir(*, log_root: Path, run_id: str) -> Path:
     run_date = datetime.now().astimezone().strftime("%Y-%m-%d")
     return log_root / run_date / run_id
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

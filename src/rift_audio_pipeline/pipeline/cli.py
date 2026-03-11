@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Sequence
 
-from rift_audio_pipeline.control_plane.simulation import maybe_patch_pipeline_for_simulation
+from rift_localdev.simulation import maybe_patch_pipeline_for_simulation
 from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunConfig
 from rift_audio_pipeline.pipeline.orchestrator import run_pipeline

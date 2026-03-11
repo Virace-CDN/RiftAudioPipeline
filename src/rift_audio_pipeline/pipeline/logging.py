@@ -1,4 +1,4 @@
-"""Pipeline 日志落地与补偿上传。"""
+"""Pipeline 本地日志落地与 relay 下沉。"""
 
 from __future__ import annotations
 
@@ -24,12 +24,10 @@ from typing import Callable
 from typing import Protocol
 import uuid
 
-from rift_audio_pipeline.baidu.pan import BaiduPanClient
+from rift_audio_pipeline.control_plane.runtime.relay_runtime import build_log_relay_config_payload
 from rift_audio_pipeline.pipeline.models import PipelineEvent
 from rift_audio_pipeline.pipeline.models import PipelineErrorSnapshot
-from rift_audio_pipeline.pipeline.models import PendingLogUploadEntry
 from rift_audio_pipeline.pipeline.models import PipelineLogTerminalSummary
-from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunConfig
 from rift_audio_pipeline.pipeline.models import PipelineRunSummary
 from rift_audio_pipeline.pipeline.models import PipelineStage
@@ -611,95 +609,6 @@ class LogRelayClient:
             self._stdout_handle = None
 
 
-def build_log_relay_config_payload(
-    *,
-    run_id: str,
-    relay_state_file: Path,
-    relay_socket_file: Path,
-    config: LogSinkConfig,
-) -> dict[str, object]:
-    """构造 relay 外部进程配置。"""
-
-    return {
-        "run_id": run_id,
-        "state_file": str(relay_state_file),
-        "spool_dir": str(config.spool_dir or relay_state_file.parent / "spool"),
-        "socket_path": str(relay_socket_file),
-        "control_plane_base_url": config.control_plane_base_url,
-        "bearer_token": config.bearer_token,
-        "access_client_id": config.access_client_id,
-        "access_client_secret": config.access_client_secret,
-        "timeout_seconds": config.timeout_seconds,
-        "max_queue_size": config.max_queue_size,
-        "flush_interval_ms": config.flush_interval_ms,
-        "retry_backoff_ms": list(config.retry_backoff_ms),
-        "monitor_interval_ms": config.monitor_interval_ms,
-        "heartbeat_interval_ms": config.heartbeat_interval_ms,
-    }
-
-
-def write_log_relay_config(
-    *,
-    relay_config_file: Path,
-    run_id: str,
-    relay_state_file: Path,
-    relay_socket_file: Path,
-    config: LogSinkConfig,
-) -> None:
-    """写 relay 进程配置文件。"""
-
-    relay_config_file.parent.mkdir(parents=True, exist_ok=True)
-    relay_socket_file.parent.mkdir(parents=True, exist_ok=True)
-    relay_config_file.write_text(
-        json.dumps(
-            build_log_relay_config_payload(
-                run_id=run_id,
-                relay_state_file=relay_state_file,
-                relay_socket_file=relay_socket_file,
-                config=config,
-            ),
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-
-def spawn_log_relay_process(
-    *,
-    relay_config_file: Path,
-    relay_stdout_file: Path,
-) -> tuple[subprocess.Popen[str], object]:
-    """外部启动 relay 进程。"""
-
-    relay_stdout_file.parent.mkdir(parents=True, exist_ok=True)
-    stdout_handle = relay_stdout_file.open("a", encoding="utf-8")
-    src_root = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    existing_pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        f"{src_root}{os.pathsep}{existing_pythonpath}"
-        if existing_pythonpath
-        else str(src_root)
-    )
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "rift_audio_pipeline.control_plane.log_relay",
-            "--config",
-            str(relay_config_file),
-        ],
-        stdout=stdout_handle,
-        stderr=subprocess.STDOUT,
-        env=env,
-        close_fds=True,
-        start_new_session=True,
-        text=True,
-    )
-    return process, stdout_handle
-
-
 def initialize_run_logging(config: PipelineRunConfig) -> PipelineLogContext:
     """初始化一次运行的日志目录与上下文。
 
@@ -935,97 +844,6 @@ def load_error_snapshot(ctx: PipelineLogContext) -> dict[str, object] | None:
     if not isinstance(payload, dict):
         raise ValueError(f"error.json 必须是 JSON 对象：{ctx.error_file}")
     return payload
-
-
-def upload_run_logs(
-    ctx: PipelineLogContext,
-    config: PipelineRunConfig,
-    baidu_client: BaiduPanClient,
-) -> None:
-    """上传本次运行日志目录。
-
-    Args:
-        ctx: 日志上下文。
-        config: Pipeline 运行配置。
-        baidu_client: 百度网盘客户端。
-    """
-
-    remote_base = f"{config.baidu_remote_root.rstrip('/')}/logs/{ctx.run_date}/{ctx.run_id}"
-    _ensure_remote_directory(baidu_client=baidu_client, remote_dir=remote_base)
-    for file_path in sorted(path for path in ctx.log_dir.rglob("*") if path.is_file()):
-        relative_path = file_path.relative_to(ctx.log_dir).as_posix()
-        remote_path = f"{remote_base}/{relative_path}"
-        parent_remote_dir = remote_path.rsplit("/", 1)[0]
-        _ensure_remote_directory(baidu_client=baidu_client, remote_dir=parent_remote_dir)
-        baidu_client.upload_file(local_path=file_path, remote_path=remote_path)
-
-
-def enqueue_pending_log_upload(
-    config: PipelineRunConfig,
-    log_dir: Path,
-    *,
-    error_message: str,
-) -> None:
-    """将日志补传任务写入待补偿队列。
-
-    Args:
-        config: Pipeline 运行配置。
-        log_dir: 本地日志目录。
-        error_message: 本次上传失败原因。
-    """
-
-    state_dir = config.output_root / "state"
-    state_dir.mkdir(parents=True, exist_ok=True)
-    queue_file = state_dir / "pending_log_upload_queue.json"
-    existing_entries = _load_json_list(queue_file)
-    existing_entries.append(
-        _to_json_compatible(
-            PendingLogUploadEntry(
-                log_dir=str(log_dir.resolve()),
-                remote_root=config.baidu_remote_root,
-                error_message=error_message,
-                enqueued_at=datetime.now().astimezone().isoformat(),
-                run_id=log_dir.name,
-            )
-        )
-    )
-    _write_json(queue_file, existing_entries)
-
-
-def _ensure_remote_directory(baidu_client: BaiduPanClient, remote_dir: str) -> None:
-    """确保远端目录存在。
-
-    Args:
-        baidu_client: 百度网盘客户端。
-        remote_dir: 远端目录路径。
-    """
-
-    parts = [part for part in remote_dir.strip("/").split("/") if part]
-    if not parts:
-        return
-    current = ""
-    for part in parts:
-        current = f"{current}/{part}" if current else f"/{part}"
-        try:
-            baidu_client.get_path_entry(current)
-        except FileNotFoundError:
-            baidu_client.create_directory(current)
-
-
-def _load_json_list(file_path: Path) -> list[dict[str, object]]:
-    """读取 JSON 数组文件，不存在时返回空列表。"""
-
-    if not file_path.exists():
-        return []
-    payload = json.loads(file_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError(f"待补偿队列格式非法，期望 list，实际为：{type(payload)!r}")
-    normalized_payload: list[dict[str, object]] = []
-    for entry in payload:
-        if not isinstance(entry, dict):
-            raise ValueError(f"待补偿队列项格式非法，期望 dict，实际为：{type(entry)!r}")
-        normalized_payload.append(entry)
-    return normalized_payload
 
 
 def _append_log_line(file_path: Path, message: str) -> None:

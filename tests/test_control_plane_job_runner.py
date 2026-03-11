@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -11,18 +10,20 @@ import sys
 import pytest
 
 from tests._control_plane_capture import ControlPlaneCaptureServer
-from rift_audio_pipeline.control_plane.faker_github import DispatchExecutionInputs
-from rift_audio_pipeline.control_plane.faker_github import DispatchGameInputs
-from rift_audio_pipeline.control_plane.faker_github import DispatchIdTargets
-from rift_audio_pipeline.control_plane.faker_github import DispatchInputs
-from rift_audio_pipeline.control_plane.faker_github import DispatchManifestInputs
-from rift_audio_pipeline.control_plane.faker_github import DispatchManifestsInputs
-from rift_audio_pipeline.control_plane.faker_github import DispatchMetadataInputs
-from rift_audio_pipeline.control_plane.faker_github import DispatchPayload
-from rift_audio_pipeline.control_plane.faker_github import DispatchRequestInputs
-from rift_audio_pipeline.control_plane.faker_github import DispatchTargetsInputs
+from rift_localdev.github.faker_github import DispatchExecutionInputs
+from rift_localdev.github.faker_github import DispatchGameInputs
+from rift_localdev.github.faker_github import DispatchIdTargets
+from rift_localdev.github.faker_github import DispatchInputs
+from rift_localdev.github.faker_github import DispatchManifestInputs
+from rift_localdev.github.faker_github import DispatchManifestsInputs
+from rift_localdev.github.faker_github import DispatchMetadataInputs
+from rift_localdev.github.faker_github import DispatchPayload
+from rift_localdev.github.faker_github import DispatchRequestInputs
+from rift_localdev.github.faker_github import DispatchTargetsInputs
 from rift_audio_pipeline.control_plane.job_runner import _resolve_run_id
 from rift_audio_pipeline.control_plane.job_runner import build_pipeline_command
+from rift_audio_pipeline.control_plane.job_runner import build_parser
+from rift_audio_pipeline.control_plane.job_runner import build_runtime_plan
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
 
@@ -141,3 +142,34 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
     assert "--control-plane-bearer-token" not in command
     assert "--champion-ids" in command
     assert "1,103" in command
+
+
+def test_build_runtime_plan_should_derive_runtime_paths(tmp_path: Path) -> None:
+    """runtime plan 应统一派生 runtime/log/relay 相关路径。"""
+
+    args = build_parser().parse_args(
+        [
+            "--ref",
+            "main",
+            "--dispatch-inputs-file",
+            str(tmp_path / "dispatch-inputs.json"),
+            "--storage-root",
+            str(tmp_path / "storage"),
+            "--output-root",
+            str(tmp_path / "output"),
+            "--temp-root",
+            str(tmp_path / "temp"),
+            "--control-plane-base-url",
+            "https://plane.example",
+        ]
+    )
+
+    plan = build_runtime_plan(args=args, run_id="99887766")
+
+    assert plan.run_id == "99887766"
+    assert plan.runtime_root == tmp_path / "storage" / "runs" / "99887766"
+    assert plan.log_root == tmp_path / "output" / "logs"
+    assert plan.log_dir.parent.parent == tmp_path / "output" / "logs"
+    assert plan.log_dir.name == "99887766"
+    assert plan.relay_config_file == tmp_path / "storage" / "runs" / "99887766" / "relay-config.json"
+    assert plan.upload_stdout_file == tmp_path / "storage" / "runs" / "99887766" / "upload-worker.stdout.log"

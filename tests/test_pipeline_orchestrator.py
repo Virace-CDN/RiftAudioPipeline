@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 
 import rift_audio_pipeline.pipeline.orchestrator as orchestrator
+from rift_audio_pipeline.control_plane.state_db import bootstrap_state_database
 from rift_audio_pipeline.pipeline.models import EntityArtifacts
 from rift_audio_pipeline.pipeline.models import ManifestPairRef
 from rift_audio_pipeline.pipeline.models import PipelineMode
@@ -19,14 +21,23 @@ from rift_audio_pipeline.pipeline.models import PipelineRunStatus
 def _build_remote_config(tmp_path: Path) -> PipelineRunConfig:
     """构造 remote 测试配置。"""
 
-    return PipelineRunConfig(
+    state_db_path = tmp_path / "runtime" / "state.sqlite3"
+    config = PipelineRunConfig(
         mode=PipelineMode.REMOTE,
         game_region="zh_CN",
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
         baidu_remote_root="/apps/test",
+        run_id="run-test",
+        state_db_path=state_db_path,
     )
+    bootstrap_state_database(
+        database_path=state_db_path,
+        run_id="run-test",
+        remote_database_payload={"entries": []},
+    )
+    return config
 
 
 def test_handle_entity_artifacts_should_pack_audio_directories(
@@ -298,7 +309,7 @@ def test_run_pipeline_should_run_remote_and_upload_archives(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """remote happy path 应串起 remote、打包与上传。"""
+    """remote happy path 应把 archive 写入 SQLite 上传队列并封口。"""
 
     config = _build_remote_config(tmp_path)
     audio_dir = tmp_path / "audios" / "annie"
@@ -346,15 +357,26 @@ def test_run_pipeline_should_run_remote_and_upload_archives(
     monkeypatch.setattr(
         orchestrator, "pack_champion", lambda champion_dir, output_path, **kwargs: archive_path
     )
-    upload_calls: list[tuple[tuple[Path, ...], str]] = []
-    monkeypatch.setattr(
-        orchestrator,
-        "_upload_archives_for_run",
-        lambda config, archives, version: upload_calls.append((archives, version)),
-    )
-
     summary = orchestrator.run_pipeline(config)
     artifacts_payload = json.loads(summary.log_dir.joinpath("artifacts.json").read_text(encoding="utf-8"))
+    with sqlite3.connect(config.state_db_path) as connection:
+        upload_tasks = connection.execute(
+            """
+            SELECT local_path, remote_path, task_type, status
+            FROM upload_tasks
+            WHERE run_id = ?
+            ORDER BY id ASC
+            """,
+            ("run-test",),
+        ).fetchall()
+        run_control = connection.execute(
+            """
+            SELECT task_production_open, pipeline_status, final_summary_path
+            FROM run_control
+            WHERE run_id = ?
+            """,
+            ("run-test",),
+        ).fetchone()
 
     assert summary.status is PipelineRunStatus.SUCCESS
     assert summary.version == "16.5"
@@ -363,7 +385,18 @@ def test_run_pipeline_should_run_remote_and_upload_archives(
     assert artifacts_payload["archive_count"] == 1
     assert artifacts_payload["artifacts"][0]["entity_id"] == 1
     assert summary.processed_targets == 1
-    assert upload_calls == [((archive_path,), "16.5")]
+    assert upload_tasks == [
+        (
+            str(archive_path),
+            "/apps/test/VO/champions/annie.7z",
+            "archive",
+            "queued",
+        )
+    ]
+    assert run_control is not None
+    assert run_control[0] == 0
+    assert run_control[1] == "success"
+    assert run_control[2].endswith("run.json")
     run_payload = json.loads(summary.log_dir.joinpath("run.json").read_text(encoding="utf-8"))
     decision_payload = json.loads(
         summary.log_dir.joinpath("decision.json").read_text(encoding="utf-8")
@@ -413,6 +446,15 @@ def test_run_pipeline_should_skip_remote_execution_when_no_targets_resolved(
     )
 
     summary = orchestrator.run_pipeline(config)
+    with sqlite3.connect(config.state_db_path) as connection:
+        upload_task_count = connection.execute(
+            "SELECT COUNT(*) FROM upload_tasks WHERE run_id = ?",
+            ("run-test",),
+        ).fetchone()
+        run_control = connection.execute(
+            "SELECT task_production_open, pipeline_status FROM run_control WHERE run_id = ?",
+            ("run-test",),
+        ).fetchone()
 
     decision_payload = json.loads(
         summary.log_dir.joinpath("decision.json").read_text(encoding="utf-8")
@@ -420,5 +462,23 @@ def test_run_pipeline_should_skip_remote_execution_when_no_targets_resolved(
     assert summary.status == "success"
     assert summary.processed_targets == 0
     assert remote_calls == []
+    assert upload_task_count == (0,)
+    assert run_control == (0, "success")
     assert decision_payload["remote_execution_skipped"] is True
     assert decision_payload["schema_version"] == 1
+
+
+def test_run_pipeline_should_require_state_db_path(tmp_path: Path) -> None:
+    """当前主路径缺少状态库时应直接失败，而不是回退旧上传实现。"""
+
+    config = PipelineRunConfig(
+        mode=PipelineMode.REMOTE,
+        game_region="zh_CN",
+        output_root=tmp_path / "output",
+        temp_root=tmp_path / "temp",
+        log_root=tmp_path / "output" / "logs",
+        baidu_remote_root="/apps/test",
+    )
+
+    with pytest.raises(ValueError, match="state_db_path"):
+        orchestrator.run_pipeline(config)

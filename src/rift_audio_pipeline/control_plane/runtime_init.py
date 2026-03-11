@@ -14,8 +14,8 @@ from rift_audio_pipeline.baidu.pan import BaiduPanClient
 from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.control_plane.client import ControlPlaneClient
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
-from rift_audio_pipeline.control_plane.simulation import MOCK_BAIDU_ENV_VAR
-from rift_audio_pipeline.control_plane.simulation import SIMULATION_ENV_VAR
+from rift_localdev.simulation import MOCK_BAIDU_ENV_VAR
+from rift_localdev.simulation import SIMULATION_ENV_VAR
 from rift_audio_pipeline.control_plane.state_db import bootstrap_state_database
 
 

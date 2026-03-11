@@ -45,6 +45,7 @@ def patch_pipeline_for_simulation(
 
     artifact_paths = build_simulation_artifact_paths(config.output_root, receipt_dir=receipt_dir)
     with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {SIMULATION_ENV_VAR: "1"}, clear=False))
         stack.enter_context(
             patch.object(
                 orchestrator,
@@ -64,20 +65,6 @@ def patch_pipeline_for_simulation(
                 orchestrator,
                 "pack_champion",
                 _build_fake_pack_champion(),
-            )
-        )
-        stack.enter_context(
-            patch.object(
-                orchestrator,
-                "_upload_archives_for_run",
-                _build_fake_archive_upload(artifact_paths.archive_upload_receipt),
-            )
-        )
-        stack.enter_context(
-            patch.object(
-                orchestrator,
-                "_retry_pending_manifest_sync_queue_if_possible",
-                lambda config, queue_file: None,
             )
         )
         yield artifact_paths
@@ -110,27 +97,20 @@ def patch_pipeline_for_baidu_mock(
     artifact_paths = build_simulation_artifact_paths(config.output_root, receipt_dir=receipt_dir)
     with ExitStack() as stack:
         stack.enter_context(
+            patch.dict(
+                os.environ,
+                {
+                    MOCK_BAIDU_ENV_VAR: "1",
+                    BAIDU_FAILURE_MODE_ENV_VAR: failure_mode,
+                },
+                clear=False,
+            )
+        )
+        stack.enter_context(
             patch.object(
                 orchestrator,
                 "resolve_remote_manifest_pair",
                 _build_fake_resolve_remote_manifest_pair(),
-            )
-        )
-        stack.enter_context(
-            patch.object(
-                orchestrator,
-                "_upload_archives_for_run",
-                _build_fake_archive_upload(
-                    artifact_paths.archive_upload_receipt,
-                    failure_mode=failure_mode,
-                ),
-            )
-        )
-        stack.enter_context(
-            patch.object(
-                orchestrator,
-                "_retry_pending_manifest_sync_queue_if_possible",
-                lambda config, queue_file: None,
             )
         )
         yield artifact_paths
@@ -286,58 +266,6 @@ def _build_fake_resolve_remote_manifest_pair():
         )
 
     return _fake_resolve_remote_manifest_pair
-
-
-def _build_fake_archive_upload(receipt_path: Path, *, failure_mode: str = "none"):
-    """构造本地 fake archive 上传函数。"""
-
-    def _fake_upload_archives_for_run(
-        config: PipelineRunConfig,
-        archives: tuple[Path, ...],
-        version: str,
-    ) -> None:
-        if failure_mode in {"archive", "both"}:
-            raise RuntimeError("本地联调模拟：archive upload failure")
-        _write_json(
-            receipt_path,
-            {
-                "recorded_at": _timestamp_now(),
-                "remote_root": config.baidu_remote_root,
-                "version": version,
-                "archives": [str(path) for path in archives],
-            },
-        )
-
-    return _fake_upload_archives_for_run
-
-
-def _build_fake_log_upload(receipt_path: Path, *, failure_mode: str = "none"):
-    """构造本地 fake 日志上传函数。"""
-
-    def _fake_upload_run_logs(log_ctx: object, config: PipelineRunConfig, client: object) -> None:
-        del client
-        if failure_mode in {"log", "both"}:
-            raise RuntimeError("本地联调模拟：log upload failure")
-        log_dir = getattr(log_ctx, "log_dir")
-        run_id = getattr(log_ctx, "run_id")
-        run_date = getattr(log_ctx, "run_date")
-        if not isinstance(log_dir, Path):
-            raise ValueError("本地联调模拟缺少有效 log_dir。")
-        _write_json(
-            receipt_path,
-            {
-                "recorded_at": _timestamp_now(),
-                "run_id": run_id,
-                "remote_root": f"{config.baidu_remote_root.rstrip('/')}/logs/{run_date}/{run_id}",
-                "files": sorted(
-                    str(path.relative_to(log_dir))
-                    for path in log_dir.rglob("*")
-                    if path.is_file()
-                ),
-            },
-        )
-
-    return _fake_upload_run_logs
 
 
 def _iter_simulated_targets(config: PipelineRunConfig) -> tuple[tuple[str, int], ...]:

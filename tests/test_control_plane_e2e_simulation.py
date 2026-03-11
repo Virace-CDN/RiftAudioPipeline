@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rift_audio_pipeline.control_plane.e2e_simulation import ControlPlaneE2ESimulationConfig
-from rift_audio_pipeline.control_plane.e2e_simulation import run_control_plane_e2e_simulation
+from rift_localdev.plane.e2e_simulation import ControlPlaneE2ESimulationConfig
+from rift_localdev.plane.e2e_simulation import run_control_plane_e2e_simulation
 
 
 def test_run_control_plane_e2e_simulation_should_complete_full_chain(tmp_path: Path) -> None:
