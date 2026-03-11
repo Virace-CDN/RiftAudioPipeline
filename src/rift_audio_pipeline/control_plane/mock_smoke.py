@@ -42,7 +42,6 @@ class MockSmokeResult:
     summary: PipelineRunSummary
     received_root: Path
     archive_upload_receipt: Path
-    log_upload_receipt: Path
 
 
 def run_mock_control_plane_smoke(config: MockSmokeConfig) -> MockSmokeResult:
@@ -83,7 +82,6 @@ def run_mock_control_plane_smoke(config: MockSmokeConfig) -> MockSmokeResult:
         summary=summary,
         received_root=config.storage_root,
         archive_upload_receipt=artifact_paths.archive_upload_receipt,
-        log_upload_receipt=artifact_paths.log_upload_receipt,
     )
 
 
@@ -152,7 +150,6 @@ def main(argv: list[str] | None = None) -> int:
                 "log_dir": str(result.summary.log_dir),
                 "received_root": str(result.received_root),
                 "archive_upload_receipt": str(result.archive_upload_receipt),
-                "log_upload_receipt": str(result.log_upload_receipt),
                 "summary": _summary_to_json(result.summary),
             },
             ensure_ascii=False,

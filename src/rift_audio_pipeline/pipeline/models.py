@@ -57,6 +57,7 @@ class PipelineRunConfig:
         output_root: 主输出根目录。
         temp_root: 临时目录根。
         log_root: 日志目录根。
+        run_id: 本轮运行 ID；为空时按当前时间自动生成。
         baidu_remote_root: 百度网盘远端根目录。
         remote_live_region: remote live 区服，如 `EUW`。
         baidu_app_key: 百度 app key。
@@ -70,6 +71,8 @@ class PipelineRunConfig:
         previous_game_manifest_url: 上一版 GAME manifest URL。
         previous_match_mode: 上一版 manifest pair 匹配模式。
         previous_match_reason: 上一版 manifest pair 匹配原因。
+        relay_socket_path: relay socket 路径。
+        state_db_path: 本地状态库路径。
         control_plane_base_url: 控制面基础 URL。
         control_plane_bearer_token: 控制面 Bearer token。
         control_plane_access_client_id: Access service token client id。
@@ -101,6 +104,7 @@ class PipelineRunConfig:
     temp_root: Path
     log_root: Path
     baidu_remote_root: str
+    run_id: str | None = None
     remote_live_region: str | None = None
     baidu_app_key: str | None = None
     baidu_secret_key: str | None = None
@@ -113,6 +117,8 @@ class PipelineRunConfig:
     previous_game_manifest_url: str | None = None
     previous_match_mode: str | None = None
     previous_match_reason: str | None = None
+    relay_socket_path: Path | None = None
+    state_db_path: Path | None = None
     control_plane_base_url: str | None = None
     control_plane_bearer_token: str | None = None
     control_plane_access_client_id: str | None = None

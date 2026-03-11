@@ -9,7 +9,7 @@ from rift_audio_pipeline.control_plane.client import ControlPlaneClient
 from rift_audio_pipeline.control_plane.mock_server import MockControlPlaneConfig
 from rift_audio_pipeline.control_plane.mock_server import MockControlPlaneServer
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
-from rift_audio_pipeline.control_plane.models import PipelineBootstrapRequest
+from rift_audio_pipeline.control_plane.models import RunBootstrapRequest
 from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
 from rift_audio_pipeline.control_plane.models import RunLogEventRequest
 from rift_audio_pipeline.control_plane.models import RunLogFinalizeRequest
@@ -20,7 +20,7 @@ from rift_audio_pipeline.pipeline.models import PipelineRunStatus
 
 
 def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> None:
-    """mock server 应能通过真实 HTTP 完成 bootstrap、heartbeat、logs 与 report。"""
+    """mock server 应能通过真实 HTTP 完成 bootstrap 启动通知、heartbeat、logs 与 report。"""
 
     fixture_dir = Path(__file__).parent / "fixtures" / "mock_control_plane"
     storage_root = tmp_path / "received"
@@ -45,12 +45,10 @@ def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> Non
             )
         )
 
-        bootstrap = service.get_pipeline_bootstrap(
-            PipelineBootstrapRequest(
-                game_region="zh_CN",
-                mode=PipelineMode.REMOTE,
-                requested_by="pytest",
-                champion_ids=(1, 103),
+        bootstrap = service.notify_pipeline_run_started(
+            RunBootstrapRequest(
+                run_id="run-mock-1",
+                started_at="2026-03-09T09:59:59+08:00",
             )
         )
         heartbeat = service.report_pipeline_run_heartbeat(
@@ -85,29 +83,26 @@ def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> Non
         report = service.report_pipeline_run_result(
             RunReportRequest(
                 run_id="run-mock-1",
-                from_version="16.4",
-                to_version="16.5",
                 status=PipelineRunStatus.SUCCESS,
-                summary={"uploaded_archives": 2, "failed_targets": 0},
-                uploaded_archives=2,
-                baidu_log_path="/apps/rift-audio-pipeline/logs/2026-03-09/run-mock-1",
+                changes=(
+                    {
+                        "remote_path": "/apps/rift-audio-pipeline/VO/champions/demo.7z",
+                        "file_name": "demo.7z",
+                    },
+                ),
+                finished_at="2026-03-09T10:20:00+08:00",
             )
         )
     finally:
         server.close()
 
-    assert bootstrap.current_version == "16.5"
-    assert bootstrap.previous_pair is not None
-    assert bootstrap.previous_pair.version == "16.4"
-    assert bootstrap.baidu_access_grant is not None
-    assert bootstrap.baidu_access_grant.refresh_token == "mock-baidu-refresh-token"
+    assert bootstrap.accepted is True
     assert heartbeat.accepted is True
     assert log_event.accepted is True
     assert log_event.next_expected_seq == 2
     assert log_finalize.accepted is True
     assert log_finalize.worker_status == "success"
     assert report.accepted is True
-    assert report.next_head_version == "16.5"
 
     bootstrap_payload = _read_json(storage_root / "bootstrap_requests" / "0001.json")
     heartbeat_payload = _read_json(storage_root / "runs" / "run-mock-1" / "heartbeats" / "0001.json")
@@ -116,13 +111,12 @@ def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> Non
     report_payload = _read_json(storage_root / "runs" / "run-mock-1" / "report.json")
     run_state_payload = _read_json(storage_root / "runs" / "run-mock-1" / "run_state.json")
 
-    assert bootstrap_payload["payload"]["requested_by"] == "pytest"
-    assert bootstrap_payload["payload"]["champion_ids"] == [1, 103]
+    assert bootstrap_payload["payload"]["run_id"] == "run-mock-1"
     assert heartbeat_payload["payload"]["progress"]["stage"] == "extract"
     assert log_payload["payload"]["event"]["seq"] == 1
     assert log_finalize_payload["payload"]["summary"]["final_status"] == "success"
     assert report_payload["payload"]["status"] == "success"
-    assert report_payload["response"]["next_head_version"] == "16.5"
+    assert report_payload["payload"]["changes"][0]["file_name"] == "demo.7z"
     assert run_state_payload["status"] == "success"
     assert run_state_payload["source"] == "report"
 

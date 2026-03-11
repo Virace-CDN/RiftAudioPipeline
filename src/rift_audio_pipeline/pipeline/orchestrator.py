@@ -12,25 +12,19 @@ import re
 from rift_audio_pipeline.baidu import BaiduCredentials
 from rift_audio_pipeline.baidu import BaiduPanClient
 from rift_audio_pipeline.baidu import resolve_token_store
-from rift_audio_pipeline.control_plane.client import ControlPlaneClient
-from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
-from rift_audio_pipeline.control_plane.models import PipelineBootstrapRequest
-from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
-from rift_audio_pipeline.control_plane.models import RunReportRequest
-from rift_audio_pipeline.control_plane.service import ControlPlaneService
+from rift_audio_pipeline.control_plane.state_db import enqueue_upload_task
+from rift_audio_pipeline.control_plane.state_db import mark_task_production_closed
 from rift_audio_pipeline.packer import pack_champion
 from rift_audio_pipeline.pipeline.local import run_local_pipeline
-from rift_audio_pipeline.pipeline.logging import LogRelayClient
 from rift_audio_pipeline.pipeline.logging import build_log_sink_config
 from rift_audio_pipeline.pipeline.logging import emit_event
-from rift_audio_pipeline.pipeline.logging import enqueue_pending_log_upload
 from rift_audio_pipeline.pipeline.logging import finalize_log_relay_delivery
 from rift_audio_pipeline.pipeline.logging import finalize_run_logging
 from rift_audio_pipeline.pipeline.logging import initialize_run_logging
 from rift_audio_pipeline.pipeline.logging import load_error_snapshot
+from rift_audio_pipeline.pipeline.logging import LogRelayClient
 from rift_audio_pipeline.pipeline.logging import record_error_snapshot
 from rift_audio_pipeline.pipeline.logging import should_enable_log_relay
-from rift_audio_pipeline.pipeline.logging import upload_run_logs
 from rift_audio_pipeline.pipeline.models import EntityArtifacts
 from rift_audio_pipeline.pipeline.models import ManifestPairRef
 from rift_audio_pipeline.pipeline.models import PipelineArtifactRecord
@@ -67,22 +61,18 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
 
     log_ctx = initialize_run_logging(config)
     runtime_config = config
-    bootstrapped_pair: ManifestPairRef | None = None
     resolved_version: str | None = None
     uploaded_archives = 0
-    pending_log_upload_entries = 0
     manifest_queue_file = config.output_root / "state" / "pending_manifest_sync_queue.json"
     decision_payload: PipelineDecisionSnapshot | None = None
     active_stage = PipelineStage.INIT
     summary: PipelineRunSummary | None = None
 
     try:
-        runtime_config, bootstrapped_pair = _bootstrap_control_plane(config=config)
-        log_relay_client = _build_log_relay_client(runtime_config, log_ctx)
-        if log_relay_client is not None:
-            log_ctx.log_delivery_sink = log_relay_client
-            log_relay_client.start()
-
+        relay_client = _build_log_relay_client(runtime_config, log_ctx)
+        if relay_client is not None:
+            log_ctx.log_delivery_sink = relay_client
+            relay_client.start()
         emit_event(
             log_ctx,
             PipelineEvent(
@@ -95,13 +85,6 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
                 status_hint="running",
                 operation="run_pipeline",
             ),
-        )
-        _report_control_plane_heartbeat(
-            config=runtime_config,
-            run_id=log_ctx.run_id,
-            status="running",
-            stage=PipelineStage.INIT,
-            summary=None,
         )
 
         active_stage = PipelineStage.LOAD_REMOTE_INDEX
@@ -116,7 +99,6 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             active_stage = PipelineStage.RESOLVE_MANIFEST_PAIR
             pair = (
                 _resolve_current_manifest_pair(runtime_config)
-                or bootstrapped_pair
                 or resolve_remote_manifest_pair(runtime_config)
             )
             resolved_version = pair.version
@@ -191,8 +173,9 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
 
         if all_archives and resolved_version is not None:
             active_stage = PipelineStage.UPLOAD
-            _upload_archives_for_run(
+            _enqueue_archive_upload_tasks_for_run(
                 config=runtime_config,
+                run_id=log_ctx.run_id,
                 archives=tuple(all_archives),
                 version=resolved_version,
             )
@@ -225,13 +208,6 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
                 archives=tuple(all_archives),
             ),
         )
-        _report_control_plane_heartbeat(
-            config=runtime_config,
-            run_id=log_ctx.run_id,
-            status="success",
-            stage=PipelineStage.FINALIZE,
-            summary=summary,
-        )
     except Exception as error:  # noqa: BLE001
         record_error_snapshot(
             log_ctx,
@@ -257,44 +233,10 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             log_dir=log_ctx.log_dir,
         )
         finalize_run_logging(log_ctx, summary, decision_payload=decision_payload)
-        _report_control_plane_heartbeat(
-            config=runtime_config,
-            run_id=log_ctx.run_id,
-            status="failed",
-            stage=active_stage,
-            summary=summary,
-        )
 
     if summary is None:
         raise RuntimeError("pipeline 结束时未生成运行摘要。")
-
-    if _has_baidu_credentials(runtime_config):
-        try:
-            client = _create_baidu_client(config=runtime_config)
-            try:
-                upload_run_logs(log_ctx, runtime_config, client)
-            finally:
-                client.close()
-        except Exception as error:  # noqa: BLE001
-            enqueue_pending_log_upload(runtime_config, log_ctx.log_dir, error_message=str(error))
-            pending_log_upload_entries = _count_json_list_entries(
-                runtime_config.output_root / "state" / "pending_log_upload_queue.json"
-            )
-            summary = PipelineRunSummary(
-                run_id=summary.run_id,
-                mode=summary.mode,
-                version=summary.version,
-                status=summary.status,
-                processed_targets=summary.processed_targets,
-                succeeded_targets=summary.succeeded_targets,
-                failed_targets=summary.failed_targets,
-                uploaded_archives=summary.uploaded_archives,
-                pending_manifest_sync_entries=summary.pending_manifest_sync_entries,
-                pending_log_upload_entries=pending_log_upload_entries,
-                log_dir=summary.log_dir,
-            )
-            finalize_run_logging(log_ctx, summary)
-
+    _close_upload_task_production(config=runtime_config, summary=summary)
     finalize_log_relay_delivery(
         log_ctx,
         _build_terminal_log_summary(
@@ -303,16 +245,9 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             final_stage=PipelineStage.FINALIZE
             if summary.status is not PipelineRunStatus.FAILED
             else active_stage,
-            raw_log_remote_path=_build_baidu_log_remote_path(config=runtime_config, log_ctx=log_ctx),
             error_brief=load_error_snapshot(log_ctx),
         ),
-    )
-    _report_control_plane_run_result(
-        config=runtime_config,
-        summary=summary,
-        from_version=runtime_config.previous_version,
-        to_version=summary.version,
-        baidu_log_path=_build_baidu_log_remote_path(config=runtime_config, log_ctx=log_ctx),
+        shutdown=False,
     )
     return summary
 
@@ -613,33 +548,22 @@ def build_resolved_wad_diff_report(
         )
 
 
-def _build_control_service(config: PipelineRunConfig) -> ControlPlaneService | None:
-    """按需构造控制面服务。"""
+def resolve_remote_manifest_pair(config: PipelineRunConfig) -> ManifestPairRef:
+    """薄封装 remote manifest pair 解析，便于测试 monkeypatch。"""
 
-    if not config.control_plane_base_url:
-        return None
-    client = ControlPlaneClient(
-        ControlPlaneConfig(
-            base_url=config.control_plane_base_url,
-            bearer_token=config.control_plane_bearer_token,
-            access_client_id=config.control_plane_access_client_id,
-            access_client_secret=config.control_plane_access_client_secret,
-            timeout_seconds=config.control_plane_timeout_seconds,
-        )
-    )
-    return ControlPlaneService(client)
+    from rift_audio_pipeline.pipeline.remote import resolve_remote_manifest_pair as _resolve
+
+    return _resolve(config)
 
 
 def _build_log_relay_client(
     config: PipelineRunConfig,
     log_ctx: object,
 ) -> LogRelayClient | None:
-    """构造运行期 relay 客户端。"""
+    """构造运行期 relay socket 客户端。"""
 
     required_fields = (
         "log_relay_state_file",
-        "relay_config_file",
-        "relay_stdout_file",
         "relay_socket_file",
     )
     if not all(hasattr(log_ctx, field_name) for field_name in required_fields):
@@ -649,23 +573,17 @@ def _build_log_relay_client(
         return None
     run_id = getattr(log_ctx, "run_id", None)
     relay_state_file = getattr(log_ctx, "log_relay_state_file", None)
-    relay_config_file = getattr(log_ctx, "relay_config_file", None)
-    relay_stdout_file = getattr(log_ctx, "relay_stdout_file", None)
     relay_socket_file = getattr(log_ctx, "relay_socket_file", None)
-    if not all(
-        isinstance(item, Path)
-        for item in (relay_state_file, relay_config_file, relay_stdout_file, relay_socket_file)
-    ):
-        return None
     if not isinstance(run_id, str):
+        return None
+    if not isinstance(relay_state_file, Path) or not isinstance(relay_socket_file, Path):
         return None
     return LogRelayClient(
         run_id=run_id,
         relay_state_file=relay_state_file,
-        relay_config_file=relay_config_file,
-        relay_stdout_file=relay_stdout_file,
         relay_socket_file=relay_socket_file,
         config=sink_config,
+        spawn_process=False,
     )
 
 
@@ -674,10 +592,9 @@ def _build_terminal_log_summary(
     log_ctx: object,
     summary: PipelineRunSummary,
     final_stage: PipelineStage,
-    raw_log_remote_path: str | None,
     error_brief: dict[str, object] | None,
 ) -> PipelineLogTerminalSummary:
-    """构造运行终态日志摘要。"""
+    """构造 relay 终态摘要。"""
 
     run_id = getattr(log_ctx, "run_id")
     last_seq = getattr(log_ctx, "last_event_seq", 0)
@@ -694,163 +611,10 @@ def _build_terminal_log_summary(
         uploaded_archives=summary.uploaded_archives,
         raw_log_bundle_ready=True,
         raw_log_local_dir=str(log_dir),
-        raw_log_remote_path=raw_log_remote_path,
-        summary=_serialize_summary_payload(summary),
+        raw_log_remote_path=None,
+        summary={"status": summary.status.value},
         error_brief=error_brief,
     )
-
-
-def _serialize_summary_payload(summary: PipelineRunSummary) -> dict[str, object]:
-    """把 `PipelineRunSummary` 转为稳定字典。"""
-
-    return {
-        "schema_version": summary.schema_version,
-        "mode": summary.mode.value,
-        "version": summary.version,
-        "status": summary.status.value,
-        "processed_targets": summary.processed_targets,
-        "succeeded_targets": summary.succeeded_targets,
-        "failed_targets": summary.failed_targets,
-        "uploaded_archives": summary.uploaded_archives,
-        "pending_manifest_sync_entries": summary.pending_manifest_sync_entries,
-        "pending_log_upload_entries": summary.pending_log_upload_entries,
-        "log_dir": str(summary.log_dir),
-    }
-
-
-def _bootstrap_control_plane(
-    config: PipelineRunConfig,
-) -> tuple[PipelineRunConfig, ManifestPairRef | None]:
-    """从控制面 bootstrap 回填运行配置，并返回当前 pair。"""
-
-    service = _build_control_service(config)
-    if service is None:
-        return config, None
-
-    response = service.get_pipeline_bootstrap(
-        PipelineBootstrapRequest(
-            game_region=config.game_region,
-            mode=config.mode,
-            requested_by=config.control_plane_requested_by,
-            champion_ids=config.champion_ids,
-            map_ids=config.map_ids,
-        )
-    )
-    previous_pair = response.previous_pair
-    grant = response.baidu_access_grant
-    runtime_config = replace(
-        config,
-        baidu_app_key=grant.app_key if grant and grant.app_key else config.baidu_app_key,
-        baidu_secret_key=grant.secret_key if grant and grant.secret_key else config.baidu_secret_key,
-        baidu_refresh_token=grant.refresh_token if grant and grant.refresh_token else config.baidu_refresh_token,
-        previous_version=response.previous_version or config.previous_version,
-        previous_lcu_manifest_url=(
-            previous_pair.lcu_manifest_url if previous_pair is not None else config.previous_lcu_manifest_url
-        ),
-        previous_game_manifest_url=(
-            previous_pair.game_manifest_url
-            if previous_pair is not None
-            else config.previous_game_manifest_url
-        ),
-        previous_match_mode=(
-            previous_pair.match_mode if previous_pair is not None else config.previous_match_mode
-        ),
-        previous_match_reason=(
-            previous_pair.match_reason if previous_pair is not None else config.previous_match_reason
-        ),
-    )
-    current_pair = ManifestPairRef(
-        version=response.current_pair.version,
-        lcu_manifest_url=response.current_pair.lcu_manifest_url,
-        game_manifest_url=response.current_pair.game_manifest_url,
-        match_mode=response.current_pair.match_mode or "worker_bootstrap",
-        match_reason=response.current_pair.match_reason or "worker_bootstrap",
-    )
-    return runtime_config, current_pair
-
-
-def _report_control_plane_heartbeat(
-    config: PipelineRunConfig,
-    *,
-    run_id: str,
-    status: str,
-    stage: PipelineStage,
-    summary: PipelineRunSummary | None,
-) -> None:
-    """向控制面上报心跳；未配置控制面时静默跳过。"""
-
-    if should_enable_log_relay(config):
-        return
-    service = _build_control_service(config)
-    if service is None:
-        return
-    progress: dict[str, object] = {"stage": stage.value}
-    if summary is not None:
-        progress.update(
-            {
-                "uploaded_archives": summary.uploaded_archives,
-                "processed_targets": summary.processed_targets,
-                "succeeded_targets": summary.succeeded_targets,
-                "failed_targets": summary.failed_targets,
-            }
-        )
-    service.report_pipeline_run_heartbeat(
-        RunHeartbeatRequest(
-            run_id=run_id,
-            status=status,
-            last_log_at=datetime.now().astimezone().isoformat(),
-            progress=progress,
-        )
-    )
-
-
-def _report_control_plane_run_result(
-    config: PipelineRunConfig,
-    *,
-    summary: PipelineRunSummary,
-    from_version: str | None,
-    to_version: str | None,
-    baidu_log_path: str | None,
-) -> None:
-    """向控制面上报最终结果；未配置控制面时静默跳过。"""
-
-    service = _build_control_service(config)
-    if service is None or to_version is None:
-        return
-    service.report_pipeline_run_result(
-        RunReportRequest(
-            run_id=summary.run_id,
-            from_version=from_version,
-            to_version=to_version,
-            status=summary.status,
-            summary=_serialize_summary_payload(summary),
-            uploaded_archives=summary.uploaded_archives,
-            baidu_log_path=baidu_log_path,
-        )
-    )
-
-
-def _build_baidu_log_remote_path(
-    config: PipelineRunConfig,
-    log_ctx: object,
-) -> str | None:
-    """构造运行日志目录的百度远端根路径。"""
-
-    if not _has_baidu_credentials(config):
-        return None
-    run_date = getattr(log_ctx, "run_date", None)
-    run_id = getattr(log_ctx, "run_id", None)
-    if not isinstance(run_date, str) or not isinstance(run_id, str):
-        return None
-    return f"{config.baidu_remote_root.rstrip('/')}/logs/{run_date}/{run_id}"
-
-
-def resolve_remote_manifest_pair(config: PipelineRunConfig) -> ManifestPairRef:
-    """薄封装 remote manifest pair 解析，便于测试 monkeypatch。"""
-
-    from rift_audio_pipeline.pipeline.remote import resolve_remote_manifest_pair as _resolve
-
-    return _resolve(config)
 
 
 def _upload_archives_for_run(
@@ -874,6 +638,66 @@ def _upload_archives_for_run(
         pending_manifest_sync_queue_file=config.output_root
         / "state"
         / "pending_manifest_sync_queue.json",
+    )
+
+
+def _enqueue_archive_upload_tasks_for_run(
+    config: PipelineRunConfig,
+    *,
+    run_id: str,
+    archives: tuple[Path, ...],
+    version: str,
+) -> None:
+    """将 archive 上传任务写入本地状态库。"""
+
+    if config.state_db_path is None:
+        _upload_archives_for_run(config=config, archives=archives, version=version)
+        return
+    upload_config = UploadConfig(
+        output_path=config.output_root,
+        baidu_pan_remote_dir=config.baidu_remote_root,
+        baidu_pan_app_key=config.baidu_app_key,
+        baidu_pan_secret_key=config.baidu_secret_key,
+        baidu_pan_refresh_token=config.baidu_refresh_token,
+    )
+    default_resource_type = upload_module._resolve_default_upload_resource_type(config=upload_config)
+    for archive in archives:
+        layout = upload_module._build_archive_upload_layout(
+            archive=archive,
+            remote_dir=config.baidu_remote_root,
+            default_resource_type=default_resource_type,
+        )
+        enqueue_upload_task(
+            database_path=config.state_db_path,
+            run_id=run_id,
+            local_path=str(archive),
+            remote_path=layout.remote_path,
+            task_type="archive",
+            payload={
+                "remote_relative_path": layout.remote_relative_path,
+                "remote_name": layout.remote_name,
+                "target_group": layout.target_group,
+                "resource_type": layout.resource_type,
+                "entity_key": layout.entity_key,
+                "game_version": version,
+            },
+        )
+
+
+def _close_upload_task_production(
+    *,
+    config: PipelineRunConfig,
+    summary: PipelineRunSummary,
+) -> None:
+    """标记本轮不会再新增上传任务。"""
+
+    if config.state_db_path is None:
+        return
+    mark_task_production_closed(
+        database_path=config.state_db_path,
+        run_id=summary.run_id,
+        pipeline_status=summary.status.value,
+        final_summary_path=str(summary.log_dir / "run.json"),
     )
 
 

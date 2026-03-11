@@ -15,9 +15,11 @@ class ControlPlaneCaptureServer:
     """记录 control plane 请求的本地 HTTP server。"""
 
     bootstrap_payload: dict[str, object]
+    baidu_token_payload: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         self.bootstrap_requests: list[dict[str, object]] = []
+        self.baidu_token_requests: list[dict[str, object]] = []
         self.heartbeats: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
         self.events: list[dict[str, object]] = []
@@ -49,11 +51,34 @@ class ControlPlaneCaptureServer:
         outer = self
 
         class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path == "/api/baidu/token":
+                    outer.baidu_token_requests.append({})
+                    _write_json_response(
+                        self,
+                        outer.baidu_token_payload
+                        or {
+                            "app_key": "mock-app-key",
+                            "secret_key": "mock-secret-key",
+                            "refresh_token": "mock-refresh-token",
+                        },
+                    )
+                    return
+                _write_json_response(self, {"error": f"unexpected path: {self.path}"}, status=404)
+
             def do_POST(self) -> None:  # noqa: N802
                 payload = _read_request_json(self)
                 if self.path == "/api/pipeline/bootstrap":
                     outer.bootstrap_requests.append(payload)
-                    _write_json_response(self, outer.bootstrap_payload)
+                    response_payload = (
+                        outer.bootstrap_payload
+                        if isinstance(outer.bootstrap_payload.get("accepted"), bool)
+                        else {
+                            "accepted": True,
+                            "persisted_at": "2026-03-11T12:00:00+08:00",
+                        }
+                    )
+                    _write_json_response(self, response_payload)
                     return
                 if self.path.endswith("/heartbeat"):
                     outer.heartbeats.append(payload)
@@ -69,7 +94,6 @@ class ControlPlaneCaptureServer:
                         {
                             "accepted": True,
                             "persisted_at": "2026-03-11T12:00:00+08:00",
-                            "next_head_version": payload.get("to_version"),
                         },
                     )
                     return

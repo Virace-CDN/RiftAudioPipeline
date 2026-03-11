@@ -27,7 +27,7 @@ from rift_audio_pipeline.control_plane.faker_github import parse_dispatch_payloa
 
 
 def test_build_pipeline_command_should_map_dispatch_inputs() -> None:
-    """应把 workflow inputs 正确翻译为 pipeline CLI 参数。"""
+    """应把 workflow inputs 正确翻译为独立 job runner 参数。"""
 
     config = FakerGitHubConfig(
         storage_root=Path("temp/test-faker-github"),
@@ -65,36 +65,25 @@ def test_build_pipeline_command_should_map_dispatch_inputs() -> None:
                 metadata=DispatchMetadataInputs(requested_by="plane-scheduler"),
             ),
         ),
+        dispatch_inputs_file=Path("temp/test-faker-github/dispatch-payload.json"),
     )
 
-    assert command[:3] == [str(config.python_executable), "-m", "rift_audio_pipeline.pipeline.cli"]
-    assert "--game-region" in command
+    assert command[:3] == [
+        str(config.python_executable),
+        "-m",
+        "rift_audio_pipeline.control_plane.job_runner",
+    ]
+    assert "--dispatch-inputs-file" in command
+    assert "temp/test-faker-github/dispatch-payload.json" in command
+    assert "--default-game-region" in command
     assert "euw" in command
     assert "--control-plane-base-url" in command
     assert "http://localhost:5173" in command
-    assert "--champion-ids" in command
-    assert "1,103" in command
-    assert "--map-ids" in command
-    assert "11,12" in command
-    assert "--force-update" in command
-    assert "--run-update" in command
-    assert "--run-extract" in command
-    assert "--run-mapping" in command
-    assert "--current-version" in command
-    assert "16.5" in command
-    assert "--current-lcu-manifest-url" in command
-    assert "https://lcu.example/16.5" in command
-    assert "--current-game-manifest-url" in command
-    assert "https://game.example/16.5" in command
-    assert "--previous-version" in command
-    assert "16.4" in command
-    assert "--max-workers" in command
-    assert "8" in command
-    assert "--download-retry-attempts" in command
-    assert "5" in command
-    assert "--entity-retry-attempts" in command
-    assert "2" in command
-    assert "--log-level" in command
+    assert "--default-mode" in command
+    assert "remote" in command
+    assert "--default-requested-by" in command
+    assert "plane-scheduler" in command
+    assert "--default-log-level" in command
     assert "DEBUG" in command
 
 
@@ -173,12 +162,19 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
         assert launched["log_path"] == Path(receipt["log_path"])
         launched_command = launched["command"]
         assert isinstance(launched_command, list)
-        assert "--champion-ids" in launched_command
-        assert "266,103" in launched_command
-        assert "--current-version" in launched_command
-        assert "16.5" in launched_command
-        assert "--run-extract" in launched_command
-        assert "--no-run-mapping" in launched_command
+        assert launched_command[:3] == [
+            launched_command[0],
+            "-m",
+            "rift_audio_pipeline.control_plane.job_runner",
+        ]
+        assert "--dispatch-inputs-file" in launched_command
+        dispatch_inputs_path = Path(
+            launched_command[launched_command.index("--dispatch-inputs-file") + 1]
+        )
+        assert dispatch_inputs_path.exists()
+        dispatch_inputs_payload = json.loads(dispatch_inputs_path.read_text(encoding="utf-8"))
+        assert dispatch_inputs_payload["targets"]["champions"]["ids"] == [266, 103]
+        assert dispatch_inputs_payload["manifests"]["current"]["version"] == "16.5"
     finally:
         server.close()
 
@@ -233,7 +229,11 @@ def test_faker_github_server_dry_run_should_not_launch_process(tmp_path: Path) -
         assert receipt["dry_run"] is True
         assert receipt["pid"] is None
         assert receipt["log_path"] is None
-        assert "--no-force-update" in receipt["command"]
+        dispatch_inputs_path = Path(
+            receipt["command"][receipt["command"].index("--dispatch-inputs-file") + 1]
+        )
+        dispatch_inputs_payload = json.loads(dispatch_inputs_path.read_text(encoding="utf-8"))
+        assert dispatch_inputs_payload["execution"]["force_update"] is False
     finally:
         server.close()
 
@@ -380,6 +380,7 @@ def test_build_pipeline_command_should_reject_unsupported_stage() -> None:
                     request=DispatchRequestInputs(mode="remote", stage="upload"),
                 ),
             ),
+            dispatch_inputs_file=Path("temp/test-faker-github/dispatch-payload.json"),
         )
 
 

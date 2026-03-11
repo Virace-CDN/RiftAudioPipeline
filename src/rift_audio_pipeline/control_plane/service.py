@@ -8,8 +8,8 @@ from rift_audio_pipeline.control_plane.client import ControlPlaneClient
 from rift_audio_pipeline.control_plane.errors import ControlPlaneResponseValidationError
 from rift_audio_pipeline.control_plane.models import BaiduAccessGrant
 from rift_audio_pipeline.control_plane.models import ControlPlaneManifestPair
-from rift_audio_pipeline.control_plane.models import PipelineBootstrapRequest
-from rift_audio_pipeline.control_plane.models import PipelineBootstrapResponse
+from rift_audio_pipeline.control_plane.models import RunBootstrapRequest
+from rift_audio_pipeline.control_plane.models import RunBootstrapResponse
 from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
 from rift_audio_pipeline.control_plane.models import RunHeartbeatResponse
 from rift_audio_pipeline.control_plane.models import RunLogEventRequest
@@ -26,38 +26,25 @@ class ControlPlaneService:
     def __init__(self, client: ControlPlaneClient) -> None:
         self._client = client
 
-    def get_pipeline_bootstrap(
+    def notify_pipeline_run_started(
         self,
-        request: PipelineBootstrapRequest,
-    ) -> PipelineBootstrapResponse:
-        """请求 Worker 返回 pipeline 启动参数。"""
+        request: RunBootstrapRequest,
+    ) -> RunBootstrapResponse:
+        """向 Worker 发送任务启动通知。"""
 
         response_payload = self._client.request_json(
             "POST",
             "/api/pipeline/bootstrap",
             payload=_serialize_payload(asdict(request)),
         )
-        current_version = _require_str(response_payload, "current_version")
-        current_pair_payload = _require_dict(response_payload, "current_pair")
-        previous_pair_payload = _optional_dict(response_payload, "previous_pair")
-        baidu_access_payload = _optional_dict(response_payload, "baidu_access_grant")
-        return PipelineBootstrapResponse(
-            current_version=current_version,
-            previous_version=_optional_str(response_payload, "previous_version"),
-            current_pair=_parse_manifest_pair(current_pair_payload),
-            previous_pair=(
-                _parse_manifest_pair(previous_pair_payload)
-                if previous_pair_payload is not None
-                else None
-            ),
-            manifest_snapshot_url=_optional_str(response_payload, "manifest_snapshot_url"),
-            manifest_snapshot_key=_optional_str(response_payload, "manifest_snapshot_key"),
-            decision_source=_optional_str(response_payload, "decision_source"),
-            baidu_access_grant=(
-                _parse_baidu_access_grant(baidu_access_payload)
-                if baidu_access_payload is not None
-                else None
-            ),
+        accepted = response_payload.get("accepted")
+        if not isinstance(accepted, bool):
+            raise ControlPlaneResponseValidationError(
+                "control plane bootstrap 响应缺少 accepted 布尔值。"
+            )
+        return RunBootstrapResponse(
+            accepted=accepted,
+            persisted_at=_optional_str(response_payload, "persisted_at"),
         )
 
     def report_pipeline_run_result(self, request: RunReportRequest) -> RunReportResponse:

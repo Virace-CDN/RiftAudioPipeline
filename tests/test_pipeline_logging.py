@@ -20,7 +20,9 @@ from rift_audio_pipeline.pipeline.logging import LogRelayClient
 from rift_audio_pipeline.pipeline.logging import RelaySpoolPump
 from rift_audio_pipeline.pipeline.logging import LogSinkConfig
 from rift_audio_pipeline.pipeline.logging import record_error_snapshot
+from rift_audio_pipeline.pipeline.logging import spawn_log_relay_process
 from rift_audio_pipeline.pipeline.logging import upload_run_logs
+from rift_audio_pipeline.pipeline.logging import write_log_relay_config
 from rift_audio_pipeline.pipeline.models import PipelineEvent
 from rift_audio_pipeline.pipeline.models import PipelineLogTerminalSummary
 from rift_audio_pipeline.pipeline.models import PipelineMode
@@ -293,8 +295,6 @@ def test_log_relay_client_should_forward_events_and_terminal_summary(tmp_path: P
         relay = LogRelayClient(
             run_id=log_ctx.run_id,
             relay_state_file=log_ctx.log_relay_state_file,
-            relay_config_file=log_ctx.relay_config_file,
-            relay_stdout_file=log_ctx.relay_stdout_file,
             relay_socket_file=log_ctx.relay_socket_file,
             config=LogSinkConfig(
                 enabled=True,
@@ -304,6 +304,8 @@ def test_log_relay_client_should_forward_events_and_terminal_summary(tmp_path: P
                 retry_backoff_ms=(10,),
                 timeout_seconds=1.0,
             ),
+            relay_config_file=log_ctx.relay_config_file,
+            relay_stdout_file=log_ctx.relay_stdout_file,
         )
         log_ctx.log_delivery_sink = relay
         relay.start()
@@ -358,8 +360,99 @@ def test_log_relay_client_should_forward_events_and_terminal_summary(tmp_path: P
         server.close()
 
 
-def test_build_log_sink_config_should_disable_relay_for_local_mode(tmp_path: Path) -> None:
-    """LOCAL 模式即使给了 control plane URL，也不应启用 relay。"""
+def test_log_relay_client_should_connect_to_external_relay_process(tmp_path: Path) -> None:
+    """主线应支持只连接外部已启动 relay，而不是自行拉起 relay。"""
+
+    server = ControlPlaneCaptureServer(
+        bootstrap_payload={
+            "current_version": "16.5",
+            "current_pair": {
+                "version": "16.5",
+                "lcu_manifest_url": "https://lcu.example/16.5",
+                "game_manifest_url": "https://game.example/16.5",
+            },
+        }
+    )
+    server.start()
+    relay_process = None
+    relay_stdout_handle = None
+    try:
+        config = _build_config(tmp_path)
+        config = replace(config, relay_socket_path=tmp_path / "relay.sock")
+        log_ctx = initialize_run_logging(config)
+        sink_config = LogSinkConfig(
+            enabled=True,
+            control_plane_base_url=server.base_url,
+            spool_dir=log_ctx.spool_dir,
+            flush_interval_ms=10,
+            retry_backoff_ms=(10,),
+            timeout_seconds=1.0,
+        )
+        write_log_relay_config(
+            relay_config_file=log_ctx.relay_config_file,
+            run_id=log_ctx.run_id,
+            relay_state_file=log_ctx.log_relay_state_file,
+            relay_socket_file=log_ctx.relay_socket_file,
+            config=sink_config,
+        )
+        relay_process, relay_stdout_handle = spawn_log_relay_process(
+            relay_config_file=log_ctx.relay_config_file,
+            relay_stdout_file=log_ctx.relay_stdout_file,
+        )
+        relay = LogRelayClient(
+            run_id=log_ctx.run_id,
+            relay_state_file=log_ctx.log_relay_state_file,
+            relay_socket_file=log_ctx.relay_socket_file,
+            config=sink_config,
+            spawn_process=False,
+        )
+        log_ctx.log_delivery_sink = relay
+        relay.start()
+
+        emit_event(
+            log_ctx,
+            PipelineEvent(
+                run_id=log_ctx.run_id,
+                stage=PipelineStage.INIT,
+                event_type="run_started",
+                message="开始运行",
+                payload={},
+                created_at="2026-03-08T12:00:00+08:00",
+            ),
+        )
+        finalize_log_relay_delivery(
+            log_ctx,
+            PipelineLogTerminalSummary(
+                run_id=log_ctx.run_id,
+                finished_at="2026-03-08T12:00:02+08:00",
+                final_status="success",
+                final_stage="finalize",
+                last_seq=log_ctx.last_event_seq,
+                processed_targets=1,
+                succeeded_targets=1,
+                failed_targets=0,
+                uploaded_archives=0,
+                raw_log_bundle_ready=True,
+                raw_log_local_dir=str(log_ctx.log_dir),
+                raw_log_remote_path=None,
+                summary={"status": "success"},
+            ),
+        )
+        relay_process.wait(timeout=5.0)
+
+        assert [payload["event"]["seq"] for payload in server.events] == [1]
+        assert server.terminal_summaries[0]["summary"]["final_status"] == "success"
+    finally:
+        if relay_process is not None and relay_process.poll() is None:
+            relay_process.kill()
+            relay_process.wait(timeout=3.0)
+        if relay_stdout_handle is not None:
+            relay_stdout_handle.close()
+        server.close()
+
+
+def test_build_log_sink_config_should_disable_relay_without_socket_path(tmp_path: Path) -> None:
+    """未提供 relay socket 时不应启用 relay。"""
 
     config = PipelineRunConfig(
         mode=PipelineMode.LOCAL,
@@ -368,7 +461,6 @@ def test_build_log_sink_config_should_disable_relay_for_local_mode(tmp_path: Pat
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
         baidu_remote_root="/apps/test",
-        control_plane_base_url="http://127.0.0.1:8788",
     )
     log_ctx = initialize_run_logging(config)
 
@@ -377,19 +469,15 @@ def test_build_log_sink_config_should_disable_relay_for_local_mode(tmp_path: Pat
     assert sink_config.enabled is False
 
 
-def test_build_log_sink_config_should_disable_relay_on_windows(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Windows 直接执行时应完全依赖本地 RAW，不启用 relay。"""
+def test_build_log_sink_config_should_enable_relay_with_socket_path(tmp_path: Path) -> None:
+    """提供 relay socket 时应启用 relay。"""
 
-    config = replace(_build_config(tmp_path), control_plane_base_url="http://127.0.0.1:8788")
+    config = replace(_build_config(tmp_path), relay_socket_path=tmp_path / "relay.sock")
     log_ctx = initialize_run_logging(config)
-    monkeypatch.setattr(pipeline_logging.sys, "platform", "win32")
 
     sink_config = build_log_sink_config(config, log_ctx)
 
-    assert sink_config.enabled is False
+    assert sink_config.enabled is True
 
 
 def test_enqueue_pending_log_upload_should_append_queue_entry(tmp_path: Path) -> None:

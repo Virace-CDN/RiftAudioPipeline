@@ -12,6 +12,8 @@ import time
 
 from rift_audio_pipeline.control_plane.client import ControlPlaneClient
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
+from rift_audio_pipeline.control_plane.models import RunBootstrapRequest
+from rift_audio_pipeline.control_plane.models import RunReportRequest
 from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
 from rift_audio_pipeline.control_plane.models import RunLogEventRequest
 from rift_audio_pipeline.control_plane.models import RunLogFinalizeRequest
@@ -151,6 +153,15 @@ class _LogRelayRuntime:
             self._main_started = True
             self._status_reason = None
             self._last_log_at = _optional_str(payload, "started_at") or _current_timestamp()
+            try:
+                self._service.notify_pipeline_run_started(
+                    RunBootstrapRequest(
+                        run_id=self._run_id,
+                        started_at=self._last_log_at,
+                    )
+                )
+            except Exception:
+                return {"accepted": True, "type": envelope_type}
             self._send_heartbeat(status="running")
             return {"accepted": True, "type": envelope_type}
         if envelope_type == "event":
@@ -165,6 +176,16 @@ class _LogRelayRuntime:
                 self._last_stage = final_stage
             self._pump.set_terminal_summary(normalized_summary)
             self._send_heartbeat(status=str(normalized_summary["final_status"]))
+            return {"accepted": True, "type": envelope_type}
+        if envelope_type == "report":
+            self._service.report_pipeline_run_result(
+                RunReportRequest(
+                    run_id=self._run_id,
+                    status=PipelineRunStatus(_require_str(payload, "status")),
+                    changes=tuple(_require_list_of_dicts(payload, "changes")),
+                    finished_at=_optional_str(payload, "finished_at"),
+                )
+            )
             return {"accepted": True, "type": envelope_type}
         if envelope_type == "shutdown":
             self._finalize_if_missing(
@@ -522,6 +543,20 @@ def _require_dict(payload: dict[str, object], key: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"relay envelope 字段必须是对象：{key}")
     return value
+
+
+def _require_list_of_dicts(payload: dict[str, object], key: str) -> list[dict[str, object]]:
+    value = payload.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{key} 必须是对象数组。")
+    results: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError(f"{key} 必须是对象数组。")
+        results.append(item)
+    return results
 
 
 def _optional_int(payload: dict[str, object], key: str, *, default: int) -> int:

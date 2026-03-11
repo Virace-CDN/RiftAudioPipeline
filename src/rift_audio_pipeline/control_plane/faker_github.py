@@ -587,8 +587,10 @@ def parse_dispatch_payload(raw_payload: dict[str, Any]) -> DispatchPayload:
 def build_pipeline_command(
     config: FakerGitHubConfig,
     payload: DispatchPayload,
+    *,
+    dispatch_inputs_file: Path,
 ) -> list[str]:
-    """把 workflow_dispatch 参数翻译成 pipeline CLI 命令。
+    """把 workflow_dispatch 参数翻译成独立 job runner 命令。
 
     Args:
         config: faker-github 服务配置。
@@ -602,36 +604,42 @@ def build_pipeline_command(
     """
 
     inputs = payload.inputs
-    mode = inputs.request.mode or config.default_mode
-    game_region = inputs.game.region or config.default_game_region
-    requested_by = inputs.metadata.requested_by or config.default_requested_by
+    _append_stage_flags([], stage=inputs.request.stage)
     command = [
         str(config.python_executable),
         "-m",
-        "rift_audio_pipeline.pipeline.cli",
-        "--mode",
-        _coerce_string(mode, field_name="mode"),
-        "--game-region",
-        _coerce_string(game_region, field_name="game_region"),
+        "rift_audio_pipeline.control_plane.job_runner",
+        "--ref",
+        payload.ref,
+        "--dispatch-inputs-file",
+        str(dispatch_inputs_file),
+        "--storage-root",
+        str(config.storage_root),
         "--output-root",
         str(config.output_root),
         "--temp-root",
         str(config.temp_root),
         "--baidu-remote-root",
         config.baidu_remote_root,
+        "--default-mode",
+        _coerce_string(inputs.request.mode or config.default_mode, field_name="mode"),
+        "--default-game-region",
+        _coerce_string(inputs.game.region or config.default_game_region, field_name="game_region"),
         "--control-plane-base-url",
         config.control_plane_base_url,
-        "--control-plane-requested-by",
-        _coerce_string(requested_by, field_name="requested_by"),
+        "--default-requested-by",
+        _coerce_string(
+            inputs.metadata.requested_by or config.default_requested_by,
+            field_name="requested_by",
+        ),
         "--control-plane-timeout-seconds",
         str(config.control_plane_timeout_seconds),
-        "--log-level",
+        "--default-log-level",
         _coerce_string(
             inputs.execution.log_level or config.default_log_level,
             field_name="log_level",
         ),
     ]
-    _append_stage_flags(command, stage=inputs.request.stage)
     if config.log_root is not None:
         command.extend(["--log-root", str(config.log_root)])
     if config.control_plane_bearer_token:
@@ -648,70 +656,6 @@ def build_pipeline_command(
             ]
         )
 
-    optional_string_flags = (
-        (inputs.manifests.current.version, "current_version", "--current-version"),
-        (
-            inputs.manifests.current.lcu_url,
-            "current_lcu_manifest_url",
-            "--current-lcu-manifest-url",
-        ),
-        (
-            inputs.manifests.current.game_url,
-            "current_game_manifest_url",
-            "--current-game-manifest-url",
-        ),
-        (inputs.manifests.previous.version, "previous_version", "--previous-version"),
-        (
-            inputs.manifests.previous.lcu_url,
-            "previous_lcu_manifest_url",
-            "--previous-lcu-manifest-url",
-        ),
-        (
-            inputs.manifests.previous.game_url,
-            "previous_game_manifest_url",
-            "--previous-game-manifest-url",
-        ),
-    )
-    for value, field_name, flag in optional_string_flags:
-        if value is None:
-            continue
-        command.extend([flag, _coerce_string(value, field_name=field_name)])
-
-    optional_int_flags = (
-        (inputs.execution.max_workers, "max_workers", "--max-workers"),
-        (
-            inputs.execution.download_retry_attempts,
-            "download_retry_attempts",
-            "--download-retry-attempts",
-        ),
-        (
-            inputs.execution.entity_retry_attempts,
-            "entity_retry_attempts",
-            "--entity-retry-attempts",
-        ),
-    )
-    for value, field_name, flag in optional_int_flags:
-        if value is None:
-            continue
-        command.extend([flag, str(_coerce_integer(value, field_name=field_name))])
-
-    for values, field_name, flag in (
-        (inputs.targets.champions.ids, "champion_ids", "--champion-ids"),
-        (inputs.targets.maps.ids, "map_ids", "--map-ids"),
-    ):
-        if values:
-            command.extend([flag, ",".join(str(item) for item in values)])
-
-    for value, field_name, flag_name in (
-        (inputs.execution.force_update, "force_update", "force-update"),
-    ):
-        if value is None:
-            continue
-        _append_bool_flag(
-            command,
-            flag_name,
-            value,
-        )
     return command
 
 
@@ -762,7 +706,17 @@ class FakerGitHubState:
         """处理 workflow_dispatch 请求并拉起 pipeline。"""
 
         dispatch_id = _slug_now()
-        command = build_pipeline_command(config=self.config, payload=payload)
+        dispatch_inputs_file = self.storage_root / "dispatch_inputs" / f"{dispatch_id}.json"
+        dispatch_inputs_file.parent.mkdir(parents=True, exist_ok=True)
+        dispatch_inputs_file.write_text(
+            json.dumps(_serialize_dispatch_inputs(payload.inputs), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        command = build_pipeline_command(
+            config=self.config,
+            payload=payload,
+            dispatch_inputs_file=dispatch_inputs_file,
+        )
         log_path: Path | None = None
         pid: int | None = None
         if not self.config.dry_run:

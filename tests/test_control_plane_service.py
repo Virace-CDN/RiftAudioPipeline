@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
-from rift_audio_pipeline.control_plane.models import PipelineBootstrapRequest
+from rift_audio_pipeline.control_plane.models import RunBootstrapRequest
 from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
 from rift_audio_pipeline.control_plane.models import RunLogEventRequest
 from rift_audio_pipeline.control_plane.models import RunLogFinalizeRequest
@@ -26,46 +25,29 @@ class _FakeClient:
         self.calls.append((method, path, payload))
         if path == "/api/pipeline/bootstrap":
             return {
-                "current_version": "16.4",
-                "previous_version": "16.3",
-                "current_pair": {
-                    "version": "16.4",
-                    "lcu_manifest_url": "https://lcu.example/16.4",
-                    "game_manifest_url": "https://game.example/16.4",
-                },
-                "previous_pair": {
-                    "version": "16.3",
-                    "lcu_manifest_url": "https://lcu.example/16.3",
-                    "game_manifest_url": "https://game.example/16.3",
-                },
-                "decision_source": "worker_latest_version",
-                "manifest_snapshot_url": "https://r2.example/manifests/16.4/pair.json",
+                "accepted": True,
+                "persisted_at": "2026-03-08T12:00:00+08:00",
             }
         return {
             "accepted": True,
             "persisted_at": "2026-03-08T12:00:00+08:00",
-            "next_head_version": "16.4",
         }
 
 
-def test_get_pipeline_bootstrap_should_parse_response() -> None:
-    """应把 bootstrap 响应解析为强类型对象。"""
+def test_notify_pipeline_run_started_should_parse_response() -> None:
+    """应把 bootstrap 启动通知响应解析为强类型对象。"""
 
     service = ControlPlaneService(_FakeClient())
 
-    response = service.get_pipeline_bootstrap(
-        PipelineBootstrapRequest(
-            game_region="zh_CN",
-            mode=PipelineMode.REMOTE,
-            requested_by="github-actions",
+    response = service.notify_pipeline_run_started(
+        RunBootstrapRequest(
+            run_id="run-1",
+            started_at="2026-03-08T12:00:00+08:00",
         )
     )
 
-    assert response.current_version == "16.4"
-    assert response.previous_version == "16.3"
-    assert response.current_pair.version == "16.4"
-    assert response.previous_pair is not None
-    assert response.previous_pair.version == "16.3"
+    assert response.accepted is True
+    assert response.persisted_at == "2026-03-08T12:00:00+08:00"
 
 
 def test_report_pipeline_run_result_should_parse_response() -> None:
@@ -76,15 +58,19 @@ def test_report_pipeline_run_result_should_parse_response() -> None:
     response = service.report_pipeline_run_result(
         RunReportRequest(
             run_id="run-1",
-            from_version="16.3",
-            to_version="16.4",
             status=PipelineRunStatus.SUCCESS,
-            summary={"uploaded_archives": 1},
+            changes=(
+                {
+                    "remote_path": "/apps/test/VO/champions/demo.7z",
+                    "file_name": "demo.7z",
+                },
+            ),
+            finished_at="2026-03-08T12:10:00+08:00",
         )
     )
 
     assert response.accepted is True
-    assert response.next_head_version == "16.4"
+    assert response.persisted_at == "2026-03-08T12:00:00+08:00"
 
 
 def test_report_pipeline_run_heartbeat_should_parse_response() -> None:

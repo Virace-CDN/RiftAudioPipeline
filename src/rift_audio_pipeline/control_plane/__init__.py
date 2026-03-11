@@ -10,8 +10,8 @@ from rift_audio_pipeline.control_plane.errors import ControlPlaneResponseValidat
 from rift_audio_pipeline.control_plane.models import BaiduAccessGrant
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 from rift_audio_pipeline.control_plane.models import ControlPlaneManifestPair
-from rift_audio_pipeline.control_plane.models import PipelineBootstrapRequest
-from rift_audio_pipeline.control_plane.models import PipelineBootstrapResponse
+from rift_audio_pipeline.control_plane.models import RunBootstrapRequest
+from rift_audio_pipeline.control_plane.models import RunBootstrapResponse
 from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
 from rift_audio_pipeline.control_plane.models import RunHeartbeatResponse
 from rift_audio_pipeline.control_plane.models import RunLogEventRequest
@@ -34,8 +34,8 @@ __all__ = [
     "ControlPlaneManifestPair",
     "ControlPlaneResponseValidationError",
     "ControlPlaneClient",
-    "PipelineBootstrapRequest",
-    "PipelineBootstrapResponse",
+    "RunBootstrapRequest",
+    "RunBootstrapResponse",
     "RunHeartbeatRequest",
     "RunHeartbeatResponse",
     "RunLogEventRequest",

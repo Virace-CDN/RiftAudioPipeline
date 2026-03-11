@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
-from dataclasses import replace
 
 import pytest
 
 import rift_audio_pipeline.pipeline.orchestrator as orchestrator
-from tests._control_plane_capture import ControlPlaneCaptureServer
-from rift_audio_pipeline.control_plane.models import BaiduAccessGrant
-from rift_audio_pipeline.control_plane.models import ControlPlaneManifestPair
-from rift_audio_pipeline.control_plane.models import PipelineBootstrapResponse
 from rift_audio_pipeline.pipeline.models import EntityArtifacts
 from rift_audio_pipeline.pipeline.models import ManifestPairRef
 from rift_audio_pipeline.pipeline.models import PipelineMode
@@ -275,56 +271,6 @@ def test_resolve_remote_targets_should_infer_map_ids_from_previous_pair(
     assert decision.previous_version == "16.4"
 
 
-def test_bootstrap_control_plane_should_fill_runtime_config(tmp_path: Path) -> None:
-    """控制面 bootstrap 应回填 previous pair 与百度凭据。"""
-
-    class _FakeService:
-        def get_pipeline_bootstrap(self, request) -> PipelineBootstrapResponse:
-            assert request.game_region == "zh_CN"
-            return PipelineBootstrapResponse(
-                current_version="16.5",
-                previous_version="16.4",
-                current_pair=ControlPlaneManifestPair(
-                    version="16.5",
-                    lcu_manifest_url="https://lcu.example/16.5",
-                    game_manifest_url="https://game.example/16.5",
-                ),
-                previous_pair=ControlPlaneManifestPair(
-                    version="16.4",
-                    lcu_manifest_url="https://lcu.example/16.4",
-                    game_manifest_url="https://game.example/16.4",
-                ),
-                baidu_access_grant=BaiduAccessGrant(
-                    app_key="app",
-                    secret_key="secret",
-                    refresh_token="refresh",
-                ),
-            )
-
-    config = PipelineRunConfig(
-        mode=PipelineMode.REMOTE,
-        game_region="zh_CN",
-        output_root=tmp_path / "output",
-        temp_root=tmp_path / "temp",
-        log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
-        control_plane_base_url="https://control.example.com",
-    )
-
-    original_builder = orchestrator._build_control_service
-    orchestrator._build_control_service = lambda config: _FakeService()  # type: ignore[assignment]
-    try:
-        runtime_config, current_pair = orchestrator._bootstrap_control_plane(config)
-    finally:
-        orchestrator._build_control_service = original_builder  # type: ignore[assignment]
-
-    assert current_pair is not None
-    assert current_pair.version == "16.5"
-    assert runtime_config.previous_version == "16.4"
-    assert runtime_config.previous_game_manifest_url == "https://game.example/16.4"
-    assert runtime_config.baidu_refresh_token == "refresh"
-
-
 def test_resolve_current_manifest_pair_should_prefer_explicit_runtime_config(tmp_path: Path) -> None:
     """显式 current pair 存在时应直接采用运行配置。"""
 
@@ -424,179 +370,6 @@ def test_run_pipeline_should_run_remote_and_upload_archives(
     )
     assert run_payload["status"] == "success"
     assert decision_payload["target_source"] == "unit_test"
-
-
-def test_run_pipeline_should_enqueue_log_retry_when_log_upload_failed(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """日志上传失败时应写入待补偿队列。"""
-
-    config = PipelineRunConfig(
-        mode=PipelineMode.REMOTE,
-        game_region="zh_CN",
-        output_root=tmp_path / "output",
-        temp_root=tmp_path / "temp",
-        log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
-        baidu_app_key="app",
-        baidu_secret_key="secret",
-        baidu_refresh_token="refresh",
-    )
-
-    monkeypatch.setattr(
-        orchestrator,
-        "resolve_remote_manifest_pair",
-        lambda config: ManifestPairRef(
-            version="16.5",
-            lcu_manifest_url="https://lcu.example",
-            game_manifest_url="https://game.example",
-            match_mode="ignore_revision",
-            match_reason="ok",
-        ),
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "_resolve_remote_targets",
-        lambda config, run_id, current_pair: (
-            (
-                orchestrator.ProcessingTarget(
-                    entity_type="champion", entity_id=1, decision_reason="unit_test"
-                ),
-            ),
-            replace(config, champion_ids=(1,), include_champions=True, include_maps=False),
-            orchestrator.PipelineDecisionSnapshot(
-                run_id=run_id,
-                target_source="unit_test",
-                target_count=1,
-                selected_champion_ids=(1,),
-            ),
-        ),
-    )
-    monkeypatch.setattr(orchestrator, "run_remote_pipeline", lambda config, pair, log_ctx: [])
-
-    class _FakeClient:
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr(orchestrator, "_create_baidu_client", lambda config: _FakeClient())
-    monkeypatch.setattr(
-        orchestrator,
-        "upload_run_logs",
-        lambda log_ctx, config, client: (_ for _ in ()).throw(RuntimeError("upload failed")),
-    )
-
-    summary = orchestrator.run_pipeline(config)
-
-    queue_file = tmp_path / "output" / "state" / "pending_log_upload_queue.json"
-    payload = json.loads(queue_file.read_text(encoding="utf-8"))
-    assert summary.pending_log_upload_entries == 1
-    assert payload[0]["error_message"] == "upload failed"
-
-
-def test_run_pipeline_should_forward_runtime_logs_to_control_plane(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """启用控制面时应发送实时事件与终态摘要。"""
-
-    server = ControlPlaneCaptureServer(
-        bootstrap_payload={
-            "current_version": "16.5",
-            "previous_version": "16.4",
-            "current_pair": {
-                "version": "16.5",
-                "lcu_manifest_url": "https://lcu.example/16.5",
-                "game_manifest_url": "https://game.example/16.5",
-            },
-        }
-    )
-    server.start()
-    try:
-        config = PipelineRunConfig(
-            mode=PipelineMode.REMOTE,
-            game_region="zh_CN",
-            output_root=tmp_path / "output",
-            temp_root=tmp_path / "temp",
-            log_root=tmp_path / "output" / "logs",
-            baidu_remote_root="/apps/test",
-            control_plane_base_url=server.base_url,
-        )
-        heartbeats: list[tuple[str, str]] = []
-        reports: list[str] = []
-
-        class _FakeService:
-            def get_pipeline_bootstrap(self, request) -> PipelineBootstrapResponse:
-                return PipelineBootstrapResponse(
-                    current_version="16.5",
-                    previous_version="16.4",
-                    current_pair=ControlPlaneManifestPair(
-                        version="16.5",
-                        lcu_manifest_url="https://lcu.example/16.5",
-                        game_manifest_url="https://game.example/16.5",
-                    ),
-                )
-
-            def report_pipeline_run_heartbeat(self, request):
-                heartbeats.append((request.status, request.progress["stage"]))
-                return type("Resp", (), {"accepted": True, "persisted_at": "2026-03-08T12:00:00+08:00"})()
-
-            def report_pipeline_run_result(self, request):
-                reports.append(request.status.value)
-                return type(
-                    "Resp",
-                    (),
-                    {
-                        "accepted": True,
-                        "persisted_at": "2026-03-08T12:00:00+08:00",
-                        "next_head_version": request.to_version,
-                    },
-                )()
-
-        monkeypatch.setattr(orchestrator, "_build_control_service", lambda config: _FakeService())
-        monkeypatch.setattr(
-            orchestrator,
-            "resolve_remote_manifest_pair",
-            lambda config: ManifestPairRef(
-                version="16.5",
-                lcu_manifest_url="https://lcu.example",
-                game_manifest_url="https://game.example",
-                match_mode="ignore_revision",
-                match_reason="ok",
-            ),
-        )
-        monkeypatch.setattr(
-            orchestrator,
-            "_resolve_remote_targets",
-            lambda config, run_id, current_pair: (
-                tuple(),
-                replace(config, include_champions=False, include_maps=False),
-                orchestrator.PipelineDecisionSnapshot(
-                    run_id=run_id,
-                    target_source="none",
-                    target_count=0,
-                    remote_execution_skipped=True,
-                ),
-            ),
-        )
-
-        summary = orchestrator.run_pipeline(config)
-
-        assert summary.status is PipelineRunStatus.SUCCESS
-        assert server.events
-        assert server.events[0]["event"]["event_type"] == "run_started"
-        assert server.events[0]["event"]["seq"] == 1
-        assert server.terminal_summaries[0]["summary"]["final_status"] == "success"
-        assert server.terminal_summaries[0]["summary"]["last_seq"] >= 1
-        assert not heartbeats
-        assert server.heartbeats
-        assert server.heartbeats[0]["status"] == "running"
-        assert server.heartbeats[0]["progress"]["relay_runtime"]["managed"] is True
-        assert reports == ["success"]
-        state_payload = json.loads(summary.log_dir.joinpath("log_relay_state.json").read_text(encoding="utf-8"))
-        assert state_payload["terminal_sent"] is True
-    finally:
-        server.close()
 
 
 def test_run_pipeline_should_skip_remote_execution_when_no_targets_resolved(

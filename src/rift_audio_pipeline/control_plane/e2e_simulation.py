@@ -168,11 +168,6 @@ def run_control_plane_e2e_simulation(
             timeout_seconds=config.timeout_seconds,
             poll_interval_seconds=config.poll_interval_seconds,
         )
-        report_path = _wait_for_path(
-            mock_plane_run_dir / "report.json",
-            timeout_seconds=config.timeout_seconds,
-            poll_interval_seconds=config.poll_interval_seconds,
-        )
         _wait_for_path(
             mock_plane_run_dir / "heartbeats" / "0001.json",
             timeout_seconds=config.timeout_seconds,
@@ -201,7 +196,6 @@ def run_control_plane_e2e_simulation(
         local_event_count = len(local_events)
         remote_log_count = len(remote_log_files)
         terminal_payload = _read_json(terminal_summary_path)
-        report_payload = _read_json(report_path)
         log_relay_state = _read_json(log_relay_state_path)
         fake_github_log_content = fake_github_log_path.read_text(encoding="utf-8")
 
@@ -219,8 +213,6 @@ def run_control_plane_e2e_simulation(
             raise ValueError(f"mock plane 终态摘要缺少 summary：{terminal_payload}")
         if _require_str(nested_summary, "status") != "success":
             raise RuntimeError(f"终态日志摘要不是 success：{terminal_payload}")
-        if _require_str(report_payload["payload"], "status") != "success":
-            raise RuntimeError(f"最终 report 不是 success：{report_payload}")
         if not _bool_value(log_relay_state, "terminal_sent"):
             raise RuntimeError(f"log relay 未成功发送终态摘要：{log_relay_state}")
         if _int_value(log_relay_state, "pending_spool_events") != 0:

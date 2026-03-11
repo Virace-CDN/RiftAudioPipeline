@@ -66,11 +66,24 @@ class MockControlPlaneState:
             "log_finalize_response.json",
             default_payload={"accepted": True},
         )
+        self._baidu_token_response = self._load_optional_fixture(
+            "baidu_token.json",
+            default_payload={
+                "app_key": "mock-baidu-app-key",
+                "secret_key": "mock-baidu-secret-key",
+                "refresh_token": "mock-baidu-refresh-token",
+            },
+        )
 
     def bootstrap_response(self) -> dict[str, object]:
-        """返回 bootstrap fixture。"""
+        """返回 bootstrap 启动通知响应。"""
 
-        return dict(self._bootstrap_response)
+        return {"accepted": True, "persisted_at": _current_timestamp()}
+
+    def baidu_token_response(self) -> dict[str, object]:
+        """返回百度 token fixture。"""
+
+        return dict(self._baidu_token_response)
 
     def heartbeat_response(self, run_id: str, payload: dict[str, object]) -> dict[str, object]:
         """返回 heartbeat 响应。"""
@@ -101,8 +114,6 @@ class MockControlPlaneState:
         response = dict(self._report_response)
         response.setdefault("accepted", True)
         response.setdefault("persisted_at", _current_timestamp())
-        if isinstance(payload.get("to_version"), str):
-            response.setdefault("next_head_version", payload["to_version"])
         self._record_request(
             category="report",
             run_id=run_id,
@@ -114,8 +125,8 @@ class MockControlPlaneState:
             source="report",
             payload={
                 "report_status": payload.get("status"),
-                "uploaded_archives": payload.get("uploaded_archives"),
-                "summary": payload.get("summary"),
+                "finished_at": payload.get("finished_at"),
+                "changes": payload.get("changes"),
             },
         )
         return response
@@ -165,7 +176,7 @@ class MockControlPlaneState:
         return response
 
     def record_bootstrap_request(self, payload: dict[str, object]) -> None:
-        """落盘 bootstrap 请求。"""
+        """落盘 bootstrap 启动通知。"""
 
         self._record_request(
             category="bootstrap_requests",
@@ -173,6 +184,16 @@ class MockControlPlaneState:
             payload=payload,
             response=self.bootstrap_response(),
         )
+        run_id = payload.get("run_id")
+        if isinstance(run_id, str):
+            self._write_run_state(
+                run_id=run_id,
+                source="bootstrap",
+                payload={
+                    "status": "started",
+                    "started_at": payload.get("started_at"),
+                },
+            )
 
     def _record_request(
         self,
@@ -297,8 +318,12 @@ class _MockControlPlaneRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         """处理健康检查。"""
 
-        if urlparse(self.path).path == "/healthz":
+        path = urlparse(self.path).path
+        if path == "/healthz":
             self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+        if path == "/api/baidu/token":
+            self._send_json(HTTPStatus.OK, self.server.state.baidu_token_response())
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 

@@ -6,6 +6,7 @@ import argparse
 from contextlib import nullcontext
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 from typing import Sequence
 
@@ -24,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=Path("output"))
     parser.add_argument("--temp-root", type=Path, default=Path("temp"))
     parser.add_argument("--log-root", type=Path, default=None)
+    parser.add_argument("--run-id")
     parser.add_argument("--baidu-remote-root", default="/apps/rift-audio-pipeline")
     parser.add_argument("--remote-live-region")
     parser.add_argument("--baidu-app-key")
@@ -37,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--previous-game-manifest-url")
     parser.add_argument("--previous-match-mode")
     parser.add_argument("--previous-match-reason")
+    parser.add_argument("--relay-socket-path", type=Path)
+    parser.add_argument("--state-db-path", type=Path)
     parser.add_argument("--control-plane-base-url")
     parser.add_argument("--control-plane-bearer-token")
     parser.add_argument("--control-plane-access-client-id")
@@ -68,17 +72,21 @@ def build_run_config(args: argparse.Namespace) -> PipelineRunConfig:
 
     output_root = args.output_root
     log_root = args.log_root or output_root / "logs"
+    baidu_app_key = args.baidu_app_key or os.getenv("RIFT_BAIDU_APP_KEY")
+    baidu_secret_key = args.baidu_secret_key or os.getenv("RIFT_BAIDU_SECRET_KEY")
+    baidu_refresh_token = args.baidu_refresh_token or os.getenv("RIFT_BAIDU_REFRESH_TOKEN")
     return PipelineRunConfig(
         mode=PipelineMode(args.mode),
         game_region=args.game_region,
         output_root=output_root,
         temp_root=args.temp_root,
         log_root=log_root,
+        run_id=args.run_id,
         baidu_remote_root=args.baidu_remote_root,
         remote_live_region=args.remote_live_region,
-        baidu_app_key=args.baidu_app_key,
-        baidu_secret_key=args.baidu_secret_key,
-        baidu_refresh_token=args.baidu_refresh_token,
+        baidu_app_key=baidu_app_key,
+        baidu_secret_key=baidu_secret_key,
+        baidu_refresh_token=baidu_refresh_token,
         current_version=args.current_version,
         current_lcu_manifest_url=args.current_lcu_manifest_url,
         current_game_manifest_url=args.current_game_manifest_url,
@@ -87,6 +95,8 @@ def build_run_config(args: argparse.Namespace) -> PipelineRunConfig:
         previous_game_manifest_url=args.previous_game_manifest_url,
         previous_match_mode=args.previous_match_mode,
         previous_match_reason=args.previous_match_reason,
+        relay_socket_path=args.relay_socket_path,
+        state_db_path=args.state_db_path,
         control_plane_base_url=args.control_plane_base_url,
         control_plane_bearer_token=args.control_plane_bearer_token,
         control_plane_access_client_id=args.control_plane_access_client_id,

@@ -1,0 +1,143 @@
+"""job runner / runtime init / log worker 测试。"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+
+import pytest
+
+from tests._control_plane_capture import ControlPlaneCaptureServer
+from rift_audio_pipeline.control_plane.faker_github import DispatchExecutionInputs
+from rift_audio_pipeline.control_plane.faker_github import DispatchGameInputs
+from rift_audio_pipeline.control_plane.faker_github import DispatchIdTargets
+from rift_audio_pipeline.control_plane.faker_github import DispatchInputs
+from rift_audio_pipeline.control_plane.faker_github import DispatchManifestInputs
+from rift_audio_pipeline.control_plane.faker_github import DispatchManifestsInputs
+from rift_audio_pipeline.control_plane.faker_github import DispatchMetadataInputs
+from rift_audio_pipeline.control_plane.faker_github import DispatchPayload
+from rift_audio_pipeline.control_plane.faker_github import DispatchRequestInputs
+from rift_audio_pipeline.control_plane.faker_github import DispatchTargetsInputs
+from rift_audio_pipeline.control_plane.job_runner import _resolve_run_id
+from rift_audio_pipeline.control_plane.job_runner import build_pipeline_command
+from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
+from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
+
+
+def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """初始化脚本应向 plane 拉取百度凭据并准备本地 database 与 state.sqlite3。"""
+
+    server = ControlPlaneCaptureServer(
+        bootstrap_payload={},
+        baidu_token_payload={
+            "app_key": "plane-app-key",
+            "secret_key": "plane-secret-key",
+            "refresh_token": "plane-refresh-token",
+        },
+    )
+    server.start()
+    downloaded: list[tuple[str, Path]] = []
+
+    def _fake_download(self, remote_path: str, local_path: Path) -> dict[str, object]:
+        downloaded.append((remote_path, local_path))
+        local_path.write_text('{"entries":[{"remote_path":"/apps/test/database.json"}]}', encoding="utf-8")
+        return {}
+
+    monkeypatch.setattr(
+        "rift_audio_pipeline.control_plane.runtime_init.BaiduPanClient.download_file",
+        _fake_download,
+    )
+    try:
+        result = initialize_runtime(
+            run_id="12345",
+            runtime_dir=tmp_path / "runtime",
+            baidu_remote_root="/apps/test",
+            plane_config=ControlPlaneConfig(base_url=server.base_url),
+        )
+    finally:
+        server.close()
+
+    assert server.baidu_token_requests == [{}]
+    assert downloaded == [("/apps/test/database.json", result.database_file)]
+    assert result.token_payload["app_key"] == "plane-app-key"
+    assert json.loads(result.database_file.read_text(encoding="utf-8"))["entries"][0]["remote_path"] == "/apps/test/database.json"
+    assert result.state_db_file.exists()
+    with sqlite3.connect(result.state_db_file) as connection:
+        imported_entries = connection.execute(
+            "SELECT entry_key, remote_path FROM remote_database_entries WHERE run_id = ?",
+            ("12345",),
+        ).fetchall()
+        run_control = connection.execute(
+            "SELECT task_production_open, upload_phase_status FROM run_control WHERE run_id = ?",
+            ("12345",),
+        ).fetchone()
+    assert len(imported_entries) == 1
+    assert imported_entries[0][1] == "/apps/test/database.json"
+    assert run_control == (1, "open")
+
+
+def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pipeline 主线命令应只保留业务入参与本地 run_id。"""
+
+    monkeypatch.setenv("GITHUB_RUN_ID", "99887766")
+    assert _resolve_run_id(None) == "99887766"
+
+    command = build_pipeline_command(
+        payload=DispatchPayload(
+            ref="main",
+            inputs=DispatchInputs(
+                request=DispatchRequestInputs(mode="remote", stage="mapping"),
+                game=DispatchGameInputs(region="zh_CN"),
+                manifests=DispatchManifestsInputs(
+                    current=DispatchManifestInputs(
+                        version="16.5",
+                        lcu_url="https://lcu.example/16.5",
+                        game_url="https://game.example/16.5",
+                    ),
+                    previous=DispatchManifestInputs(version="16.4"),
+                ),
+                targets=DispatchTargetsInputs(
+                    champions=DispatchIdTargets(ids=(1, 103)),
+                    maps=DispatchIdTargets(ids=(11,)),
+                ),
+                execution=DispatchExecutionInputs(
+                    force_update=False,
+                    max_workers=8,
+                    download_retry_attempts=5,
+                    entity_retry_attempts=2,
+                    log_level="DEBUG",
+                ),
+                metadata=DispatchMetadataInputs(requested_by="github-actions"),
+            ),
+        ),
+        run_id="99887766",
+        output_root=Path("output"),
+        temp_root=Path("temp"),
+        log_root=Path("output/logs"),
+        baidu_remote_root="/apps/test",
+        relay_socket_path=Path("/tmp/rift-audio-pipeline/99887766.sock"),
+        state_db_path=Path("runtime/99887766/state.sqlite3"),
+        default_mode="remote",
+        default_game_region="zh_CN",
+        default_log_level="INFO",
+    )
+
+    assert command[:3] == [sys.executable, "-m", "rift_audio_pipeline.pipeline.cli"]
+    assert "--run-id" in command
+    assert "99887766" in command
+    assert "--relay-socket-path" in command
+    assert "/tmp/rift-audio-pipeline/99887766.sock" in command
+    assert "--state-db-path" in command
+    assert "runtime/99887766/state.sqlite3" in command
+    assert "--control-plane-base-url" not in command
+    assert "--control-plane-bearer-token" not in command
+    assert "--champion-ids" in command
+    assert "1,103" in command

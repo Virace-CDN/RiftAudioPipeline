@@ -33,7 +33,6 @@ def test_run_control_plane_e2e_simulation_should_complete_full_chain(tmp_path: P
     log_relay_state = _read_json(result.log_relay_state_path)
     archive_receipt = _read_json(result.archive_upload_receipt)
     log_receipt = _read_json(result.log_upload_receipt)
-    bootstrap_payload = _read_json(result.mock_plane_run_dir.parent.parent / "bootstrap_requests" / "0001.json")
     run_state = _read_json(result.mock_plane_run_dir / "run_state.json")
 
     assert run_summary["status"] == "success"
@@ -42,15 +41,19 @@ def test_run_control_plane_e2e_simulation_should_complete_full_chain(tmp_path: P
     assert result.remote_log_count > 0
     assert terminal_summary["payload"]["summary"]["final_status"] == "success"
     assert terminal_summary["payload"]["summary"]["summary"]["status"] == "success"
-    assert terminal_summary["payload"]["summary"]["summary"]["processed_targets"] == 2
+    assert terminal_summary["payload"]["summary"]["processed_targets"] == 2
     assert dispatch_receipt["dry_run"] is False
-    assert "--champion-ids" in dispatch_receipt["command"]
-    assert "--map-ids" in dispatch_receipt["command"]
+    assert "--dispatch-inputs-file" in dispatch_receipt["command"]
+    dispatch_inputs_path = Path(
+        dispatch_receipt["command"][dispatch_receipt["command"].index("--dispatch-inputs-file") + 1]
+    )
+    dispatch_inputs = _read_json(dispatch_inputs_path)
+    assert dispatch_inputs["targets"]["champions"]["ids"] == [1]
+    assert dispatch_inputs["targets"]["maps"]["ids"] == [11]
     assert log_relay_state["terminal_sent"] is True
     assert log_relay_state["pending_spool_events"] == 0
     assert len(archive_receipt["archives"]) == 2
     assert "run.json" in log_receipt["files"]
-    assert bootstrap_payload["payload"]["requested_by"] == "pytest-e2e"
     assert run_state["status"] == "success"
     assert run_state["relay_runtime"]["managed"] is True
     assert run_state["relay_runtime"]["start_signal_received"] is True

@@ -92,7 +92,7 @@ class LogDeliverySink(Protocol):
     def set_terminal_summary(self, summary: PipelineLogTerminalSummary) -> None:
         """登记终态摘要。"""
 
-    def close(self, *, timeout_seconds: float = 10.0) -> None:
+    def close(self, *, timeout_seconds: float = 10.0, shutdown: bool = True) -> None:
         """等待下沉端完成收尾。"""
 
 
@@ -169,7 +169,7 @@ class RelaySpoolPump:
         self._write_json_file(self._terminal_summary_file, self._terminal_summary)
         self._persist_state()
 
-    def close(self, *, timeout_seconds: float = 10.0) -> None:
+    def close(self, *, timeout_seconds: float = 10.0, shutdown: bool = True) -> None:
         """等待队列 drain，并尝试发送终态摘要。"""
 
         if not self._config.enabled:
@@ -330,10 +330,11 @@ class LogRelayClient:
         *,
         run_id: str,
         relay_state_file: Path,
-        relay_config_file: Path,
-        relay_stdout_file: Path,
         relay_socket_file: Path,
         config: LogSinkConfig,
+        relay_config_file: Path | None = None,
+        relay_stdout_file: Path | None = None,
+        spawn_process: bool = True,
     ) -> None:
         self._run_id = run_id
         self._state_file = relay_state_file
@@ -341,6 +342,7 @@ class LogRelayClient:
         self._relay_stdout_file = relay_stdout_file
         self._relay_socket_file = relay_socket_file
         self._config = config
+        self._spawn_process_enabled = spawn_process
         self._process: subprocess.Popen[str] | None = None
         self._stdout_handle: object | None = None
         self._terminal_summary: dict[str, object] | None = None
@@ -348,14 +350,15 @@ class LogRelayClient:
         self._dropped_events = 0
         self._last_send_error: str | None = None
 
-    def start(self) -> None:
+    def start(self, *, send_start: bool = True) -> None:
         """启动 relay 子进程并等待本地 socket 就绪。"""
 
         if not self._config.enabled or self._started:
             return
         try:
-            self._write_relay_config()
-            self._spawn_process()
+            if self._spawn_process_enabled:
+                self._write_relay_config()
+                self._spawn_process()
             self._wait_for_ready()
         except Exception as error:  # noqa: BLE001
             self._last_send_error = str(error)
@@ -363,6 +366,8 @@ class LogRelayClient:
             self._cleanup_process()
             return
         self._started = True
+        if not send_start:
+            return
         try:
             self._send_envelope(
                 envelope_type="start",
@@ -374,6 +379,19 @@ class LogRelayClient:
         except RuntimeError as error:
             self._last_send_error = str(error)
             self._persist_state(state="start_signal_failed")
+
+    def attach(self) -> None:
+        """连接外部已启动 relay，不发送 start envelope。"""
+
+        if not self._config.enabled or self._started:
+            return
+        try:
+            self._wait_for_ready()
+        except Exception as error:  # noqa: BLE001
+            self._last_send_error = str(error)
+            self._persist_state(state="relay_attach_failed")
+            return
+        self._started = True
 
     def enqueue_event(self, payload: dict[str, object]) -> None:
         """把事件 envelope 发给 relay 进程。"""
@@ -391,7 +409,25 @@ class LogRelayClient:
 
         self._terminal_summary = _to_json_compatible(summary)
 
-    def close(self, *, timeout_seconds: float = 10.0) -> None:
+    def report_run_result(self, payload: dict[str, object]) -> None:
+        """通过 relay 向 plane 发送最终业务结果。"""
+
+        if not self._config.enabled:
+            return
+        self._send_envelope(
+            envelope_type="report",
+            payload=payload,
+            count_drop_on_failure=False,
+        )
+
+    def shutdown(self) -> None:
+        """要求 relay 关闭。"""
+
+        if not self._config.enabled:
+            return
+        self._send_envelope(envelope_type="shutdown", payload={"run_id": self._run_id})
+
+    def close(self, *, timeout_seconds: float = 10.0, shutdown: bool = True) -> None:
         """要求 relay drain 队列并退出。"""
 
         if not self._config.enabled:
@@ -402,7 +438,8 @@ class LogRelayClient:
                 payload=self._terminal_summary,
                 count_drop_on_failure=False,
             )
-        self._send_envelope(envelope_type="shutdown", payload={"run_id": self._run_id})
+        if shutdown:
+            self.shutdown()
         if self._process is not None:
             try:
                 self._process.wait(timeout=timeout_seconds)
@@ -414,6 +451,8 @@ class LogRelayClient:
     def _spawn_process(self) -> None:
         """启动 relay 子进程。"""
 
+        if self._relay_stdout_file is None:
+            raise ValueError("spawn relay process 需要 relay_stdout_file。")
         self._relay_stdout_file.parent.mkdir(parents=True, exist_ok=True)
         self._stdout_handle = self._relay_stdout_file.open("a", encoding="utf-8")
         src_root = Path(__file__).resolve().parents[2]
@@ -444,26 +483,17 @@ class LogRelayClient:
     def _write_relay_config(self) -> None:
         """把 relay 运行配置写到磁盘，供子进程读取。"""
 
+        if self._relay_config_file is None:
+            raise ValueError("写 relay 配置需要 relay_config_file。")
         self._relay_config_file.parent.mkdir(parents=True, exist_ok=True)
         self._relay_socket_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "run_id": self._run_id,
-            "state_file": str(self._state_file),
-            "spool_dir": str(self._config.spool_dir or self._state_file.parent / "spool"),
-            "socket_path": str(self._relay_socket_file),
-            "control_plane_base_url": self._config.control_plane_base_url,
-            "bearer_token": self._config.bearer_token,
-            "access_client_id": self._config.access_client_id,
-            "access_client_secret": self._config.access_client_secret,
-            "timeout_seconds": self._config.timeout_seconds,
-            "max_queue_size": self._config.max_queue_size,
-            "flush_interval_ms": self._config.flush_interval_ms,
-            "retry_backoff_ms": list(self._config.retry_backoff_ms),
-            "monitor_interval_ms": self._config.monitor_interval_ms,
-            "heartbeat_interval_ms": self._config.heartbeat_interval_ms,
-        }
         self._relay_config_file.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
+            json.dumps(build_log_relay_config_payload(
+                run_id=self._run_id,
+                relay_state_file=self._state_file,
+                relay_socket_file=self._relay_socket_file,
+                config=self._config,
+            ), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
@@ -581,6 +611,95 @@ class LogRelayClient:
             self._stdout_handle = None
 
 
+def build_log_relay_config_payload(
+    *,
+    run_id: str,
+    relay_state_file: Path,
+    relay_socket_file: Path,
+    config: LogSinkConfig,
+) -> dict[str, object]:
+    """构造 relay 外部进程配置。"""
+
+    return {
+        "run_id": run_id,
+        "state_file": str(relay_state_file),
+        "spool_dir": str(config.spool_dir or relay_state_file.parent / "spool"),
+        "socket_path": str(relay_socket_file),
+        "control_plane_base_url": config.control_plane_base_url,
+        "bearer_token": config.bearer_token,
+        "access_client_id": config.access_client_id,
+        "access_client_secret": config.access_client_secret,
+        "timeout_seconds": config.timeout_seconds,
+        "max_queue_size": config.max_queue_size,
+        "flush_interval_ms": config.flush_interval_ms,
+        "retry_backoff_ms": list(config.retry_backoff_ms),
+        "monitor_interval_ms": config.monitor_interval_ms,
+        "heartbeat_interval_ms": config.heartbeat_interval_ms,
+    }
+
+
+def write_log_relay_config(
+    *,
+    relay_config_file: Path,
+    run_id: str,
+    relay_state_file: Path,
+    relay_socket_file: Path,
+    config: LogSinkConfig,
+) -> None:
+    """写 relay 进程配置文件。"""
+
+    relay_config_file.parent.mkdir(parents=True, exist_ok=True)
+    relay_socket_file.parent.mkdir(parents=True, exist_ok=True)
+    relay_config_file.write_text(
+        json.dumps(
+            build_log_relay_config_payload(
+                run_id=run_id,
+                relay_state_file=relay_state_file,
+                relay_socket_file=relay_socket_file,
+                config=config,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def spawn_log_relay_process(
+    *,
+    relay_config_file: Path,
+    relay_stdout_file: Path,
+) -> tuple[subprocess.Popen[str], object]:
+    """外部启动 relay 进程。"""
+
+    relay_stdout_file.parent.mkdir(parents=True, exist_ok=True)
+    stdout_handle = relay_stdout_file.open("a", encoding="utf-8")
+    src_root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{src_root}{os.pathsep}{existing_pythonpath}"
+        if existing_pythonpath
+        else str(src_root)
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "rift_audio_pipeline.control_plane.log_relay",
+            "--config",
+            str(relay_config_file),
+        ],
+        stdout=stdout_handle,
+        stderr=subprocess.STDOUT,
+        env=env,
+        close_fds=True,
+        start_new_session=True,
+        text=True,
+    )
+    return process, stdout_handle
+
+
 def initialize_run_logging(config: PipelineRunConfig) -> PipelineLogContext:
     """初始化一次运行的日志目录与上下文。
 
@@ -592,12 +711,21 @@ def initialize_run_logging(config: PipelineRunConfig) -> PipelineLogContext:
     """
 
     now = datetime.now().astimezone()
-    run_date = now.strftime("%Y-%m-%d")
-    run_id = f"{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    run_id = config.run_id or f"{now.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    if (
+        config.run_id is not None
+        and len(config.run_id) >= 9
+        and config.run_id[:8].isdigit()
+        and config.run_id[8] == "T"
+    ):
+        parsed_date = config.run_id[:8]
+        run_date = f"{parsed_date[:4]}-{parsed_date[4:6]}-{parsed_date[6:8]}"
+    else:
+        run_date = now.strftime("%Y-%m-%d")
     log_dir = config.log_root / run_date / run_id
     state_dir = config.output_root / "state"
     spool_dir = log_dir / "spool"
-    relay_socket_file = _LOG_RELAY_SOCKET_ROOT / f"{run_id}.sock"
+    relay_socket_file = config.relay_socket_path or (_LOG_RELAY_SOCKET_ROOT / f"{run_id}.sock")
     log_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
     spool_dir.mkdir(parents=True, exist_ok=True)
@@ -781,23 +909,21 @@ def build_log_sink_config(config: PipelineRunConfig, ctx: PipelineLogContext) ->
 def should_enable_log_relay(config: PipelineRunConfig) -> bool:
     """判断当前运行是否应启用独立 relay。"""
 
-    return (
-        bool(config.control_plane_base_url)
-        and config.mode is not PipelineMode.LOCAL
-        and sys.platform.startswith("linux")
-    )
+    return config.relay_socket_path is not None
 
 
 def finalize_log_relay_delivery(
     ctx: PipelineLogContext,
     terminal_summary: PipelineLogTerminalSummary,
+    *,
+    shutdown: bool = True,
 ) -> None:
     """把终态摘要交给日志下沉端，并等待 drain。"""
 
     if ctx.log_delivery_sink is None:
         return
     ctx.log_delivery_sink.set_terminal_summary(terminal_summary)
-    ctx.log_delivery_sink.close()
+    ctx.log_delivery_sink.close(shutdown=shutdown)
 
 
 def load_error_snapshot(ctx: PipelineLogContext) -> dict[str, object] | None:

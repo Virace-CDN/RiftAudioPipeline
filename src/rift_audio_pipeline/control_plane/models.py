@@ -65,28 +65,19 @@ class BaiduAccessGrant:
 
 
 @dataclass(frozen=True, slots=True)
-class PipelineBootstrapRequest:
-    """请求 Worker 返回 pipeline 启动参数。"""
+class RunBootstrapRequest:
+    """执行端向 Worker 发送任务启动通知。"""
 
-    game_region: str
-    mode: PipelineMode
-    requested_by: str | None = None
-    champion_ids: tuple[int, ...] | None = None
-    map_ids: tuple[int, ...] | None = None
+    run_id: str
+    started_at: str
 
 
 @dataclass(frozen=True, slots=True)
-class PipelineBootstrapResponse:
-    """Worker 返回的 pipeline 启动参数。"""
+class RunBootstrapResponse:
+    """Worker 对启动通知的确认。"""
 
-    current_version: str
-    previous_version: str | None
-    current_pair: ControlPlaneManifestPair
-    previous_pair: ControlPlaneManifestPair | None = None
-    manifest_snapshot_url: str | None = None
-    manifest_snapshot_key: str | None = None
-    decision_source: str | None = None
-    baidu_access_grant: BaiduAccessGrant | None = None
+    accepted: bool
+    persisted_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,14 +85,9 @@ class RunReportRequest:
     """执行端向 Worker 回报运行结果。"""
 
     run_id: str
-    from_version: str | None
-    to_version: str
     status: PipelineRunStatus
-    summary: dict[str, object]
-    uploaded_archives: int = 0
-    diff_artifacts_key: str | None = None
-    r2_summary_key: str | None = None
-    baidu_log_path: str | None = None
+    changes: tuple[dict[str, object], ...] = tuple()
+    finished_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

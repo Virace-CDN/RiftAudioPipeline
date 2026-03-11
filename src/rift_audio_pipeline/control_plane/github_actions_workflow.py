@@ -53,7 +53,7 @@ def load_dispatch_payload(*, ref: str, dispatch_inputs_file: Path) -> DispatchPa
 
 
 def build_workflow_command(args: argparse.Namespace) -> tuple[DispatchPayload, list[str]]:
-    """基于 workflow 参数构造 pipeline 命令。"""
+    """基于 workflow 参数构造独立 job runner 命令。"""
 
     payload = load_dispatch_payload(ref=args.ref, dispatch_inputs_file=args.dispatch_inputs_file)
     config = FakerGitHubConfig(
@@ -76,7 +76,11 @@ def build_workflow_command(args: argparse.Namespace) -> tuple[DispatchPayload, l
         working_directory=Path.cwd(),
         python_executable=Path(sys.executable),
     )
-    return payload, build_pipeline_command(config=config, payload=payload)
+    return payload, build_pipeline_command(
+        config=config,
+        payload=payload,
+        dispatch_inputs_file=args.dispatch_inputs_file,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

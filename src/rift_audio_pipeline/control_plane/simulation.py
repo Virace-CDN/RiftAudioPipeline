@@ -55,6 +55,13 @@ def patch_pipeline_for_simulation(
         stack.enter_context(
             patch.object(
                 orchestrator,
+                "resolve_remote_manifest_pair",
+                _build_fake_resolve_remote_manifest_pair(),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                orchestrator,
                 "pack_champion",
                 _build_fake_pack_champion(),
             )
@@ -69,15 +76,8 @@ def patch_pipeline_for_simulation(
         stack.enter_context(
             patch.object(
                 orchestrator,
-                "_create_baidu_client",
-                lambda config: _FakeBaiduClient(),
-            )
-        )
-        stack.enter_context(
-            patch.object(
-                orchestrator,
-                "upload_run_logs",
-                _build_fake_log_upload(artifact_paths.log_upload_receipt),
+                "_retry_pending_manifest_sync_queue_if_possible",
+                lambda config, queue_file: None,
             )
         )
         yield artifact_paths
@@ -112,6 +112,13 @@ def patch_pipeline_for_baidu_mock(
         stack.enter_context(
             patch.object(
                 orchestrator,
+                "resolve_remote_manifest_pair",
+                _build_fake_resolve_remote_manifest_pair(),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                orchestrator,
                 "_upload_archives_for_run",
                 _build_fake_archive_upload(
                     artifact_paths.archive_upload_receipt,
@@ -122,18 +129,8 @@ def patch_pipeline_for_baidu_mock(
         stack.enter_context(
             patch.object(
                 orchestrator,
-                "_create_baidu_client",
-                lambda config: _FakeBaiduClient(),
-            )
-        )
-        stack.enter_context(
-            patch.object(
-                orchestrator,
-                "upload_run_logs",
-                _build_fake_log_upload(
-                    artifact_paths.log_upload_receipt,
-                    failure_mode=failure_mode,
-                ),
+                "_retry_pending_manifest_sync_queue_if_possible",
+                lambda config, queue_file: None,
             )
         )
         yield artifact_paths
@@ -273,6 +270,22 @@ def _build_fake_pack_champion():
         return archive_path
 
     return _fake_pack_champion
+
+
+def _build_fake_resolve_remote_manifest_pair():
+    """构造本地 fake manifest pair 解析函数。"""
+
+    def _fake_resolve_remote_manifest_pair(config: PipelineRunConfig):
+        del config
+        return orchestrator.ManifestPairRef(
+            version="16.5",
+            lcu_manifest_url="https://lcu.example/16.5",
+            game_manifest_url="https://game.example/16.5",
+            match_mode="simulation",
+            match_reason="simulation_fixed_pair",
+        )
+
+    return _fake_resolve_remote_manifest_pair
 
 
 def _build_fake_archive_upload(receipt_path: Path, *, failure_mode: str = "none"):
