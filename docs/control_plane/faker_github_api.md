@@ -6,7 +6,7 @@
 
 ## 1. 设计边界
 
-`faker-github` 现在要求 `inputs` 使用结构化、多层级 JSON，而不是扁平字典。
+`faker-github` 现在要求 `inputs` 统一使用一个包装层：`inputs.payload`，并且这个 `payload` 必须是 JSON 字符串。
 
 这样做的目的有两个：
 
@@ -15,16 +15,16 @@
 
 当前边界分成两类：
 
-- 业务 `inputs`
+- 业务 `payload`
   - 代表一次 dispatch 的业务请求体
   - 会进入 payload 校验、stdout 调试日志和 dispatch 收据
   - 其中一部分会继续翻译成 `rift_audio_pipeline.pipeline.cli` 参数
 - 运行环境配置
   - 代表 `faker-github` 自己启动时注入的固定环境
   - 不属于单次 dispatch 的业务差异
-  - 不应混入 `inputs`
+  - 不应混入 `payload`
 
-因此，像 `worker_url`、`worker_token` 这类运行时配置或机密不应放进 `inputs`。
+因此，像 `worker_url`、`worker_token` 这类运行时配置或机密不应放进 `inputs.payload` 对应的 JSON 内容里。
 
 ## 2. 启动方式
 
@@ -180,53 +180,22 @@ uv run rift-faker-github \
 {
   "ref": "main",
   "inputs": {
-    "schema_version": "2026-03-11",
-    "request": {
-      "mode": "remote",
-      "stage": "update"
-    },
-    "game": {
-      "region": "oc1"
-    },
-    "manifests": {
-      "current": {
-        "version": "16.5.7519084",
-        "lcu_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest",
-        "game_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest"
-      },
-      "previous": {
-        "version": "16.4.7423123",
-        "lcu_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest",
-        "game_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest"
-      }
-    },
-    "targets": {
-      "champions": {
-        "ids": [266, 103]
-      },
-      "maps": {
-        "ids": [11, 12]
-      }
-    },
-    "execution": {
-      "force_update": false,
-      "max_workers": 8,
-      "download_retry_attempts": 5,
-      "entity_retry_attempts": 2,
-      "log_level": "INFO"
-    },
-    "metadata": {
-      "requested_by": "scheduler"
-    }
+    "payload": "{\"schema_version\":\"2026-03-11\",\"request\":{\"mode\":\"remote\",\"stage\":\"update\"},\"game\":{\"region\":\"oc1\"},\"manifests\":{\"current\":{\"version\":\"16.5.7519084\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest\"},\"previous\":{\"version\":\"16.4.7423123\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest\"}},\"targets\":{\"champions\":{\"ids\":[266,103]},\"maps\":{\"ids\":[11,12]}},\"execution\":{\"force_update\":false,\"max_workers\":8,\"download_retry_attempts\":5,\"entity_retry_attempts\":2,\"log_level\":\"INFO\"},\"metadata\":{\"requested_by\":\"scheduler\"}}"
   }
 }
 ```
 
-## 7. `inputs` schema
+## 7. `inputs.payload` schema
 
 ### 7.1 顶层结构
 
-`inputs` 顶层只接受这些字段：
+`inputs` 顶层当前只接受一个字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `payload` | `string` | 结构化业务请求体对应的 JSON 字符串 |
+
+`inputs.payload` 顶层只接受这些字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -292,6 +261,8 @@ uv run rift-faker-github \
 
 - 未知字段直接报错，不做静默忽略
 - 不再接受扁平 `inputs`
+- `inputs` 顶层只允许 `payload`
+- `inputs.payload` 必须是 JSON object 字符串
 - `string` 字段必须是非空字符串
 - `integer` 字段必须是整数，`true`/`false` 不会被当成 `1/0`
 - `boolean` 字段接受 JSON 布尔值，也接受 `"true"` / `"false"` 这类常见字符串写法
@@ -304,6 +275,7 @@ uv run rift-faker-github \
 以下内容会触发 `422 validation_failed`：
 
 - 扁平字段，例如 `inputs.mode`、`inputs.game_region`、`inputs.requested_by`
+- 错误的包装层，例如 `inputs.data`
 - 旧别名，例如 `region`、`requestedBy`、`championIds`、`mapIds`
 - 已移除字段，例如 `map_aliases`
 - 运行时配置或机密，例如 `worker_url`、`worker_token`
@@ -348,7 +320,7 @@ uv run rift-faker-github \
 
 ## 9. 启动时注入的固定参数
 
-除了业务 `inputs`，`faker-github` 还会把自己的启动配置注入到最终 CLI。这些值属于运行环境配置，不属于单次 dispatch 业务差异。
+除了业务 `inputs.payload`，`faker-github` 还会把自己的启动配置注入到最终 CLI。这些值属于运行环境配置，不属于单次 dispatch 业务差异。
 
 | `rift-faker-github` 启动参数 | 作用到 pipeline CLI |
 | --- | --- |
@@ -381,18 +353,7 @@ uv run rift-faker-github \
   "workflow_id": "pipeline.yml",
   "ref": "main",
   "inputs": {
-    "schema_version": "2026-03-11",
-    "game": {
-      "region": "euw"
-    },
-    "targets": {
-      "champions": {
-        "ids": [266, 103]
-      }
-    },
-    "metadata": {
-      "requested_by": "plane-scheduler"
-    }
+    "payload": "{\"schema_version\":\"2026-03-11\",\"game\":{\"region\":\"euw\"},\"targets\":{\"champions\":{\"ids\":[266,103]}},\"metadata\":{\"requested_by\":\"plane-scheduler\"}}"
   },
   "command": [
     "/path/to/python",
@@ -448,24 +409,7 @@ curl -i \
   -d '{
     "ref": "main",
     "inputs": {
-      "schema_version": "2026-03-11",
-      "request": {
-        "mode": "remote"
-      },
-      "game": {
-        "region": "euw"
-      },
-      "targets": {
-        "champions": {
-          "ids": "266,103"
-        }
-      },
-      "execution": {
-        "force_update": false
-      },
-      "metadata": {
-        "requested_by": "plane-scheduler"
-      }
+      "payload": "{\"schema_version\":\"2026-03-11\",\"request\":{\"mode\":\"remote\"},\"game\":{\"region\":\"euw\"},\"targets\":{\"champions\":{\"ids\":\"266,103\"}},\"execution\":{\"force_update\":false},\"metadata\":{\"requested_by\":\"plane-scheduler\"}}"
     }
   }'
 ```
