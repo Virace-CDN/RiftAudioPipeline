@@ -41,6 +41,8 @@ def test_build_run_config_should_parse_cli_args(tmp_path: Path) -> None:
             "--integrate-data",
             "--max-workers",
             "8",
+            "--archive-password",
+            "zip-secret",
         ]
     )
 
@@ -59,6 +61,7 @@ def test_build_run_config_should_parse_cli_args(tmp_path: Path) -> None:
     assert config.run_mapping is True
     assert config.integrate_data is True
     assert config.max_workers == 8
+    assert config.archive_password == "zip-secret"
 
 
 def test_main_should_run_pipeline_and_print_summary(

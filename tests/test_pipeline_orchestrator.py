@@ -46,7 +46,7 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
 ) -> None:
     """应对实体输出目录逐个打包。"""
 
-    calls: list[tuple[Path, Path, tuple[Path, ...]]] = []
+    calls: list[dict[str, object]] = []
 
     def _fake_pack_champion(
         champion_dir: Path,
@@ -62,13 +62,19 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
     ) -> Path:
         del (
             archive_name,
-            report_file,
-            password,
             encrypt_filenames,
-            compression_level,
             seven_zip_executable,
         )
-        calls.append((champion_dir, output_path, extra_files))
+        calls.append(
+            {
+                "champion_dir": champion_dir,
+                "output_path": output_path,
+                "report_file": report_file,
+                "password": password,
+                "extra_files": extra_files,
+                "compression_level": compression_level,
+            }
+        )
         return output_path / f"{champion_dir.name}.7z"
 
     monkeypatch.setattr(orchestrator, "pack_champion", _fake_pack_champion)
@@ -78,9 +84,14 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
     mapping_file = tmp_path / "hashes" / "annie.yml"
     mapping_file.parent.mkdir(parents=True, exist_ok=True)
     mapping_file.write_text("meta", encoding="utf-8")
+    report_file = tmp_path / "output" / "reports" / "16.5" / "champions" / "_1_metadata.yaml"
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    report_file.write_text("meta: 1", encoding="utf-8")
+    config = _build_remote_config(tmp_path)
+    config = replace(config, archive_password="unit-test-password")
 
     archives = orchestrator.handle_entity_artifacts(
-        config=_build_remote_config(tmp_path),
+        config=config,
         artifact=EntityArtifacts(
             entity_type="champion",
             entity_id=1,
@@ -90,13 +101,15 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
         version="16.5",
     )
 
-    assert calls == [
-        (
-            audio_dir,
-            tmp_path / "output" / "packages" / "16.5" / "champion",
-            (mapping_file,),
-        )
-    ]
+    assert len(calls) == 1
+    assert calls[0]["champion_dir"] == audio_dir
+    assert calls[0]["output_path"] == tmp_path / "output" / "packages" / "16.5" / "champion"
+    assert calls[0]["report_file"] == report_file
+    assert calls[0]["password"] == "unit-test-password"
+    assert calls[0]["extra_files"] == (
+        mapping_file,
+        (Path(orchestrator.__file__).resolve().parents[1] / "pack_extra"),
+    )
     assert archives == (tmp_path / "output" / "packages" / "16.5" / "champion" / "annie.7z",)
 
 

@@ -115,6 +115,7 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
                     download_retry_attempts=5,
                     entity_retry_attempts=2,
                     log_level="DEBUG",
+                    archive_password="zip-secret",
                 ),
                 metadata=DispatchMetadataInputs(requested_by="github-actions"),
             ),
@@ -142,6 +143,8 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
     assert "--control-plane-bearer-token" not in command
     assert "--champion-ids" in command
     assert "1,103" in command
+    assert "--archive-password" in command
+    assert "zip-secret" in command
 
 
 def test_build_runtime_plan_should_derive_runtime_paths(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from rift_localdev.plane.e2e_simulation import ControlPlaneE2ESimulationConfig
+from rift_localdev.plane.e2e_simulation import _validate_target_count
 from rift_localdev.plane.e2e_simulation import run_control_plane_e2e_simulation
 
 
@@ -64,3 +65,20 @@ def _read_json(path: Path) -> dict[str, object]:
     """读取 JSON 对象文件。"""
 
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_validate_target_count_should_allow_three_champions_and_one_map(tmp_path: Path) -> None:
+    """联调 harness 应允许 3 英雄 + 1 地图的小样本。"""
+
+    config = ControlPlaneE2ESimulationConfig(
+        fixture_dir=Path(__file__).parent / "fixtures" / "mock_control_plane",
+        workspace_root=Path.cwd(),
+        output_root=tmp_path / "output",
+        temp_root=tmp_path / "temp",
+        mock_plane_storage_root=tmp_path / "mock_plane",
+        faker_storage_root=tmp_path / "faker_github",
+        champion_ids=(1, 103, 266),
+        map_ids=(11,),
+    )
+
+    _validate_target_count(config)

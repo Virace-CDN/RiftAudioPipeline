@@ -222,6 +222,8 @@ def build_pipeline_command(
     ):
         if value is not None:
             command.extend([flag, str(value)])
+    if inputs.execution.archive_password:
+        command.extend(["--archive-password", inputs.execution.archive_password])
     if inputs.execution.force_update is not None:
         command.append("--force-update" if inputs.execution.force_update else "--no-force-update")
     if inputs.targets.champions.ids:

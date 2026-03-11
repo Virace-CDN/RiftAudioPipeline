@@ -35,7 +35,7 @@ def pack_champion(
         report_file: 可选的 `_id_metadata.yaml` 报告文件。
         password: 压缩包密码；为空时不启用密码。
         encrypt_filenames: 启用密码时是否开启文件名加密（`-mhe=on`）。
-        extra_files: 需要附加到压缩包根目录的额外文件集合。
+        extra_files: 需要附加到压缩包根目录的额外文件或目录集合。
         compression_level: 压缩级别（`0-9`）。
         seven_zip_executable: 指定 7z 可执行文件；为空时自动查找。
 
@@ -65,8 +65,8 @@ def pack_champion(
 
     with tempfile.TemporaryDirectory(prefix="rift_pack_") as temp_dir:
         stage_root = Path(temp_dir)
-        _stage_directory(stage_root=stage_root, source_dir=source_dir)
-        _stage_report_file(stage_root=stage_root, report_file=normalized_report_file)
+        staged_entity_dir = _stage_directory(stage_root=stage_root, source_dir=source_dir)
+        _stage_report_file(entity_root=staged_entity_dir, report_file=normalized_report_file)
         _stage_extra_files(stage_root=stage_root, extra_files=staged_extra_files)
         command = _build_7z_command(
             executable=executable,
@@ -167,13 +167,13 @@ def _validate_compression_level(compression_level: int) -> int:
 
 
 def _normalize_extra_files(extra_files: Sequence[Path]) -> tuple[Path, ...]:
-    """标准化并校验附加文件列表。"""
+    """标准化并校验附加文件/目录列表。"""
 
     resolved: list[Path] = []
     for file_path in extra_files:
         resolved_path = file_path.expanduser().resolve()
-        if not resolved_path.is_file():
-            raise FileNotFoundError(f"附加文件不存在或不可读：{resolved_path}")
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"附加文件或目录不存在：{resolved_path}")
         resolved.append(resolved_path)
     return tuple(resolved)
 
@@ -232,36 +232,50 @@ def _resolve_report_file(folder_name: str, report_dir: Path | None) -> Path | No
     return None
 
 
-def _stage_directory(stage_root: Path, source_dir: Path) -> None:
-    """将目录以链接或复制方式放入临时打包目录。"""
+def _stage_directory(stage_root: Path, source_dir: Path) -> Path:
+    """将目录以链接或复制方式放入临时打包目录并返回目标路径。"""
 
     target = stage_root / source_dir.name
     try:
         target.symlink_to(source_dir, target_is_directory=True)
     except OSError:
         shutil.copytree(source_dir, target)
+    return target
 
 
-def _stage_report_file(stage_root: Path, report_file: Path | None) -> None:
-    """将报告文件复制到压缩包根目录。"""
+def _stage_report_file(entity_root: Path, report_file: Path | None) -> None:
+    """将报告文件复制到实体目录根。"""
 
     if report_file is None:
         return
-    target = stage_root / report_file.name
+    target = entity_root / report_file.name
     shutil.copy2(report_file, target)
 
 
 def _stage_extra_files(stage_root: Path, extra_files: Sequence[Path]) -> None:
-    """将附加文件复制到压缩包根目录。"""
+    """将附加文件或目录内容复制到压缩包根目录。"""
 
     used_names: set[str] = set()
     for file_path in extra_files:
-        target = stage_root / file_path.name
-        lowered = file_path.name.casefold()
-        if lowered in used_names:
-            raise ValueError(f"附加文件名冲突：{file_path.name}")
-        used_names.add(lowered)
-        shutil.copy2(file_path, target)
+        if file_path.is_dir():
+            for child in sorted(file_path.iterdir(), key=lambda item: item.name.casefold()):
+                _stage_extra_item(stage_root=stage_root, source_path=child, used_names=used_names)
+            continue
+        _stage_extra_item(stage_root=stage_root, source_path=file_path, used_names=used_names)
+
+
+def _stage_extra_item(stage_root: Path, source_path: Path, used_names: set[str]) -> None:
+    """将单个附加文件或目录写入压缩包根目录。"""
+
+    target = stage_root / source_path.name
+    lowered = source_path.name.casefold()
+    if lowered in used_names:
+        raise ValueError(f"附加文件名冲突：{source_path.name}")
+    used_names.add(lowered)
+    if source_path.is_dir():
+        shutil.copytree(source_path, target)
+    else:
+        shutil.copy2(source_path, target)
 
 
 def _build_7z_command(

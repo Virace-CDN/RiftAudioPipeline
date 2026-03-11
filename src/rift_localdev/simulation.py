@@ -106,13 +106,6 @@ def patch_pipeline_for_baidu_mock(
                 clear=False,
             )
         )
-        stack.enter_context(
-            patch.object(
-                orchestrator,
-                "resolve_remote_manifest_pair",
-                _build_fake_resolve_remote_manifest_pair(),
-            )
-        )
         yield artifact_paths
 
 

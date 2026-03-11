@@ -44,6 +44,7 @@ class ControlPlaneE2ESimulationConfig:
     github_token: str = "local-dev-token"
     simulation_mode: str = "full"
     baidu_failure_mode: str = "none"
+    archive_password: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,7 @@ class ControlPlaneE2ESimulationResult:
     run_id: str
     dispatch_receipt_path: Path
     fake_github_log_path: Path
+    run_state_path: Path
     log_dir: Path
     mock_plane_run_dir: Path
     archive_upload_receipt: Path
@@ -154,22 +156,21 @@ def run_control_plane_e2e_simulation(
         )
         receipt_payload = _read_json(receipt_path)
         fake_github_log_path = Path(_require_str(receipt_payload, "log_path"))
-        run_summary_path = _wait_for_run_summary(
-            config.output_root / "logs",
+        run_state_path = _wait_for_run_state(
+            config.mock_plane_storage_root / "runs",
             timeout_seconds=config.timeout_seconds,
             poll_interval_seconds=config.poll_interval_seconds,
         )
-        run_summary_payload = _read_json(run_summary_path)
-        run_id = _require_str(run_summary_payload, "run_id")
-        log_dir = run_summary_path.parent
-        mock_plane_run_dir = config.mock_plane_storage_root / "runs" / run_id
-        terminal_summary_path = _wait_for_path(
-            mock_plane_run_dir / "logs_finalize.json",
-            timeout_seconds=config.timeout_seconds,
-            poll_interval_seconds=config.poll_interval_seconds,
-        )
+        run_id = run_state_path.parent.name
+        mock_plane_run_dir = run_state_path.parent
         _wait_for_path(
             mock_plane_run_dir / "heartbeats" / "0001.json",
+            timeout_seconds=config.timeout_seconds,
+            poll_interval_seconds=config.poll_interval_seconds,
+        )
+        log_dir = _wait_for_run_log_dir(
+            config.output_root / "logs",
+            run_id=run_id,
             timeout_seconds=config.timeout_seconds,
             poll_interval_seconds=config.poll_interval_seconds,
         )
@@ -178,6 +179,17 @@ def run_control_plane_e2e_simulation(
             timeout_seconds=config.timeout_seconds,
             poll_interval_seconds=config.poll_interval_seconds,
         )
+        terminal_summary_path = _wait_for_path(
+            mock_plane_run_dir / "logs_finalize.json",
+            timeout_seconds=config.timeout_seconds,
+            poll_interval_seconds=config.poll_interval_seconds,
+        )
+        run_summary_path = _wait_for_run_summary(
+            log_dir,
+            timeout_seconds=config.timeout_seconds,
+            poll_interval_seconds=config.poll_interval_seconds,
+        )
+        run_summary_payload = _read_json(run_summary_path)
         archive_upload_receipt = _wait_for_path(
             config.output_root / "simulation" / "archive_upload.json",
             timeout_seconds=config.timeout_seconds,
@@ -226,6 +238,7 @@ def run_control_plane_e2e_simulation(
             run_id=run_id,
             dispatch_receipt_path=receipt_path,
             fake_github_log_path=fake_github_log_path,
+            run_state_path=run_state_path,
             log_dir=log_dir,
             mock_plane_run_dir=mock_plane_run_dir,
             archive_upload_receipt=archive_upload_receipt,
@@ -271,6 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     parser.add_argument("--simulation-mode", choices=("full", "baidu-only"), default="full")
+    parser.add_argument("--archive-password")
     parser.add_argument(
         "--baidu-failure-mode",
         choices=("none", "archive", "log", "both"),
@@ -304,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds,
             simulation_mode=args.simulation_mode,
             baidu_failure_mode=args.baidu_failure_mode,
+            archive_password=args.archive_password,
         )
     )
     print(json.dumps(_result_to_json(result), ensure_ascii=False, indent=2))
@@ -405,6 +420,11 @@ def _dispatch_workflow(
                         if config.map_ids
                         else {},
                     },
+                    "execution": (
+                        {"archive_password": config.archive_password}
+                        if config.archive_password
+                        else {}
+                    ),
                     "metadata": {"requested_by": config.requested_by},
                 },
                 ensure_ascii=False,
@@ -446,21 +466,54 @@ def _wait_for_single_file(
     raise TimeoutError(f"等待文件超时：{directory}/{pattern}")
 
 
-def _wait_for_run_summary(
-    log_root: Path,
+def _wait_for_run_state(
+    runs_root: Path,
     *,
     timeout_seconds: float,
     poll_interval_seconds: float,
 ) -> Path:
-    """等待本地 `run.json` 生成。"""
+    """等待 mock plane 生成唯一 run_state。"""
 
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        candidates = sorted(log_root.glob("*/*/run.json"))
+        candidates = sorted(runs_root.glob("*/run_state.json"))
         if len(candidates) == 1:
             return candidates[0]
         time.sleep(poll_interval_seconds)
-    raise TimeoutError(f"等待 run.json 超时：{log_root}")
+    raise TimeoutError(f"等待 run_state.json 超时：{runs_root}")
+
+
+def _wait_for_run_log_dir(
+    log_root: Path,
+    *,
+    run_id: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> Path:
+    """等待本地日志目录出现。"""
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        candidates = sorted(path for path in log_root.glob(f"*/{run_id}") if path.is_dir())
+        if len(candidates) == 1:
+            return candidates[0]
+        time.sleep(poll_interval_seconds)
+    raise TimeoutError(f"等待日志目录超时：{log_root} / {run_id}")
+
+
+def _wait_for_run_summary(
+    log_dir: Path,
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> Path:
+    """等待本地 `run.json` 最终摘要生成。"""
+
+    return _wait_for_path(
+        log_dir / "run.json",
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
 
 
 def _wait_for_path(
@@ -554,8 +607,8 @@ def _validate_target_count(config: ControlPlaneE2ESimulationConfig) -> None:
     total_targets = len(config.champion_ids) + len(config.map_ids)
     if total_targets == 0:
         raise ValueError("端到端联调至少需要一个 champion_id 或 map_id。")
-    if total_targets > 3:
-        raise ValueError("端到端联调最多只支持 3 个 champion/map 目标。")
+    if total_targets > 4:
+        raise ValueError("端到端联调最多只支持 4 个 champion/map 目标。")
 
 
 def _slug_now() -> str:

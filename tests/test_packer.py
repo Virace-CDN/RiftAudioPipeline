@@ -55,7 +55,7 @@ def test_pack_champion_should_stage_report_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """传入报告文件时应写入压缩包根目录。"""
+    """传入报告文件时应写入实体目录根。"""
 
     champion_dir = tmp_path / "annie"
     champion_dir.mkdir(parents=True, exist_ok=True)
@@ -67,7 +67,7 @@ def test_pack_champion_should_stage_report_file(
 
     def _fake_execute_7z_command(command: tuple[str, ...], cwd: Path) -> None:
         del command
-        assert (cwd / "_1_metadata.yaml").exists()
+        assert (cwd / "annie" / "_1_metadata.yaml").exists()
 
     monkeypatch.setattr(packer, "_execute_7z_command", _fake_execute_7z_command)
 
@@ -77,6 +77,35 @@ def test_pack_champion_should_stage_report_file(
         report_file=report_file,
     )
     assert archive == (tmp_path / "archives" / "annie.7z").resolve()
+
+
+def test_pack_champion_should_stage_extra_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """传入附加目录时应将目录内容展开到压缩包根目录。"""
+
+    champion_dir = tmp_path / "annie"
+    champion_dir.mkdir(parents=True, exist_ok=True)
+    (champion_dir / "voice.txt").write_text("voice", encoding="utf-8")
+    extra_dir = tmp_path / "pack_extra"
+    extra_dir.mkdir(parents=True, exist_ok=True)
+    (extra_dir / "说明.txt").write_text("extra", encoding="utf-8")
+
+    monkeypatch.setattr(packer, "_resolve_7zip_executable", lambda _: "/usr/bin/7z")
+
+    def _fake_execute_7z_command(command: tuple[str, ...], cwd: Path) -> None:
+        del command
+        assert (cwd / "说明.txt").read_text(encoding="utf-8") == "extra"
+        assert not (cwd / "pack_extra").exists()
+
+    monkeypatch.setattr(packer, "_execute_7z_command", _fake_execute_7z_command)
+
+    packer.pack_champion(
+        champion_dir=champion_dir,
+        output_path=tmp_path / "archives",
+        extra_files=(extra_dir,),
+    )
 
 
 def test_pack_champion_should_raise_on_invalid_compression_level(tmp_path: Path) -> None:

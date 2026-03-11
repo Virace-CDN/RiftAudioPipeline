@@ -59,6 +59,7 @@ _EXECUTION_INPUT_FIELDS = frozenset(
         "download_retry_attempts",
         "entity_retry_attempts",
         "log_level",
+        "archive_password",
     }
 )
 _METADATA_INPUT_FIELDS = frozenset({"requested_by"})
@@ -161,6 +162,7 @@ class DispatchExecutionInputs:
     download_retry_attempts: int | None = None
     entity_retry_attempts: int | None = None
     log_level: str | None = None
+    archive_password: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,6 +480,10 @@ def _validate_dispatch_inputs(raw_inputs: dict[str, Any]) -> DispatchInputs:
             log_level=_coerce_optional_string(
                 execution_inputs.get("log_level"),
                 field_name="inputs.payload.execution.log_level",
+            ),
+            archive_password=_coerce_optional_string(
+                execution_inputs.get("archive_password"),
+                field_name="inputs.payload.execution.archive_password",
             ),
         ),
         metadata=DispatchMetadataInputs(

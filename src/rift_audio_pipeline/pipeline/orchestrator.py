@@ -351,11 +351,8 @@ def handle_entity_artifacts(
         return tuple()
 
     output_dir = config.output_root / "packages" / version / artifact.entity_type
-    extra_files = (
-        (artifact.mapping_output_path,)
-        if artifact.mapping_output_path is not None and artifact.mapping_output_path.is_file()
-        else tuple()
-    )
+    report_file = _resolve_report_file(config=config, artifact=artifact, version=version)
+    extra_files = _resolve_pack_extra_items(artifact=artifact)
     archives: list[Path] = []
     for audio_dir in artifact.audio_output_paths:
         if not audio_dir.is_dir():
@@ -364,10 +361,39 @@ def handle_entity_artifacts(
             pack_champion(
                 champion_dir=audio_dir,
                 output_path=output_dir,
+                report_file=report_file,
+                password=config.archive_password,
                 extra_files=extra_files,
             )
         )
     return tuple(archives)
+
+
+def _resolve_report_file(
+    *,
+    config: PipelineRunConfig,
+    artifact: EntityArtifacts,
+    version: str,
+) -> Path | None:
+    """解析当前实体对应的 `_id_metadata.yaml`。"""
+
+    entity_dir_name = f"{artifact.entity_type}s"
+    candidate = config.output_root / "reports" / version / entity_dir_name / f"_{artifact.entity_id}_metadata.yaml"
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+def _resolve_pack_extra_items(*, artifact: EntityArtifacts) -> tuple[Path, ...]:
+    """汇总需要打进压缩包根目录的附加项。"""
+
+    extras: list[Path] = []
+    if artifact.mapping_output_path is not None and artifact.mapping_output_path.is_file():
+        extras.append(artifact.mapping_output_path)
+    pack_extra_dir = Path(__file__).resolve().parents[1] / "pack_extra"
+    if pack_extra_dir.is_dir():
+        extras.append(pack_extra_dir)
+    return tuple(extras)
 
 
 def build_processing_targets(

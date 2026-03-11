@@ -61,6 +61,7 @@ def test_build_pipeline_command_should_map_dispatch_inputs() -> None:
                     download_retry_attempts=5,
                     entity_retry_attempts=2,
                     log_level="DEBUG",
+                    archive_password="zip-secret",
                 ),
                 metadata=DispatchMetadataInputs(requested_by="plane-scheduler"),
             ),
@@ -129,6 +130,7 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
                                 }
                             },
                             "targets": {"champions": {"ids": "266,103"}},
+                            "execution": {"archive_password": "zip-secret"},
                             "metadata": {"requested_by": "plane-test"},
                         }
                     ),
@@ -175,6 +177,7 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
         dispatch_inputs_payload = json.loads(dispatch_inputs_path.read_text(encoding="utf-8"))
         assert dispatch_inputs_payload["targets"]["champions"]["ids"] == [266, 103]
         assert dispatch_inputs_payload["manifests"]["current"]["version"] == "16.5"
+        assert dispatch_inputs_payload["execution"]["archive_password"] == "zip-secret"
     finally:
         server.close()
 

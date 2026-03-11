@@ -96,6 +96,7 @@ class PipelineRunConfig:
         download_retry_attempts: 下载类错误重试次数。
         entity_retry_attempts: 单实体完整流程重试次数。
         log_level: 上游 app 日志级别。
+        archive_password: 压缩包密码；为空时不加密。
     """
 
     mode: PipelineMode
@@ -142,6 +143,7 @@ class PipelineRunConfig:
     download_retry_attempts: int = 3
     entity_retry_attempts: int = 3
     log_level: str = "INFO"
+    archive_password: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-retry-attempts", type=int, default=3)
     parser.add_argument("--entity-retry-attempts", type=int, default=3)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--archive-password")
     parser.add_argument("--force-update", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--include-champions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--include-maps", action=argparse.BooleanOptionalAction, default=True)
@@ -120,6 +121,7 @@ def build_run_config(args: argparse.Namespace) -> PipelineRunConfig:
         download_retry_attempts=args.download_retry_attempts,
         entity_retry_attempts=args.entity_retry_attempts,
         log_level=args.log_level,
+        archive_password=args.archive_password,
     )
 
 
