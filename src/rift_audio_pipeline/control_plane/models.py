@@ -1,4 +1,4 @@
-"""Cloudflare 对接层数据模型。"""
+"""control plane 对接层数据模型。"""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from rift_audio_pipeline.pipeline.models import PipelineRunStatus
 
 
 @dataclass(frozen=True, slots=True)
-class CloudflareControlConfig:
-    """Cloudflare Worker 控制面访问配置。
+class ControlPlaneConfig:
+    """control plane 控制面访问配置。
 
     Args:
         base_url: Worker 基础地址。
@@ -26,23 +26,23 @@ class CloudflareControlConfig:
     access_client_id: str | None = None
     access_client_secret: str | None = None
     timeout_seconds: float = 30.0
-    user_agent: str = "rift-audio-pipeline/cloudflare"
+    user_agent: str = "rift-audio-pipeline/control-plane"
 
     def __post_init__(self) -> None:
         normalized_url = self.base_url.rstrip("/")
         if not normalized_url:
-            raise ValueError("Cloudflare 控制面 base_url 不能为空。")
+            raise ValueError("control plane base_url 不能为空。")
         if bool(self.access_client_id) != bool(self.access_client_secret):
             raise ValueError(
-                "Cloudflare Access 鉴权必须同时提供 access_client_id 与 access_client_secret。"
+                "Access 鉴权必须同时提供 access_client_id 与 access_client_secret。"
             )
         if self.timeout_seconds <= 0:
-            raise ValueError("Cloudflare 控制面 timeout_seconds 必须大于 0。")
+            raise ValueError("control plane timeout_seconds 必须大于 0。")
         object.__setattr__(self, "base_url", normalized_url)
 
 
 @dataclass(frozen=True, slots=True)
-class CloudflareManifestPair:
+class ControlPlaneManifestPair:
     """Worker 返回的 manifest pair。"""
 
     version: str
@@ -81,8 +81,8 @@ class PipelineBootstrapResponse:
 
     current_version: str
     previous_version: str | None
-    current_pair: CloudflareManifestPair
-    previous_pair: CloudflareManifestPair | None = None
+    current_pair: ControlPlaneManifestPair
+    previous_pair: ControlPlaneManifestPair | None = None
     manifest_snapshot_url: str | None = None
     manifest_snapshot_key: str | None = None
     decision_source: str | None = None
@@ -129,3 +129,37 @@ class RunHeartbeatResponse:
 
     accepted: bool
     persisted_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunLogEventRequest:
+    """执行端向 Worker 发送单条实时日志事件。"""
+
+    run_id: str
+    event: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class RunLogEventResponse:
+    """Worker 对实时日志事件的确认结果。"""
+
+    accepted: bool
+    persisted_at: str | None = None
+    next_expected_seq: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunLogFinalizeRequest:
+    """执行端向 Worker 发送终态日志摘要。"""
+
+    run_id: str
+    summary: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class RunLogFinalizeResponse:
+    """Worker 对终态日志摘要的确认结果。"""
+
+    accepted: bool
+    persisted_at: str | None = None
+    worker_status: str | None = None

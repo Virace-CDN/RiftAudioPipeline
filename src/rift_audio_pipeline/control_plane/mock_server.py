@@ -18,7 +18,10 @@ from threading import Thread
 from urllib.parse import urlparse
 
 
-_RUN_ENDPOINT_PATTERN = re.compile(r"^/api/pipeline/runs/(?P<run_id>[^/]+)/(?P<kind>heartbeat|report)$")
+_RUN_ENDPOINT_PATTERN = re.compile(r"^/api/pipeline/runs/(?P<run_id>[^/]+)/(?P<kind>heartbeat|report|logs)$")
+_RUN_LOG_FINALIZE_ENDPOINT_PATTERN = re.compile(
+    r"^/api/pipeline/runs/(?P<run_id>[^/]+)/logs/finalize$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +48,7 @@ class MockControlPlaneState:
         self._lock = Lock()
         self._bootstrap_sequence = 0
         self._heartbeat_sequences: dict[str, int] = defaultdict(int)
+        self._log_event_sequences: dict[str, int] = defaultdict(int)
         self._bootstrap_response = self._load_fixture("bootstrap.json")
         self._heartbeat_response = self._load_optional_fixture(
             "heartbeat_response.json",
@@ -52,6 +56,14 @@ class MockControlPlaneState:
         )
         self._report_response = self._load_optional_fixture(
             "report_response.json",
+            default_payload={"accepted": True},
+        )
+        self._log_event_response = self._load_optional_fixture(
+            "log_event_response.json",
+            default_payload={"accepted": True},
+        )
+        self._log_finalize_response = self._load_optional_fixture(
+            "log_finalize_response.json",
             default_payload={"accepted": True},
         )
 
@@ -72,6 +84,15 @@ class MockControlPlaneState:
             payload=payload,
             response=response,
         )
+        self._write_run_state(
+            run_id=run_id,
+            source="heartbeat",
+            payload={
+                "status": payload.get("status"),
+                "stage": _extract_stage(payload),
+                "relay_runtime": _extract_relay_runtime(payload),
+            },
+        )
         return response
 
     def report_response(self, run_id: str, payload: dict[str, object]) -> dict[str, object]:
@@ -87,6 +108,59 @@ class MockControlPlaneState:
             run_id=run_id,
             payload=payload,
             response=response,
+        )
+        self._write_run_state(
+            run_id=run_id,
+            source="report",
+            payload={
+                "report_status": payload.get("status"),
+                "uploaded_archives": payload.get("uploaded_archives"),
+                "summary": payload.get("summary"),
+            },
+        )
+        return response
+
+    def log_event_response(self, run_id: str, payload: dict[str, object]) -> dict[str, object]:
+        """返回实时日志事件响应。"""
+
+        response = dict(self._log_event_response)
+        response.setdefault("accepted", True)
+        response.setdefault("persisted_at", _current_timestamp())
+        event = payload.get("event")
+        if isinstance(event, dict) and isinstance(event.get("seq"), int):
+            response.setdefault("next_expected_seq", event["seq"] + 1)
+        self._record_request(
+            category="logs",
+            run_id=run_id,
+            payload=payload,
+            response=response,
+        )
+        return response
+
+    def log_finalize_response(self, run_id: str, payload: dict[str, object]) -> dict[str, object]:
+        """返回日志终态摘要响应。"""
+
+        response = dict(self._log_finalize_response)
+        response.setdefault("accepted", True)
+        response.setdefault("persisted_at", _current_timestamp())
+        summary = payload.get("summary")
+        if isinstance(summary, dict) and isinstance(summary.get("final_status"), str):
+            response.setdefault("worker_status", summary["final_status"])
+        self._record_request(
+            category="logs_finalize",
+            run_id=run_id,
+            payload=payload,
+            response=response,
+        )
+        self._write_run_state(
+            run_id=run_id,
+            source="logs_finalize",
+            payload={
+                "status": summary.get("final_status") if isinstance(summary, dict) else None,
+                "stage": summary.get("final_stage") if isinstance(summary, dict) else None,
+                "relay_runtime": _extract_relay_runtime_from_summary(summary),
+                "terminal_summary": summary,
+            },
         )
         return response
 
@@ -128,6 +202,12 @@ class MockControlPlaneState:
                 self._heartbeat_sequences[run_id] += 1
                 sequence = self._heartbeat_sequences[run_id]
             target_path = target_dir / f"{sequence:04d}.json"
+        elif category == "logs":
+            target_dir = self._storage_root / "runs" / run_id / category
+            with self._lock:
+                self._log_event_sequences[run_id] += 1
+                sequence = self._log_event_sequences[run_id]
+            target_path = target_dir / f"{sequence:04d}.json"
         else:
             target_dir = self._storage_root / "runs" / run_id
             target_path = target_dir / f"{category}.json"
@@ -135,6 +215,35 @@ class MockControlPlaneState:
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path.write_text(
             json.dumps(envelope, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _write_run_state(
+        self,
+        *,
+        run_id: str,
+        source: str,
+        payload: dict[str, object],
+    ) -> None:
+        """把当前 run 的聚合状态写到固定文件。"""
+
+        target_path = self._storage_root / "runs" / run_id / "run_state.json"
+        existing_payload: dict[str, object] = {}
+        if target_path.exists():
+            existing_payload = dict(self._load_json_object(target_path))
+        existing_payload.update(
+            {
+                "run_id": run_id,
+                "updated_at": _current_timestamp(),
+                "source": source,
+            }
+        )
+        for key, value in payload.items():
+            if value is not None:
+                existing_payload[key] = value
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(
+            json.dumps(existing_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
@@ -205,6 +314,13 @@ class _MockControlPlaneRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, self.server.state.bootstrap_response())
             return
 
+        finalize_match = _RUN_LOG_FINALIZE_ENDPOINT_PATTERN.fullmatch(path)
+        if finalize_match is not None:
+            run_id = finalize_match.group("run_id")
+            response = self.server.state.log_finalize_response(run_id, payload)
+            self._send_json(HTTPStatus.OK, response)
+            return
+
         match = _RUN_ENDPOINT_PATTERN.fullmatch(path)
         if match is None:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -214,6 +330,10 @@ class _MockControlPlaneRequestHandler(BaseHTTPRequestHandler):
         kind = match.group("kind")
         if kind == "heartbeat":
             response = self.server.state.heartbeat_response(run_id, payload)
+            self._send_json(HTTPStatus.OK, response)
+            return
+        if kind == "logs":
+            response = self.server.state.log_event_response(run_id, payload)
             self._send_json(HTTPStatus.OK, response)
             return
 
@@ -344,6 +464,38 @@ def _current_timestamp() -> str:
     """返回当前 ISO 8601 时间。"""
 
     return datetime.now().astimezone().isoformat()
+
+
+def _extract_stage(payload: dict[str, object]) -> str | None:
+    """从 heartbeat 负载提取当前阶段。"""
+
+    progress = payload.get("progress")
+    if not isinstance(progress, Mapping):
+        return None
+    stage = progress.get("stage")
+    return stage if isinstance(stage, str) else None
+
+
+def _extract_relay_runtime(payload: dict[str, object]) -> dict[str, object] | None:
+    """从 heartbeat 负载提取 relay 运行态快照。"""
+
+    progress = payload.get("progress")
+    if not isinstance(progress, Mapping):
+        return None
+    relay_runtime = progress.get("relay_runtime")
+    return dict(relay_runtime) if isinstance(relay_runtime, Mapping) else None
+
+
+def _extract_relay_runtime_from_summary(summary: object) -> dict[str, object] | None:
+    """从 terminal summary 中提取 relay 运行态快照。"""
+
+    if not isinstance(summary, Mapping):
+        return None
+    nested_summary = summary.get("summary")
+    if not isinstance(nested_summary, Mapping):
+        return None
+    relay_runtime = nested_summary.get("relay_runtime")
+    return dict(relay_runtime) if isinstance(relay_runtime, Mapping) else None
 
 
 if __name__ == "__main__":

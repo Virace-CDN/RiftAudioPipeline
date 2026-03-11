@@ -12,19 +12,24 @@ import re
 from rift_audio_pipeline.baidu import BaiduCredentials
 from rift_audio_pipeline.baidu import BaiduPanClient
 from rift_audio_pipeline.baidu import resolve_token_store
-from rift_audio_pipeline.cloudflare.client import CloudflareWorkerClient
-from rift_audio_pipeline.cloudflare.models import CloudflareControlConfig
-from rift_audio_pipeline.cloudflare.models import PipelineBootstrapRequest
-from rift_audio_pipeline.cloudflare.models import RunHeartbeatRequest
-from rift_audio_pipeline.cloudflare.models import RunReportRequest
-from rift_audio_pipeline.cloudflare.service import CloudflareControlService
+from rift_audio_pipeline.control_plane.client import ControlPlaneClient
+from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
+from rift_audio_pipeline.control_plane.models import PipelineBootstrapRequest
+from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
+from rift_audio_pipeline.control_plane.models import RunReportRequest
+from rift_audio_pipeline.control_plane.service import ControlPlaneService
 from rift_audio_pipeline.packer import pack_champion
 from rift_audio_pipeline.pipeline.local import run_local_pipeline
+from rift_audio_pipeline.pipeline.logging import LogRelayClient
+from rift_audio_pipeline.pipeline.logging import build_log_sink_config
 from rift_audio_pipeline.pipeline.logging import emit_event
 from rift_audio_pipeline.pipeline.logging import enqueue_pending_log_upload
+from rift_audio_pipeline.pipeline.logging import finalize_log_relay_delivery
 from rift_audio_pipeline.pipeline.logging import finalize_run_logging
 from rift_audio_pipeline.pipeline.logging import initialize_run_logging
+from rift_audio_pipeline.pipeline.logging import load_error_snapshot
 from rift_audio_pipeline.pipeline.logging import record_error_snapshot
+from rift_audio_pipeline.pipeline.logging import should_enable_log_relay
 from rift_audio_pipeline.pipeline.logging import upload_run_logs
 from rift_audio_pipeline.pipeline.models import EntityArtifacts
 from rift_audio_pipeline.pipeline.models import ManifestPairRef
@@ -32,6 +37,7 @@ from rift_audio_pipeline.pipeline.models import PipelineArtifactRecord
 from rift_audio_pipeline.pipeline.models import PipelineArtifactsSnapshot
 from rift_audio_pipeline.pipeline.models import PipelineDecisionSnapshot
 from rift_audio_pipeline.pipeline.models import PipelineEvent
+from rift_audio_pipeline.pipeline.models import PipelineLogTerminalSummary
 from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunConfig
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
@@ -60,34 +66,44 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
     """
 
     log_ctx = initialize_run_logging(config)
-    runtime_config, bootstrapped_pair = _bootstrap_control_plane(config=config)
+    runtime_config = config
+    bootstrapped_pair: ManifestPairRef | None = None
     resolved_version: str | None = None
     uploaded_archives = 0
     pending_log_upload_entries = 0
     manifest_queue_file = config.output_root / "state" / "pending_manifest_sync_queue.json"
     decision_payload: PipelineDecisionSnapshot | None = None
     active_stage = PipelineStage.INIT
-
-    emit_event(
-        log_ctx,
-        PipelineEvent(
-            run_id=log_ctx.run_id,
-            stage=PipelineStage.INIT,
-            event_type="run_started",
-            message="pipeline 开始运行",
-            payload={"mode": runtime_config.mode.value},
-            created_at=datetime.now().astimezone().isoformat(),
-        ),
-    )
-    _report_control_plane_heartbeat(
-        config=runtime_config,
-        run_id=log_ctx.run_id,
-        status="running",
-        stage=PipelineStage.INIT,
-        summary=None,
-    )
+    summary: PipelineRunSummary | None = None
 
     try:
+        runtime_config, bootstrapped_pair = _bootstrap_control_plane(config=config)
+        log_relay_client = _build_log_relay_client(runtime_config, log_ctx)
+        if log_relay_client is not None:
+            log_ctx.log_delivery_sink = log_relay_client
+            log_relay_client.start()
+
+        emit_event(
+            log_ctx,
+            PipelineEvent(
+                run_id=log_ctx.run_id,
+                stage=PipelineStage.INIT,
+                event_type="run_started",
+                message="pipeline 开始运行",
+                payload={"mode": runtime_config.mode.value},
+                created_at=datetime.now().astimezone().isoformat(),
+                status_hint="running",
+                operation="run_pipeline",
+            ),
+        )
+        _report_control_plane_heartbeat(
+            config=runtime_config,
+            run_id=log_ctx.run_id,
+            status="running",
+            stage=PipelineStage.INIT,
+            summary=None,
+        )
+
         active_stage = PipelineStage.LOAD_REMOTE_INDEX
         _retry_pending_manifest_sync_queue_if_possible(
             config=runtime_config, queue_file=manifest_queue_file
@@ -124,6 +140,8 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
                         "decision": asdict(decision_payload),
                     },
                     created_at=datetime.now().astimezone().isoformat(),
+                    status_hint="running",
+                    operation="build_targets",
                 ),
             )
             active_stage = PipelineStage.EXTRACT if config.run_extract else PipelineStage.UPDATE
@@ -222,6 +240,7 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             payload={
                 "resolved_version": resolved_version,
                 "decision": asdict(decision_payload) if decision_payload is not None else None,
+                "operation": "run_pipeline",
             },
         )
         summary = PipelineRunSummary(
@@ -245,6 +264,9 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             stage=active_stage,
             summary=summary,
         )
+
+    if summary is None:
+        raise RuntimeError("pipeline 结束时未生成运行摘要。")
 
     if _has_baidu_credentials(runtime_config):
         try:
@@ -273,6 +295,18 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             )
             finalize_run_logging(log_ctx, summary)
 
+    finalize_log_relay_delivery(
+        log_ctx,
+        _build_terminal_log_summary(
+            log_ctx=log_ctx,
+            summary=summary,
+            final_stage=PipelineStage.FINALIZE
+            if summary.status is not PipelineRunStatus.FAILED
+            else active_stage,
+            raw_log_remote_path=_build_baidu_log_remote_path(config=runtime_config, log_ctx=log_ctx),
+            error_brief=load_error_snapshot(log_ctx),
+        ),
+    )
     _report_control_plane_run_result(
         config=runtime_config,
         summary=summary,
@@ -579,13 +613,13 @@ def build_resolved_wad_diff_report(
         )
 
 
-def _build_control_service(config: PipelineRunConfig) -> CloudflareControlService | None:
+def _build_control_service(config: PipelineRunConfig) -> ControlPlaneService | None:
     """按需构造控制面服务。"""
 
     if not config.control_plane_base_url:
         return None
-    client = CloudflareWorkerClient(
-        CloudflareControlConfig(
+    client = ControlPlaneClient(
+        ControlPlaneConfig(
             base_url=config.control_plane_base_url,
             bearer_token=config.control_plane_bearer_token,
             access_client_id=config.control_plane_access_client_id,
@@ -593,7 +627,95 @@ def _build_control_service(config: PipelineRunConfig) -> CloudflareControlServic
             timeout_seconds=config.control_plane_timeout_seconds,
         )
     )
-    return CloudflareControlService(client)
+    return ControlPlaneService(client)
+
+
+def _build_log_relay_client(
+    config: PipelineRunConfig,
+    log_ctx: object,
+) -> LogRelayClient | None:
+    """构造运行期 relay 客户端。"""
+
+    required_fields = (
+        "log_relay_state_file",
+        "relay_config_file",
+        "relay_stdout_file",
+        "relay_socket_file",
+    )
+    if not all(hasattr(log_ctx, field_name) for field_name in required_fields):
+        return None
+    sink_config = build_log_sink_config(config, log_ctx)
+    if not sink_config.enabled:
+        return None
+    run_id = getattr(log_ctx, "run_id", None)
+    relay_state_file = getattr(log_ctx, "log_relay_state_file", None)
+    relay_config_file = getattr(log_ctx, "relay_config_file", None)
+    relay_stdout_file = getattr(log_ctx, "relay_stdout_file", None)
+    relay_socket_file = getattr(log_ctx, "relay_socket_file", None)
+    if not all(
+        isinstance(item, Path)
+        for item in (relay_state_file, relay_config_file, relay_stdout_file, relay_socket_file)
+    ):
+        return None
+    if not isinstance(run_id, str):
+        return None
+    return LogRelayClient(
+        run_id=run_id,
+        relay_state_file=relay_state_file,
+        relay_config_file=relay_config_file,
+        relay_stdout_file=relay_stdout_file,
+        relay_socket_file=relay_socket_file,
+        config=sink_config,
+    )
+
+
+def _build_terminal_log_summary(
+    *,
+    log_ctx: object,
+    summary: PipelineRunSummary,
+    final_stage: PipelineStage,
+    raw_log_remote_path: str | None,
+    error_brief: dict[str, object] | None,
+) -> PipelineLogTerminalSummary:
+    """构造运行终态日志摘要。"""
+
+    run_id = getattr(log_ctx, "run_id")
+    last_seq = getattr(log_ctx, "last_event_seq", 0)
+    log_dir = getattr(log_ctx, "log_dir")
+    return PipelineLogTerminalSummary(
+        run_id=run_id,
+        finished_at=datetime.now().astimezone().isoformat(),
+        final_status=summary.status.value,
+        final_stage=final_stage.value,
+        last_seq=last_seq if isinstance(last_seq, int) else 0,
+        processed_targets=summary.processed_targets,
+        succeeded_targets=summary.succeeded_targets,
+        failed_targets=summary.failed_targets,
+        uploaded_archives=summary.uploaded_archives,
+        raw_log_bundle_ready=True,
+        raw_log_local_dir=str(log_dir),
+        raw_log_remote_path=raw_log_remote_path,
+        summary=_serialize_summary_payload(summary),
+        error_brief=error_brief,
+    )
+
+
+def _serialize_summary_payload(summary: PipelineRunSummary) -> dict[str, object]:
+    """把 `PipelineRunSummary` 转为稳定字典。"""
+
+    return {
+        "schema_version": summary.schema_version,
+        "mode": summary.mode.value,
+        "version": summary.version,
+        "status": summary.status.value,
+        "processed_targets": summary.processed_targets,
+        "succeeded_targets": summary.succeeded_targets,
+        "failed_targets": summary.failed_targets,
+        "uploaded_archives": summary.uploaded_archives,
+        "pending_manifest_sync_entries": summary.pending_manifest_sync_entries,
+        "pending_log_upload_entries": summary.pending_log_upload_entries,
+        "log_dir": str(summary.log_dir),
+    }
 
 
 def _bootstrap_control_plane(
@@ -657,6 +779,8 @@ def _report_control_plane_heartbeat(
 ) -> None:
     """向控制面上报心跳；未配置控制面时静默跳过。"""
 
+    if should_enable_log_relay(config):
+        return
     service = _build_control_service(config)
     if service is None:
         return
@@ -699,18 +823,7 @@ def _report_control_plane_run_result(
             from_version=from_version,
             to_version=to_version,
             status=summary.status,
-            summary={
-                "schema_version": summary.schema_version,
-                "mode": summary.mode.value,
-                "version": summary.version,
-                "processed_targets": summary.processed_targets,
-                "succeeded_targets": summary.succeeded_targets,
-                "failed_targets": summary.failed_targets,
-                "uploaded_archives": summary.uploaded_archives,
-                "pending_manifest_sync_entries": summary.pending_manifest_sync_entries,
-                "pending_log_upload_entries": summary.pending_log_upload_entries,
-                "log_dir": str(summary.log_dir),
-            },
+            summary=_serialize_summary_payload(summary),
             uploaded_archives=summary.uploaded_archives,
             baidu_log_path=baidu_log_path,
         )

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import ModuleType
 from types import SimpleNamespace
 import sys
 
@@ -162,6 +164,18 @@ def test_run_remote_pipeline_should_collect_callback_artifacts(
 ) -> None:
     """应通过上游回调收集实体产物。"""
 
+    class _FakeRemoteSnapshotPreparer:
+        def prepare_lcu_game_data(self) -> object:
+            return SimpleNamespace(
+                manifest_cache_path=tmp_path / "cache" / "lcu.manifest",
+                description_cache_path=tmp_path / "cache" / "description.json",
+                bundle_cache_paths=(tmp_path / "cache" / "bundle.wad",),
+                prepared_lcu_root=tmp_path / "prepared_lcu",
+            )
+
+        def prepare_bin_inputs(self, **kwargs) -> object:
+            return SimpleNamespace(extracted_file_count=3, kwargs=kwargs)
+
     class _FakeOperationOptions:
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
@@ -174,6 +188,13 @@ def test_run_remote_pipeline_should_collect_callback_artifacts(
         def __init__(self, ctx: object) -> None:
             self.ctx = ctx
 
+        def build_remote_entity_work_items(self, **kwargs) -> list[object]:
+            del kwargs
+            return [SimpleNamespace(entity_type="champion", entity_id=1)]
+
+        def update(self, opts: object, *, target: str = "all") -> None:
+            del opts, target
+
         def run_remote_entity_workflow(self, **kwargs) -> None:
             callback = kwargs["on_entity_complete"]
             callback(
@@ -185,6 +206,9 @@ def test_run_remote_pipeline_should_collect_callback_artifacts(
                 )
             )
 
+    remote_preparer_module = ModuleType("lol_audio_unpack.remote_preparer")
+    remote_preparer_module.RemoteSnapshotPreparer = _FakeRemoteSnapshotPreparer
+    monkeypatch.setitem(sys.modules, "lol_audio_unpack.remote_preparer", remote_preparer_module)
     monkeypatch.setitem(
         sys.modules,
         "lol_audio_unpack",
@@ -206,7 +230,17 @@ def test_run_remote_pipeline_should_collect_callback_artifacts(
     log_ctx = initialize_run_logging(config)
 
     artifacts = run_remote_pipeline(config, pair, log_ctx)
+    event_payloads = [
+        json.loads(line)
+        for line in log_ctx.events_file.read_text(encoding="utf-8").splitlines()
+    ]
 
     assert len(artifacts) == 1
     assert artifacts[0].entity_id == 1
     assert artifacts[0].mapping_output_path == (tmp_path / "hashes" / "annie.yml")
+    assert [payload["event_type"] for payload in event_payloads] == [
+        "remote_manifest_pair_ready",
+        "remote_entity_loop_started",
+        "remote_entity_complete",
+        "remote_entity_loop_finished",
+    ]

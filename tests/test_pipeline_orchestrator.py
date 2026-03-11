@@ -9,9 +9,10 @@ from dataclasses import replace
 import pytest
 
 import rift_audio_pipeline.pipeline.orchestrator as orchestrator
-from rift_audio_pipeline.cloudflare.models import BaiduAccessGrant
-from rift_audio_pipeline.cloudflare.models import CloudflareManifestPair
-from rift_audio_pipeline.cloudflare.models import PipelineBootstrapResponse
+from tests._control_plane_capture import ControlPlaneCaptureServer
+from rift_audio_pipeline.control_plane.models import BaiduAccessGrant
+from rift_audio_pipeline.control_plane.models import ControlPlaneManifestPair
+from rift_audio_pipeline.control_plane.models import PipelineBootstrapResponse
 from rift_audio_pipeline.pipeline.models import EntityArtifacts
 from rift_audio_pipeline.pipeline.models import ManifestPairRef
 from rift_audio_pipeline.pipeline.models import PipelineMode
@@ -283,12 +284,12 @@ def test_bootstrap_control_plane_should_fill_runtime_config(tmp_path: Path) -> N
             return PipelineBootstrapResponse(
                 current_version="16.5",
                 previous_version="16.4",
-                current_pair=CloudflareManifestPair(
+                current_pair=ControlPlaneManifestPair(
                     version="16.5",
                     lcu_manifest_url="https://lcu.example/16.5",
                     game_manifest_url="https://game.example/16.5",
                 ),
-                previous_pair=CloudflareManifestPair(
+                previous_pair=ControlPlaneManifestPair(
                     version="16.4",
                     lcu_manifest_url="https://lcu.example/16.4",
                     game_manifest_url="https://game.example/16.4",
@@ -491,6 +492,111 @@ def test_run_pipeline_should_enqueue_log_retry_when_log_upload_failed(
     payload = json.loads(queue_file.read_text(encoding="utf-8"))
     assert summary.pending_log_upload_entries == 1
     assert payload[0]["error_message"] == "upload failed"
+
+
+def test_run_pipeline_should_forward_runtime_logs_to_control_plane(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """启用控制面时应发送实时事件与终态摘要。"""
+
+    server = ControlPlaneCaptureServer(
+        bootstrap_payload={
+            "current_version": "16.5",
+            "previous_version": "16.4",
+            "current_pair": {
+                "version": "16.5",
+                "lcu_manifest_url": "https://lcu.example/16.5",
+                "game_manifest_url": "https://game.example/16.5",
+            },
+        }
+    )
+    server.start()
+    try:
+        config = PipelineRunConfig(
+            mode=PipelineMode.REMOTE,
+            game_region="zh_CN",
+            output_root=tmp_path / "output",
+            temp_root=tmp_path / "temp",
+            log_root=tmp_path / "output" / "logs",
+            baidu_remote_root="/apps/test",
+            control_plane_base_url=server.base_url,
+        )
+        heartbeats: list[tuple[str, str]] = []
+        reports: list[str] = []
+
+        class _FakeService:
+            def get_pipeline_bootstrap(self, request) -> PipelineBootstrapResponse:
+                return PipelineBootstrapResponse(
+                    current_version="16.5",
+                    previous_version="16.4",
+                    current_pair=ControlPlaneManifestPair(
+                        version="16.5",
+                        lcu_manifest_url="https://lcu.example/16.5",
+                        game_manifest_url="https://game.example/16.5",
+                    ),
+                )
+
+            def report_pipeline_run_heartbeat(self, request):
+                heartbeats.append((request.status, request.progress["stage"]))
+                return type("Resp", (), {"accepted": True, "persisted_at": "2026-03-08T12:00:00+08:00"})()
+
+            def report_pipeline_run_result(self, request):
+                reports.append(request.status.value)
+                return type(
+                    "Resp",
+                    (),
+                    {
+                        "accepted": True,
+                        "persisted_at": "2026-03-08T12:00:00+08:00",
+                        "next_head_version": request.to_version,
+                    },
+                )()
+
+        monkeypatch.setattr(orchestrator, "_build_control_service", lambda config: _FakeService())
+        monkeypatch.setattr(
+            orchestrator,
+            "resolve_remote_manifest_pair",
+            lambda config: ManifestPairRef(
+                version="16.5",
+                lcu_manifest_url="https://lcu.example",
+                game_manifest_url="https://game.example",
+                match_mode="ignore_revision",
+                match_reason="ok",
+            ),
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_resolve_remote_targets",
+            lambda config, run_id, current_pair: (
+                tuple(),
+                replace(config, include_champions=False, include_maps=False),
+                orchestrator.PipelineDecisionSnapshot(
+                    run_id=run_id,
+                    target_source="none",
+                    target_count=0,
+                    remote_execution_skipped=True,
+                ),
+            ),
+        )
+
+        summary = orchestrator.run_pipeline(config)
+
+        assert summary.status is PipelineRunStatus.SUCCESS
+        assert server.events
+        assert server.events[0]["event"]["event_type"] == "run_started"
+        assert server.events[0]["event"]["seq"] == 1
+        assert server.terminal_summaries[0]["summary"]["final_status"] == "success"
+        assert server.terminal_summaries[0]["summary"]["last_seq"] >= 1
+        assert not heartbeats
+        assert server.heartbeats
+        assert server.heartbeats[0]["status"] == "running"
+        assert server.heartbeats[0]["progress"]["relay_runtime"]["managed"] is True
+        assert reports == ["success"]
+        state_payload = json.loads(summary.log_dir.joinpath("log_relay_state.json").read_text(encoding="utf-8"))
+        assert state_payload["terminal_sent"] is True
+    finally:
+        server.close()
 
 
 def test_run_pipeline_should_skip_remote_execution_when_no_targets_resolved(

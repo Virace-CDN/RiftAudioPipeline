@@ -1,25 +1,29 @@
-"""Cloudflare Worker 控制面高层服务。"""
+"""control plane 控制面高层服务。"""
 
 from __future__ import annotations
 
 from dataclasses import asdict
 
-from rift_audio_pipeline.cloudflare.client import CloudflareWorkerClient
-from rift_audio_pipeline.cloudflare.errors import CloudflareResponseValidationError
-from rift_audio_pipeline.cloudflare.models import BaiduAccessGrant
-from rift_audio_pipeline.cloudflare.models import CloudflareManifestPair
-from rift_audio_pipeline.cloudflare.models import PipelineBootstrapRequest
-from rift_audio_pipeline.cloudflare.models import PipelineBootstrapResponse
-from rift_audio_pipeline.cloudflare.models import RunHeartbeatRequest
-from rift_audio_pipeline.cloudflare.models import RunHeartbeatResponse
-from rift_audio_pipeline.cloudflare.models import RunReportRequest
-from rift_audio_pipeline.cloudflare.models import RunReportResponse
+from rift_audio_pipeline.control_plane.client import ControlPlaneClient
+from rift_audio_pipeline.control_plane.errors import ControlPlaneResponseValidationError
+from rift_audio_pipeline.control_plane.models import BaiduAccessGrant
+from rift_audio_pipeline.control_plane.models import ControlPlaneManifestPair
+from rift_audio_pipeline.control_plane.models import PipelineBootstrapRequest
+from rift_audio_pipeline.control_plane.models import PipelineBootstrapResponse
+from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
+from rift_audio_pipeline.control_plane.models import RunHeartbeatResponse
+from rift_audio_pipeline.control_plane.models import RunLogEventRequest
+from rift_audio_pipeline.control_plane.models import RunLogEventResponse
+from rift_audio_pipeline.control_plane.models import RunLogFinalizeRequest
+from rift_audio_pipeline.control_plane.models import RunLogFinalizeResponse
+from rift_audio_pipeline.control_plane.models import RunReportRequest
+from rift_audio_pipeline.control_plane.models import RunReportResponse
 
 
-class CloudflareControlService:
-    """面向 orchestrator 的 Cloudflare 控制面服务。"""
+class ControlPlaneService:
+    """面向 orchestrator 的 control plane 服务。"""
 
-    def __init__(self, client: CloudflareWorkerClient) -> None:
+    def __init__(self, client: ControlPlaneClient) -> None:
         self._client = client
 
     def get_pipeline_bootstrap(
@@ -66,8 +70,8 @@ class CloudflareControlService:
         )
         accepted = response_payload.get("accepted")
         if not isinstance(accepted, bool):
-            raise CloudflareResponseValidationError(
-                "Cloudflare Worker run report 响应缺少 accepted 布尔值。"
+            raise ControlPlaneResponseValidationError(
+                "control plane run report 响应缺少 accepted 布尔值。"
             )
         return RunReportResponse(
             accepted=accepted,
@@ -85,19 +89,60 @@ class CloudflareControlService:
         )
         accepted = response_payload.get("accepted")
         if not isinstance(accepted, bool):
-            raise CloudflareResponseValidationError(
-                "Cloudflare Worker heartbeat 响应缺少 accepted 布尔值。"
+            raise ControlPlaneResponseValidationError(
+                "control plane heartbeat 响应缺少 accepted 布尔值。"
             )
         return RunHeartbeatResponse(
             accepted=accepted,
             persisted_at=_optional_str(response_payload, "persisted_at"),
         )
 
+    def report_pipeline_run_log_event(self, request: RunLogEventRequest) -> RunLogEventResponse:
+        """向 Worker 发送单条实时运行日志。"""
 
-def _parse_manifest_pair(payload: dict[str, object]) -> CloudflareManifestPair:
+        response_payload = self._client.request_json(
+            "POST",
+            f"/api/pipeline/runs/{request.run_id}/logs",
+            payload=_serialize_payload(asdict(request)),
+        )
+        accepted = response_payload.get("accepted")
+        if not isinstance(accepted, bool):
+            raise ControlPlaneResponseValidationError(
+                "control plane log event 响应缺少 accepted 布尔值。"
+            )
+        return RunLogEventResponse(
+            accepted=accepted,
+            persisted_at=_optional_str(response_payload, "persisted_at"),
+            next_expected_seq=_optional_int(response_payload, "next_expected_seq"),
+        )
+
+    def finalize_pipeline_run_logs(
+        self,
+        request: RunLogFinalizeRequest,
+    ) -> RunLogFinalizeResponse:
+        """向 Worker 发送运行终态日志摘要。"""
+
+        response_payload = self._client.request_json(
+            "POST",
+            f"/api/pipeline/runs/{request.run_id}/logs/finalize",
+            payload=_serialize_payload(asdict(request)),
+        )
+        accepted = response_payload.get("accepted")
+        if not isinstance(accepted, bool):
+            raise ControlPlaneResponseValidationError(
+                "control plane log finalize 响应缺少 accepted 布尔值。"
+            )
+        return RunLogFinalizeResponse(
+            accepted=accepted,
+            persisted_at=_optional_str(response_payload, "persisted_at"),
+            worker_status=_optional_str(response_payload, "worker_status"),
+        )
+
+
+def _parse_manifest_pair(payload: dict[str, object]) -> ControlPlaneManifestPair:
     """解析 manifest pair 响应。"""
 
-    return CloudflareManifestPair(
+    return ControlPlaneManifestPair(
         version=_require_str(payload, "version"),
         lcu_manifest_url=_require_str(payload, "lcu_manifest_url"),
         game_manifest_url=_require_str(payload, "game_manifest_url"),
@@ -126,13 +171,24 @@ def _serialize_payload(payload: dict[str, object]) -> dict[str, object]:
     for key, value in payload.items():
         if value is None:
             continue
-        if isinstance(value, tuple):
-            serialized[key] = list(value)
-        elif isinstance(value, dict):
-            serialized[key] = _serialize_payload(value)
-        else:
-            serialized[key] = value
+        serialized[key] = _serialize_value(value)
     return serialized
+
+
+def _serialize_value(value: object) -> object:
+    """递归序列化嵌套 tuple/list/dict。"""
+
+    if isinstance(value, tuple):
+        return [_serialize_value(item) for item in value]
+    if isinstance(value, list):
+        return [_serialize_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _serialize_value(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    return value
 
 
 def _require_str(payload: dict[str, object], key: str) -> str:
@@ -140,7 +196,7 @@ def _require_str(payload: dict[str, object], key: str) -> str:
 
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise CloudflareResponseValidationError(f"Cloudflare Worker 响应缺少有效字符串字段：{key}")
+        raise ControlPlaneResponseValidationError(f"control plane 响应缺少有效字符串字段：{key}")
     return value
 
 
@@ -151,9 +207,20 @@ def _optional_str(payload: dict[str, object], key: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise CloudflareResponseValidationError(
-            f"Cloudflare Worker 响应字段必须为字符串或 null：{key}"
+        raise ControlPlaneResponseValidationError(
+            f"control plane 响应字段必须为字符串或 null：{key}"
         )
+    return value
+
+
+def _optional_int(payload: dict[str, object], key: str) -> int | None:
+    """读取可选整数值字段。"""
+
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int):
+        raise ControlPlaneResponseValidationError(f"control plane 响应字段必须为整数或 null：{key}")
     return value
 
 
@@ -162,7 +229,7 @@ def _require_dict(payload: dict[str, object], key: str) -> dict[str, object]:
 
     value = payload.get(key)
     if not isinstance(value, dict):
-        raise CloudflareResponseValidationError(f"Cloudflare Worker 响应缺少有效对象字段：{key}")
+        raise ControlPlaneResponseValidationError(f"control plane 响应缺少有效对象字段：{key}")
     return value
 
 
@@ -173,7 +240,7 @@ def _optional_dict(payload: dict[str, object], key: str) -> dict[str, object] | 
     if value is None:
         return None
     if not isinstance(value, dict):
-        raise CloudflareResponseValidationError(
-            f"Cloudflare Worker 响应字段必须为对象或 null：{key}"
+        raise ControlPlaneResponseValidationError(
+            f"control plane 响应字段必须为对象或 null：{key}"
         )
     return value

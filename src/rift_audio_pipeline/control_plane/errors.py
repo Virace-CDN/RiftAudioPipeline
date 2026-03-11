@@ -1,17 +1,17 @@
-"""Cloudflare 对接层异常定义。"""
+"""control plane 对接层异常定义。"""
 
 from __future__ import annotations
 
 
-class CloudflareError(RuntimeError):
-    """Cloudflare 对接层基类异常。"""
+class ControlPlaneError(RuntimeError):
+    """control plane 对接层基类异常。"""
 
 
-class CloudflareConfigurationError(CloudflareError):
-    """Cloudflare 对接层配置非法。"""
+class ControlPlaneConfigurationError(ControlPlaneError):
+    """control plane 对接层配置非法。"""
 
 
-class CloudflareApiError(CloudflareError):
+class ControlPlaneApiError(ControlPlaneError):
     """Worker API 返回非成功状态码。"""
 
     def __init__(
@@ -26,13 +26,13 @@ class CloudflareApiError(CloudflareError):
         self.response_body = response_body
 
 
-class CloudflareAuthenticationError(CloudflareApiError):
+class ControlPlaneAuthenticationError(ControlPlaneApiError):
     """Worker API 鉴权失败。"""
 
 
-class CloudflareResponseValidationError(CloudflareError):
+class ControlPlaneResponseValidationError(ControlPlaneError):
     """Worker API 响应结构非法。"""
 
 
-class CloudflareControlPlaneUnavailableError(CloudflareError):
+class ControlPlaneUnavailableError(ControlPlaneError):
     """Worker 控制面暂不可用。"""

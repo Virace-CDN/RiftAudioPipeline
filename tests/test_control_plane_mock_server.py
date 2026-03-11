@@ -5,20 +5,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rift_audio_pipeline.cloudflare.client import CloudflareWorkerClient
-from rift_audio_pipeline.cloudflare.mock_server import MockControlPlaneConfig
-from rift_audio_pipeline.cloudflare.mock_server import MockControlPlaneServer
-from rift_audio_pipeline.cloudflare.models import CloudflareControlConfig
-from rift_audio_pipeline.cloudflare.models import PipelineBootstrapRequest
-from rift_audio_pipeline.cloudflare.models import RunHeartbeatRequest
-from rift_audio_pipeline.cloudflare.models import RunReportRequest
-from rift_audio_pipeline.cloudflare.service import CloudflareControlService
+from rift_audio_pipeline.control_plane.client import ControlPlaneClient
+from rift_audio_pipeline.control_plane.mock_server import MockControlPlaneConfig
+from rift_audio_pipeline.control_plane.mock_server import MockControlPlaneServer
+from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
+from rift_audio_pipeline.control_plane.models import PipelineBootstrapRequest
+from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
+from rift_audio_pipeline.control_plane.models import RunLogEventRequest
+from rift_audio_pipeline.control_plane.models import RunLogFinalizeRequest
+from rift_audio_pipeline.control_plane.models import RunReportRequest
+from rift_audio_pipeline.control_plane.service import ControlPlaneService
 from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
 
 
 def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> None:
-    """mock server 应能通过真实 HTTP 完成 bootstrap、heartbeat 与 report。"""
+    """mock server 应能通过真实 HTTP 完成 bootstrap、heartbeat、logs 与 report。"""
 
     fixture_dir = Path(__file__).parent / "fixtures" / "mock_control_plane"
     storage_root = tmp_path / "received"
@@ -32,9 +34,9 @@ def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> Non
     )
     server.start()
     try:
-        service = CloudflareControlService(
-            CloudflareWorkerClient(
-                CloudflareControlConfig(
+        service = ControlPlaneService(
+            ControlPlaneClient(
+                ControlPlaneConfig(
                     base_url=server.base_url,
                     bearer_token="mock-worker-token",
                     access_client_id="mock-client-id",
@@ -59,6 +61,27 @@ def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> Non
                 progress={"stage": "extract", "processed_targets": 2},
             )
         )
+        log_event = service.report_pipeline_run_log_event(
+            RunLogEventRequest(
+                run_id="run-mock-1",
+                event={
+                    "seq": 1,
+                    "stage": "init",
+                    "event_type": "run_started",
+                    "message": "pipeline 开始运行",
+                },
+            )
+        )
+        log_finalize = service.finalize_pipeline_run_logs(
+            RunLogFinalizeRequest(
+                run_id="run-mock-1",
+                summary={
+                    "final_status": "success",
+                    "final_stage": "finalize",
+                    "last_seq": 1,
+                },
+            )
+        )
         report = service.report_pipeline_run_result(
             RunReportRequest(
                 run_id="run-mock-1",
@@ -79,18 +102,29 @@ def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> Non
     assert bootstrap.baidu_access_grant is not None
     assert bootstrap.baidu_access_grant.refresh_token == "mock-baidu-refresh-token"
     assert heartbeat.accepted is True
+    assert log_event.accepted is True
+    assert log_event.next_expected_seq == 2
+    assert log_finalize.accepted is True
+    assert log_finalize.worker_status == "success"
     assert report.accepted is True
     assert report.next_head_version == "16.5"
 
     bootstrap_payload = _read_json(storage_root / "bootstrap_requests" / "0001.json")
     heartbeat_payload = _read_json(storage_root / "runs" / "run-mock-1" / "heartbeats" / "0001.json")
+    log_payload = _read_json(storage_root / "runs" / "run-mock-1" / "logs" / "0001.json")
+    log_finalize_payload = _read_json(storage_root / "runs" / "run-mock-1" / "logs_finalize.json")
     report_payload = _read_json(storage_root / "runs" / "run-mock-1" / "report.json")
+    run_state_payload = _read_json(storage_root / "runs" / "run-mock-1" / "run_state.json")
 
     assert bootstrap_payload["payload"]["requested_by"] == "pytest"
     assert bootstrap_payload["payload"]["champion_ids"] == [1, 103]
     assert heartbeat_payload["payload"]["progress"]["stage"] == "extract"
+    assert log_payload["payload"]["event"]["seq"] == 1
+    assert log_finalize_payload["payload"]["summary"]["final_status"] == "success"
     assert report_payload["payload"]["status"] == "success"
     assert report_payload["response"]["next_head_version"] == "16.5"
+    assert run_state_payload["status"] == "success"
+    assert run_state_payload["source"] == "report"
 
 
 def _read_json(path: Path) -> dict[str, object]:

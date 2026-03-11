@@ -6,6 +6,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from typing import cast
 from typing import TYPE_CHECKING
 
 from rift_audio_pipeline.pipeline.logging import emit_event
@@ -139,105 +140,161 @@ def run_remote_pipeline(
     """
 
     from lol_audio_unpack import LolAudioUnpackApp
+    from lol_audio_unpack.remote_preparer import RemoteSnapshotPreparer
 
     ctx = build_remote_app_context(config=config, pair=pair)
     app = LolAudioUnpackApp(ctx)
     collected_artifacts: list[EntityArtifacts] = []
-
-    emit_event(
-        log_ctx,
-        PipelineEvent(
-            run_id=log_ctx.run_id,
-            stage=PipelineStage.RESOLVE_MANIFEST_PAIR,
-            event_type="remote_manifest_pair_ready",
-            message="remote manifest pair 已就绪",
-            payload=asdict(pair),
-            created_at=datetime.now().astimezone().isoformat(),
-        ),
+    restore_hooks = _install_remote_progress_hooks(
+        app=app,
+        remote_preparer_cls=RemoteSnapshotPreparer,
+        log_ctx=log_ctx,
+        pair=pair,
+        config=config,
     )
 
-    if not config.run_extract and not config.run_mapping:
-        if config.run_update:
-            app.update(
-                build_remote_operation_options(
-                    config=config,
-                    champion_ids=config.champion_ids,
-                    map_ids=config.map_ids,
-                ),
-                target="all",
+    try:
+        emit_event(
+            log_ctx,
+            PipelineEvent(
+                run_id=log_ctx.run_id,
+                stage=PipelineStage.RESOLVE_MANIFEST_PAIR,
+                event_type="remote_manifest_pair_ready",
+                message="remote manifest pair 已就绪",
+                payload=asdict(pair),
+                created_at=datetime.now().astimezone().isoformat(),
+                status_hint="running",
+                operation="resolve_remote_manifest_pair",
+            ),
+        )
+
+        if not config.run_extract and not config.run_mapping:
+            if config.run_update:
+                app.update(
+                    build_remote_operation_options(
+                        config=config,
+                        champion_ids=config.champion_ids,
+                        map_ids=config.map_ids,
+                    ),
+                    target="all",
+                )
+            return collected_artifacts
+
+        update_options = (
+            build_remote_operation_options(
+                config=config,
+                champion_ids=config.champion_ids,
+                map_ids=config.map_ids,
             )
-        return collected_artifacts
+            if config.run_update
+            else None
+        )
+        extract_options = (
+            build_remote_operation_options(
+                config=config,
+                champion_ids=config.champion_ids,
+                map_ids=config.map_ids,
+                integrate_data=False,
+            )
+            if config.run_extract
+            else None
+        )
+        mapping_options = (
+            build_remote_operation_options(
+                config=config,
+                champion_ids=config.champion_ids,
+                map_ids=config.map_ids,
+                integrate_data=config.integrate_data,
+            )
+            if config.run_mapping
+            else None
+        )
 
-    update_options = (
-        build_remote_operation_options(
-            config=config,
-            champion_ids=config.champion_ids,
-            map_ids=config.map_ids,
-        )
-        if config.run_update
-        else None
-    )
-    extract_options = (
-        build_remote_operation_options(
-            config=config,
-            champion_ids=config.champion_ids,
-            map_ids=config.map_ids,
-            integrate_data=False,
-        )
-        if config.run_extract
-        else None
-    )
-    mapping_options = (
-        build_remote_operation_options(
-            config=config,
-            champion_ids=config.champion_ids,
-            map_ids=config.map_ids,
-            integrate_data=config.integrate_data,
-        )
-        if config.run_mapping
-        else None
-    )
+        def _on_entity_complete(raw_payload: object) -> None:
+            artifacts = convert_remote_payload(raw_payload)
+            collected_artifacts.append(artifacts)
+            emit_event(
+                log_ctx,
+                PipelineEvent(
+                    run_id=log_ctx.run_id,
+                    stage=PipelineStage.EXTRACT,
+                    event_type="remote_entity_complete",
+                    message=f"remote 实体处理完成：{artifacts.entity_type}#{artifacts.entity_id}",
+                    payload={
+                        "entity_type": artifacts.entity_type,
+                        "entity_id": artifacts.entity_id,
+                        "audio_output_paths": tuple(str(path) for path in artifacts.audio_output_paths),
+                        "mapping_output_path": (
+                            str(artifacts.mapping_output_path)
+                            if artifacts.mapping_output_path is not None
+                            else None
+                        ),
+                    },
+                    created_at=datetime.now().astimezone().isoformat(),
+                    status_hint="running",
+                    entity_type=artifacts.entity_type,
+                    entity_id=artifacts.entity_id,
+                    operation="remote_entity_complete",
+                ),
+            )
+            if on_entity_complete is not None:
+                on_entity_complete(artifacts)
 
-    def _on_entity_complete(raw_payload: object) -> None:
-        artifacts = convert_remote_payload(raw_payload)
-        collected_artifacts.append(artifacts)
+        work_item_count = _preview_remote_work_item_count(
+            app=app,
+            extract_options=extract_options,
+            mapping_options=mapping_options,
+            config=config,
+        )
         emit_event(
             log_ctx,
             PipelineEvent(
                 run_id=log_ctx.run_id,
                 stage=PipelineStage.EXTRACT,
-                event_type="remote_entity_complete",
-                message=f"remote 实体处理完成：{artifacts.entity_type}#{artifacts.entity_id}",
+                event_type="remote_entity_loop_started",
+                message="remote 单位循环开始",
                 payload={
-                    "entity_type": artifacts.entity_type,
-                    "entity_id": artifacts.entity_id,
-                    "audio_output_paths": tuple(str(path) for path in artifacts.audio_output_paths),
-                    "mapping_output_path": (
-                        str(artifacts.mapping_output_path)
-                        if artifacts.mapping_output_path is not None
-                        else None
-                    ),
+                    "work_item_count": work_item_count,
+                    "run_extract": config.run_extract,
+                    "run_mapping": config.run_mapping,
                 },
                 created_at=datetime.now().astimezone().isoformat(),
+                status_hint="running",
+                operation="remote_entity_loop",
             ),
         )
-        if on_entity_complete is not None:
-            on_entity_complete(artifacts)
-
-    app.run_remote_entity_workflow(
-        update_options=update_options,
-        update_target="all",
-        extract_options=extract_options,
-        mapping_options=mapping_options,
-        extract_include_champions=config.include_champions,
-        extract_include_maps=config.include_maps,
-        mapping_include_champions=config.include_champions,
-        mapping_include_maps=config.include_maps,
-        on_entity_complete=_on_entity_complete,
-        download_retry_attempts=config.download_retry_attempts,
-        entity_retry_attempts=config.entity_retry_attempts,
-    )
-    return collected_artifacts
+        app.run_remote_entity_workflow(
+            update_options=update_options,
+            update_target="all",
+            extract_options=extract_options,
+            mapping_options=mapping_options,
+            extract_include_champions=config.include_champions,
+            extract_include_maps=config.include_maps,
+            mapping_include_champions=config.include_champions,
+            mapping_include_maps=config.include_maps,
+            on_entity_complete=_on_entity_complete,
+            download_retry_attempts=config.download_retry_attempts,
+            entity_retry_attempts=config.entity_retry_attempts,
+        )
+        emit_event(
+            log_ctx,
+            PipelineEvent(
+                run_id=log_ctx.run_id,
+                stage=PipelineStage.EXTRACT,
+                event_type="remote_entity_loop_finished",
+                message="remote 单位循环完成",
+                payload={
+                    "work_item_count": work_item_count,
+                    "collected_artifact_count": len(collected_artifacts),
+                },
+                created_at=datetime.now().astimezone().isoformat(),
+                status_hint="running",
+                operation="remote_entity_loop",
+            ),
+        )
+        return collected_artifacts
+    finally:
+        restore_hooks()
 
 
 def _build_remote_cli_overrides(
@@ -260,3 +317,202 @@ def _build_remote_cli_overrides(
     if config.wwiser_path is not None:
         overrides["WWISER_PATH"] = str(config.wwiser_path)
     return overrides
+
+
+def _install_remote_progress_hooks(
+    *,
+    app: object,
+    remote_preparer_cls: type[object],
+    log_ctx: PipelineLogContext,
+    pair: ManifestPairRef,
+    config: PipelineRunConfig,
+) -> Callable[[], None]:
+    """给上游 remote 主线安装阶段化结构化事件。"""
+
+    original_prepare_lcu_game_data = getattr(remote_preparer_cls, "prepare_lcu_game_data", None)
+    original_prepare_bin_inputs = getattr(remote_preparer_cls, "prepare_bin_inputs", None)
+    original_update = getattr(app, "update", None)
+
+    if not callable(original_prepare_lcu_game_data) or not callable(original_prepare_bin_inputs):
+        return lambda: None
+
+    def _wrapped_prepare_lcu_game_data(preparer_self: object) -> object:
+        started_at = datetime.now().astimezone()
+        _emit_remote_phase_event(
+            log_ctx=log_ctx,
+            stage=PipelineStage.LOAD_REMOTE_INDEX,
+            event_type="remote_manifest_download_started",
+            message="开始下载 remote manifest",
+            payload={
+                "lcu_manifest_url": pair.lcu_manifest_url,
+                "game_manifest_url": pair.game_manifest_url,
+                "version": pair.version,
+            },
+            operation="remote_manifest_download",
+        )
+        _emit_remote_phase_event(
+            log_ctx=log_ctx,
+            stage=PipelineStage.UPDATE,
+            event_type="remote_min_environment_prepare_started",
+            message="开始准备最小化运行环境",
+            payload={"version": pair.version},
+            operation="remote_min_environment",
+        )
+        result = original_prepare_lcu_game_data(preparer_self)
+        duration_ms = int((datetime.now().astimezone() - started_at).total_seconds() * 1000)
+        _emit_remote_phase_event(
+            log_ctx=log_ctx,
+            stage=PipelineStage.LOAD_REMOTE_INDEX,
+            event_type="remote_manifest_download_finished",
+            message="remote manifest 下载完成",
+            payload={
+                "manifest_cache_path": str(getattr(result, "manifest_cache_path", "")),
+                "duration_ms": duration_ms,
+            },
+            operation="remote_manifest_download",
+        )
+        _emit_remote_phase_event(
+            log_ctx=log_ctx,
+            stage=PipelineStage.UPDATE,
+            event_type="remote_min_environment_prepare_finished",
+            message="最小化运行环境准备完成",
+            payload={
+                "prepared_lcu_root": str(getattr(result, "prepared_lcu_root", "")),
+                "bundle_count": len(getattr(result, "bundle_cache_paths", tuple())),
+                "description_cache_path": str(getattr(result, "description_cache_path", "")),
+                "duration_ms": duration_ms,
+            },
+            operation="remote_min_environment",
+        )
+        return result
+
+    def _wrapped_prepare_bin_inputs(preparer_self: object, **kwargs: object) -> object:
+        started_at = datetime.now().astimezone()
+        _emit_remote_phase_event(
+            log_ctx=log_ctx,
+            stage=PipelineStage.UPDATE,
+            event_type="remote_bin_prepare_started",
+            message="开始处理 BIN 输入",
+            payload={
+                "target": kwargs.get("target"),
+                "champion_ids": kwargs.get("champion_ids"),
+                "map_ids": kwargs.get("map_ids"),
+            },
+            operation="remote_bin_prepare",
+        )
+        result = original_prepare_bin_inputs(preparer_self, **kwargs)
+        duration_ms = int((datetime.now().astimezone() - started_at).total_seconds() * 1000)
+        extracted_file_count = getattr(result, "extracted_file_count", 0) if result is not None else 0
+        _emit_remote_phase_event(
+            log_ctx=log_ctx,
+            stage=PipelineStage.UPDATE,
+            event_type="remote_bin_prepare_finished",
+            message="BIN 输入处理完成",
+            payload={
+                "target": kwargs.get("target"),
+                "champion_ids": kwargs.get("champion_ids"),
+                "map_ids": kwargs.get("map_ids"),
+                "extracted_file_count": extracted_file_count,
+                "duration_ms": duration_ms,
+            },
+            operation="remote_bin_prepare",
+        )
+        return result
+
+    def _wrapped_update(opts: object, *, target: str = "all") -> None:
+        started_at = datetime.now().astimezone()
+        _emit_remote_phase_event(
+            log_ctx=log_ctx,
+            stage=PipelineStage.UPDATE,
+            event_type="remote_update_started",
+            message="开始执行 remote update 主线",
+            payload={
+                "target": target,
+                "champion_ids": getattr(opts, "champion_ids", None),
+                "map_ids": getattr(opts, "map_ids", None),
+            },
+            operation="remote_update",
+        )
+        original_update(opts, target=target)
+        duration_ms = int((datetime.now().astimezone() - started_at).total_seconds() * 1000)
+        _emit_remote_phase_event(
+            log_ctx=log_ctx,
+            stage=PipelineStage.UPDATE,
+            event_type="remote_update_finished",
+            message="remote update 主线完成",
+            payload={
+                "target": target,
+                "champion_ids": getattr(opts, "champion_ids", None),
+                "map_ids": getattr(opts, "map_ids", None),
+                "duration_ms": duration_ms,
+            },
+            operation="remote_update",
+        )
+
+    setattr(remote_preparer_cls, "prepare_lcu_game_data", _wrapped_prepare_lcu_game_data)
+    setattr(remote_preparer_cls, "prepare_bin_inputs", _wrapped_prepare_bin_inputs)
+    if callable(original_update):
+        setattr(app, "update", _wrapped_update)
+
+    def _restore() -> None:
+        setattr(remote_preparer_cls, "prepare_lcu_game_data", original_prepare_lcu_game_data)
+        setattr(remote_preparer_cls, "prepare_bin_inputs", original_prepare_bin_inputs)
+        if callable(original_update):
+            setattr(app, "update", original_update)
+
+    return _restore
+
+
+def _preview_remote_work_item_count(
+    *,
+    app: object,
+    extract_options: object | None,
+    mapping_options: object | None,
+    config: PipelineRunConfig,
+) -> int | None:
+    """预估 remote 单位循环待处理项数量。"""
+
+    explicit_target_count = len(config.champion_ids or tuple()) + len(config.map_ids or tuple())
+    if explicit_target_count > 0:
+        return explicit_target_count
+    build_items = getattr(app, "build_remote_entity_work_items", None)
+    if not callable(build_items):
+        return None
+    try:
+        work_items = build_items(
+            extract_options=extract_options,
+            mapping_options=mapping_options,
+            extract_include_champions=config.include_champions,
+            extract_include_maps=config.include_maps,
+            mapping_include_champions=config.include_champions,
+            mapping_include_maps=config.include_maps,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return len(cast(list[object], work_items))
+
+
+def _emit_remote_phase_event(
+    *,
+    log_ctx: PipelineLogContext,
+    stage: PipelineStage,
+    event_type: str,
+    message: str,
+    payload: dict[str, object],
+    operation: str,
+) -> None:
+    """发出 remote 主线阶段事件。"""
+
+    emit_event(
+        log_ctx,
+        PipelineEvent(
+            run_id=log_ctx.run_id,
+            stage=stage,
+            event_type=event_type,
+            message=message,
+            payload=payload,
+            created_at=datetime.now().astimezone().isoformat(),
+            status_hint="running",
+            operation=operation,
+        ),
+    )

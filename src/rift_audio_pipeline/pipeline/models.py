@@ -72,8 +72,8 @@ class PipelineRunConfig:
         previous_match_reason: 上一版 manifest pair 匹配原因。
         control_plane_base_url: 控制面基础 URL。
         control_plane_bearer_token: 控制面 Bearer token。
-        control_plane_access_client_id: Cloudflare Access client id。
-        control_plane_access_client_secret: Cloudflare Access client secret。
+        control_plane_access_client_id: Access service token client id。
+        control_plane_access_client_secret: Access service token client secret。
         control_plane_timeout_seconds: 控制面超时秒数。
         control_plane_requested_by: 启动请求来源。
         game_path: 本地模式游戏目录。
@@ -182,7 +182,47 @@ class PipelineEvent:
     message: str
     payload: Mapping[str, Any]
     created_at: str
+    seq: int | None = None
+    source: str = "pipeline"
+    level: str = "INFO"
+    status_hint: str | None = None
+    thread_name: str | None = None
+    process_id: int | None = None
+    entity_type: str | None = None
+    entity_id: int | None = None
+    entity_alias: str | None = None
+    attempt: int | None = None
+    operation: str | None = None
+    code_file: str | None = None
+    code_function: str | None = None
+    code_line: int | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+    exception_module: str | None = None
+    traceback: str | None = None
+    cause_chain: tuple[Mapping[str, str], ...] = tuple()
     schema_version: int = PIPELINE_EVENT_SCHEMA_VERSION
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineLogTerminalSummary:
+    """运行结束时发给控制面的终态摘要。"""
+
+    run_id: str
+    finished_at: str
+    final_status: str
+    final_stage: str
+    last_seq: int
+    processed_targets: int
+    succeeded_targets: int
+    failed_targets: int
+    uploaded_archives: int
+    raw_log_bundle_ready: bool
+    raw_log_local_dir: str
+    raw_log_remote_path: str | None
+    summary: Mapping[str, Any]
+    error_brief: Mapping[str, Any] | None = None
+    schema_version: int = PIPELINE_SUMMARY_SCHEMA_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +295,19 @@ class PipelineErrorSnapshot:
     error_message: str
     payload: Mapping[str, Any]
     created_at: str
+    thread_name: str | None = None
+    process_id: int | None = None
+    entity_type: str | None = None
+    entity_id: int | None = None
+    entity_alias: str | None = None
+    attempt: int | None = None
+    operation: str | None = None
+    code_file: str | None = None
+    code_function: str | None = None
+    code_line: int | None = None
+    exception_module: str | None = None
+    traceback: str | None = None
+    cause_chain: tuple[Mapping[str, str], ...] = tuple()
     schema_version: int = PIPELINE_ERROR_SCHEMA_VERSION
 
 

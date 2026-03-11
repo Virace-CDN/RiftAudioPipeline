@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from dataclasses import asdict
 import json
 from pathlib import Path
 from typing import Sequence
 
+from rift_audio_pipeline.control_plane.simulation import maybe_patch_pipeline_for_simulation
 from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunConfig
 from rift_audio_pipeline.pipeline.orchestrator import run_pipeline
@@ -116,7 +118,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     config = build_run_config(args)
-    summary = run_pipeline(config)
+    patch_context = maybe_patch_pipeline_for_simulation(config)
+    with patch_context if patch_context is not None else nullcontext():
+        summary = run_pipeline(config)
     print(json.dumps(_to_json_compatible(asdict(summary)), ensure_ascii=False, indent=2))
     return 0 if summary.status == "success" else 1
 
@@ -146,3 +150,7 @@ def _to_json_compatible(value: object) -> object:
         if isinstance(enum_value, str):
             return enum_value
     return value
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

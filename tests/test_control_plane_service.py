@@ -1,13 +1,15 @@
-"""Cloudflare 控制面服务测试。"""
+"""control plane服务测试。"""
 
 from __future__ import annotations
 
 from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
-from rift_audio_pipeline.cloudflare.models import PipelineBootstrapRequest
-from rift_audio_pipeline.cloudflare.models import RunHeartbeatRequest
-from rift_audio_pipeline.cloudflare.models import RunReportRequest
-from rift_audio_pipeline.cloudflare.service import CloudflareControlService
+from rift_audio_pipeline.control_plane.models import PipelineBootstrapRequest
+from rift_audio_pipeline.control_plane.models import RunHeartbeatRequest
+from rift_audio_pipeline.control_plane.models import RunLogEventRequest
+from rift_audio_pipeline.control_plane.models import RunLogFinalizeRequest
+from rift_audio_pipeline.control_plane.models import RunReportRequest
+from rift_audio_pipeline.control_plane.service import ControlPlaneService
 
 
 class _FakeClient:
@@ -49,7 +51,7 @@ class _FakeClient:
 def test_get_pipeline_bootstrap_should_parse_response() -> None:
     """应把 bootstrap 响应解析为强类型对象。"""
 
-    service = CloudflareControlService(_FakeClient())
+    service = ControlPlaneService(_FakeClient())
 
     response = service.get_pipeline_bootstrap(
         PipelineBootstrapRequest(
@@ -69,7 +71,7 @@ def test_get_pipeline_bootstrap_should_parse_response() -> None:
 def test_report_pipeline_run_result_should_parse_response() -> None:
     """应把 run report 响应解析为强类型对象。"""
 
-    service = CloudflareControlService(_FakeClient())
+    service = ControlPlaneService(_FakeClient())
 
     response = service.report_pipeline_run_result(
         RunReportRequest(
@@ -88,7 +90,7 @@ def test_report_pipeline_run_result_should_parse_response() -> None:
 def test_report_pipeline_run_heartbeat_should_parse_response() -> None:
     """应把 heartbeat 响应解析为强类型对象。"""
 
-    service = CloudflareControlService(_FakeClient())
+    service = ControlPlaneService(_FakeClient())
 
     response = service.report_pipeline_run_heartbeat(
         RunHeartbeatRequest(
@@ -96,6 +98,39 @@ def test_report_pipeline_run_heartbeat_should_parse_response() -> None:
             status="running",
             last_log_at="2026-03-08T12:00:00+08:00",
             progress={"stage": "extract"},
+        )
+    )
+
+    assert response.accepted is True
+    assert response.persisted_at == "2026-03-08T12:00:00+08:00"
+
+
+def test_report_pipeline_run_log_event_should_parse_response() -> None:
+    """应把实时日志响应解析为强类型对象。"""
+
+    service = ControlPlaneService(_FakeClient())
+
+    response = service.report_pipeline_run_log_event(
+        RunLogEventRequest(
+            run_id="run-1",
+            event={"seq": 1, "event_type": "run_started", "message": "started"},
+        )
+    )
+
+    assert response.accepted is True
+    assert response.persisted_at == "2026-03-08T12:00:00+08:00"
+    assert response.next_expected_seq is None
+
+
+def test_finalize_pipeline_run_logs_should_parse_response() -> None:
+    """应把终态日志摘要响应解析为强类型对象。"""
+
+    service = ControlPlaneService(_FakeClient())
+
+    response = service.finalize_pipeline_run_logs(
+        RunLogFinalizeRequest(
+            run_id="run-1",
+            summary={"final_status": "success", "last_seq": 3},
         )
     )
 

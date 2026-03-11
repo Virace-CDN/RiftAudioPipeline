@@ -95,6 +95,8 @@ def run_local_pipeline(
                 "config": asdict(config),
             },
             created_at=datetime.now().astimezone().isoformat(),
+            status_hint="running",
+            operation="build_local_context",
         ),
     )
 
@@ -126,6 +128,8 @@ def run_local_pipeline(
                 "entity_ids": [artifact.entity_id for artifact in artifacts],
             },
             created_at=datetime.now().astimezone().isoformat(),
+            status_hint="running",
+            operation="scan_local_artifacts",
         ),
     )
     return artifacts

@@ -18,9 +18,10 @@ dependencies = [
 [project.scripts]
 rift-baidu-oauth = "rift_audio_pipeline.baidu.cli:main"
 rift-audio-pipeline = "rift_audio_pipeline.pipeline.cli:main"
-rift-faker-github = "rift_audio_pipeline.cloudflare.faker_github:main"
-rift-mock-control-plane = "rift_audio_pipeline.cloudflare.mock_server:main"
-rift-mock-smoke = "rift_audio_pipeline.cloudflare.mock_smoke:main"
+rift-faker-github = "rift_audio_pipeline.control_plane.faker_github:main"
+rift-mock-control-plane = "rift_audio_pipeline.control_plane.mock_server:main"
+rift-mock-smoke = "rift_audio_pipeline.control_plane.mock_smoke:main"
+rift-control-plane-e2e = "rift_audio_pipeline.control_plane.e2e_simulation:main"
 
 [dependency-groups]
 dev = [

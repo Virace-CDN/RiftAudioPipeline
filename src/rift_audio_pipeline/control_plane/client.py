@@ -1,4 +1,4 @@
-"""Cloudflare Worker API 客户端。"""
+"""control plane API 客户端。"""
 
 from __future__ import annotations
 
@@ -7,20 +7,20 @@ from typing import Any
 
 import urllib3
 
-from rift_audio_pipeline.cloudflare.errors import CloudflareApiError
-from rift_audio_pipeline.cloudflare.errors import CloudflareAuthenticationError
-from rift_audio_pipeline.cloudflare.errors import CloudflareConfigurationError
-from rift_audio_pipeline.cloudflare.errors import CloudflareControlPlaneUnavailableError
-from rift_audio_pipeline.cloudflare.errors import CloudflareResponseValidationError
-from rift_audio_pipeline.cloudflare.models import CloudflareControlConfig
+from rift_audio_pipeline.control_plane.errors import ControlPlaneApiError
+from rift_audio_pipeline.control_plane.errors import ControlPlaneAuthenticationError
+from rift_audio_pipeline.control_plane.errors import ControlPlaneConfigurationError
+from rift_audio_pipeline.control_plane.errors import ControlPlaneUnavailableError
+from rift_audio_pipeline.control_plane.errors import ControlPlaneResponseValidationError
+from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 
 
-class CloudflareWorkerClient:
+class ControlPlaneClient:
     """面向本仓的 Worker API HTTP 客户端。"""
 
     def __init__(
         self,
-        config: CloudflareControlConfig,
+        config: ControlPlaneConfig,
         *,
         http_client: urllib3.PoolManager | Any | None = None,
     ) -> None:
@@ -45,11 +45,11 @@ class CloudflareWorkerClient:
             dict[str, object]: 响应 JSON 对象。
 
         Raises:
-            CloudflareConfigurationError: 配置非法。
-            CloudflareAuthenticationError: 鉴权失败。
-            CloudflareApiError: 返回非成功状态码。
-            CloudflareControlPlaneUnavailableError: 网络失败或响应不可达。
-            CloudflareResponseValidationError: 响应不是合法 JSON 对象。
+            ControlPlaneConfigurationError: 配置非法。
+            ControlPlaneAuthenticationError: 鉴权失败。
+            ControlPlaneApiError: 返回非成功状态码。
+            ControlPlaneUnavailableError: 网络失败或响应不可达。
+            ControlPlaneResponseValidationError: 响应不是合法 JSON 对象。
         """
 
         url = self._build_url(path)
@@ -68,21 +68,21 @@ class CloudflareWorkerClient:
                 timeout=timeout,
             )
         except Exception as error:  # noqa: BLE001
-            raise CloudflareControlPlaneUnavailableError(
-                f"Cloudflare Worker API 请求失败：{url}"
+            raise ControlPlaneUnavailableError(
+                f"control plane API 请求失败：{url}"
             ) from error
 
         response_payload = self._decode_json_object(response.data)
         if response.status in {401, 403}:
-            raise CloudflareAuthenticationError(
+            raise ControlPlaneAuthenticationError(
                 status_code=response.status,
-                message=f"Cloudflare Worker API 鉴权失败：HTTP {response.status}",
+                message=f"control plane API 鉴权失败：HTTP {response.status}",
                 response_body=response_payload,
             )
         if response.status >= 400:
-            raise CloudflareApiError(
+            raise ControlPlaneApiError(
                 status_code=response.status,
-                message=f"Cloudflare Worker API 调用失败：HTTP {response.status}",
+                message=f"control plane API 调用失败：HTTP {response.status}",
                 response_body=response_payload,
             )
         return response_payload
@@ -92,7 +92,7 @@ class CloudflareWorkerClient:
 
         normalized_path = path.strip()
         if not normalized_path:
-            raise CloudflareConfigurationError("Cloudflare Worker API path 不能为空。")
+            raise ControlPlaneConfigurationError("control plane API path 不能为空。")
         if normalized_path.startswith("http://") or normalized_path.startswith("https://"):
             return normalized_path
         if not normalized_path.startswith("/"):
@@ -125,11 +125,11 @@ class CloudflareWorkerClient:
         try:
             decoded = json.loads(text)
         except json.JSONDecodeError as error:
-            raise CloudflareResponseValidationError(
-                "Cloudflare Worker API 返回了非 JSON 响应。"
+            raise ControlPlaneResponseValidationError(
+                "control plane API 返回了非 JSON 响应。"
             ) from error
         if not isinstance(decoded, dict):
-            raise CloudflareResponseValidationError(
-                "Cloudflare Worker API 返回的 JSON 根对象必须为字典。"
+            raise ControlPlaneResponseValidationError(
+                "control plane API 返回的 JSON 根对象必须为字典。"
             )
         return decoded

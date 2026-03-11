@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from rift_audio_pipeline.cloudflare import github_actions_workflow
+from rift_audio_pipeline.control_plane import github_actions_workflow
 
 
 def test_build_workflow_command_should_map_structured_dispatch_inputs(tmp_path: Path) -> None:

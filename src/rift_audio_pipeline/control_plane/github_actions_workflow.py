@@ -8,11 +8,11 @@ from pathlib import Path
 import subprocess
 import sys
 
-from rift_audio_pipeline.cloudflare.faker_github import DispatchPayload
-from rift_audio_pipeline.cloudflare.faker_github import FakerGitHubConfig
-from rift_audio_pipeline.cloudflare.faker_github import _serialize_dispatch_inputs
-from rift_audio_pipeline.cloudflare.faker_github import build_pipeline_command
-from rift_audio_pipeline.cloudflare.faker_github import parse_dispatch_payload
+from rift_audio_pipeline.control_plane.faker_github import DispatchPayload
+from rift_audio_pipeline.control_plane.faker_github import FakerGitHubConfig
+from rift_audio_pipeline.control_plane.faker_github import _serialize_dispatch_inputs
+from rift_audio_pipeline.control_plane.faker_github import build_pipeline_command
+from rift_audio_pipeline.control_plane.faker_github import parse_dispatch_payload
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -1,4 +1,4 @@
-"""Cloudflare Worker API 客户端测试。"""
+"""control plane API 客户端测试。"""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import json
 
 import pytest
 
-from rift_audio_pipeline.cloudflare.client import CloudflareWorkerClient
-from rift_audio_pipeline.cloudflare.errors import CloudflareApiError
-from rift_audio_pipeline.cloudflare.errors import CloudflareAuthenticationError
-from rift_audio_pipeline.cloudflare.models import CloudflareControlConfig
+from rift_audio_pipeline.control_plane.client import ControlPlaneClient
+from rift_audio_pipeline.control_plane.errors import ControlPlaneApiError
+from rift_audio_pipeline.control_plane.errors import ControlPlaneAuthenticationError
+from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 
 
 class _FakeResponse:
@@ -33,8 +33,8 @@ def test_request_json_should_send_bearer_and_access_headers() -> None:
 
     response = _FakeResponse(status=200, payload={"ok": True})
     http_client = _FakeHttpClient(response)
-    client = CloudflareWorkerClient(
-        CloudflareControlConfig(
+    client = ControlPlaneClient(
+        ControlPlaneConfig(
             base_url="https://control.example.com",
             bearer_token="worker-token",
             access_client_id="client-id",
@@ -55,22 +55,22 @@ def test_request_json_should_send_bearer_and_access_headers() -> None:
 def test_request_json_should_raise_auth_error_on_403() -> None:
     """403 应映射为鉴权失败。"""
 
-    client = CloudflareWorkerClient(
-        CloudflareControlConfig(base_url="https://control.example.com"),
+    client = ControlPlaneClient(
+        ControlPlaneConfig(base_url="https://control.example.com"),
         http_client=_FakeHttpClient(_FakeResponse(status=403, payload={"error": "forbidden"})),
     )
 
-    with pytest.raises(CloudflareAuthenticationError):
+    with pytest.raises(ControlPlaneAuthenticationError):
         client.request_json("GET", "/api/pipeline/bootstrap")
 
 
 def test_request_json_should_raise_api_error_on_500() -> None:
     """5xx 应映射为通用 API 失败。"""
 
-    client = CloudflareWorkerClient(
-        CloudflareControlConfig(base_url="https://control.example.com"),
+    client = ControlPlaneClient(
+        ControlPlaneConfig(base_url="https://control.example.com"),
         http_client=_FakeHttpClient(_FakeResponse(status=500, payload={"error": "boom"})),
     )
 
-    with pytest.raises(CloudflareApiError):
+    with pytest.raises(ControlPlaneApiError):
         client.request_json("GET", "/api/pipeline/bootstrap")

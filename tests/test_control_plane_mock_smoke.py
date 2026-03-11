@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rift_audio_pipeline.cloudflare.mock_smoke import MockSmokeConfig
-from rift_audio_pipeline.cloudflare.mock_smoke import run_mock_control_plane_smoke
+from rift_audio_pipeline.control_plane.mock_smoke import MockSmokeConfig
+from rift_audio_pipeline.control_plane.mock_smoke import run_mock_control_plane_smoke
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
 
 
