@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temp-root", type=Path, default=Path("temp"))
     parser.add_argument("--log-root", type=Path, default=None)
     parser.add_argument("--run-id")
-    parser.add_argument("--control-plane-base-url", required=True)
+    parser.add_argument("--control-plane-base-url", default="")
     parser.add_argument("--control-plane-bearer-token")
     parser.add_argument("--control-plane-access-client-id")
     parser.add_argument("--control-plane-access-client-secret")
@@ -61,13 +61,15 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     payload = load_dispatch_payload(ref=args.ref, dispatch_inputs_file=args.dispatch_inputs_file)
     plan = build_runtime_plan(args=args, run_id=_resolve_run_id(args.run_id))
+    control_plane_config = _build_control_plane_config(args)
     init_result = initialize_runtime(
         run_id=plan.run_id,
         runtime_dir=plan.runtime_root,
         baidu_remote_root=plan.baidu_remote_root,
-        plane_config=_build_control_plane_config(args),
+        plane_config=control_plane_config,
         provided_baidu_token_payload=_build_baidu_token_payload(payload),
     )
+    relay_enabled = control_plane_config is not None
     pipeline_command = build_pipeline_command(
         payload=payload,
         run_id=plan.run_id,
@@ -75,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         temp_root=plan.temp_root,
         log_root=plan.log_root,
         baidu_remote_root=plan.baidu_remote_root,
-        relay_socket_path=plan.relay_socket_path,
+        relay_socket_path=plan.relay_socket_path if relay_enabled else None,
         state_db_path=init_result.state_db_file,
         default_mode=plan.default_mode,
         default_game_region=plan.default_game_region,
@@ -83,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     relay_process, relay_stdout_handle = prepare_relay(
         plan=plan,
-        control_plane_base_url=args.control_plane_base_url,
+        control_plane_base_url=control_plane_config.base_url if control_plane_config else None,
         control_plane_bearer_token=args.control_plane_bearer_token,
         control_plane_access_client_id=args.control_plane_access_client_id,
         control_plane_access_client_secret=args.control_plane_access_client_secret,
@@ -117,8 +119,9 @@ def main(argv: list[str] | None = None) -> int:
             plan=plan,
             init_result=init_result,
             final_status="success" if pipeline_returncode == 0 else "failed",
+            relay_enabled=relay_enabled,
         )
-        relay_returncode = relay_process.wait(timeout=30.0)
+        relay_returncode = relay_process.wait(timeout=30.0) if relay_process is not None else 0
         result = JobRunnerResult(
             run_id=result.run_id,
             runtime_dir=result.runtime_dir,
@@ -134,7 +137,8 @@ def main(argv: list[str] | None = None) -> int:
             relay_socket_path=result.relay_socket_path,
         )
     finally:
-        relay_stdout_handle.close()
+        if relay_stdout_handle is not None:
+            relay_stdout_handle.close()
         upload_stdout_handle.close()
     emit_run_result(result)
     return result.pipeline_returncode
@@ -151,11 +155,14 @@ def build_runtime_plan(*, args: argparse.Namespace, run_id: str) -> RuntimePlan:
     )
 
 
-def _build_control_plane_config(args: argparse.Namespace) -> ControlPlaneConfig:
-    """根据 CLI 参数构造 plane 配置。"""
+def _build_control_plane_config(args: argparse.Namespace) -> ControlPlaneConfig | None:
+    """根据 CLI 参数构造可选 plane 配置。"""
 
+    normalized_base_url = args.control_plane_base_url.strip()
+    if not normalized_base_url:
+        return None
     return ControlPlaneConfig(
-        base_url=args.control_plane_base_url,
+        base_url=normalized_base_url,
         bearer_token=args.control_plane_bearer_token,
         access_client_id=args.control_plane_access_client_id,
         access_client_secret=args.control_plane_access_client_secret,
@@ -183,7 +190,7 @@ def build_pipeline_command(
     temp_root: Path,
     log_root: Path,
     baidu_remote_root: str,
-    relay_socket_path: Path,
+    relay_socket_path: Path | None,
     state_db_path: Path,
     default_mode: str,
     default_game_region: str,
@@ -208,8 +215,6 @@ def build_pipeline_command(
         str(log_root),
         "--run-id",
         run_id,
-        "--relay-socket-path",
-        str(relay_socket_path),
         "--state-db-path",
         str(state_db_path),
         "--baidu-remote-root",
@@ -217,6 +222,8 @@ def build_pipeline_command(
         "--log-level",
         inputs.execution.log_level or default_log_level,
     ]
+    if relay_socket_path is not None:
+        command.extend(["--relay-socket-path", str(relay_socket_path)])
     _append_stage_flags(command, stage=inputs.request.stage)
     for value, flag in (
         (inputs.manifests.current.version, "--current-version"),

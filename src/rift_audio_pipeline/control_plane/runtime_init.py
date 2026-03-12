@@ -37,7 +37,7 @@ def initialize_runtime(
     run_id: str,
     runtime_dir: Path,
     baidu_remote_root: str,
-    plane_config: ControlPlaneConfig,
+    plane_config: ControlPlaneConfig | None,
     provided_baidu_token_payload: dict[str, object] | None = None,
 ) -> RuntimeInitializationResult:
     """准备百度凭据、本地 database 与 state.sqlite3。
@@ -46,7 +46,7 @@ def initialize_runtime(
         run_id: 当前运行 ID。
         runtime_dir: 当前运行的本地工作目录。
         baidu_remote_root: 百度远端根目录。
-        plane_config: control plane 访问配置。
+        plane_config: control plane 访问配置；仅在需要向 plane 拉百度凭据时使用。
         provided_baidu_token_payload: dispatch payload 中显式提供的百度凭据。
 
     Returns:
@@ -148,13 +148,17 @@ def _fetch_baidu_token_payload(*, plane_config: ControlPlaneConfig) -> dict[str,
 
 def _resolve_baidu_token_payload(
     *,
-    plane_config: ControlPlaneConfig,
+    plane_config: ControlPlaneConfig | None,
     provided_baidu_token_payload: dict[str, object] | None,
 ) -> tuple[dict[str, object], str]:
     """决定当前运行应使用的百度凭据来源。"""
 
     if provided_baidu_token_payload is not None:
         return dict(provided_baidu_token_payload), "inputs.payload.baidu"
+    if plane_config is None:
+        raise ValueError(
+            "未提供 inputs.payload.baidu，且 control plane base_url 为空，无法获取百度凭据。"
+        )
     return _fetch_baidu_token_payload(plane_config=plane_config), "plane /api/baidu/token"
 
 

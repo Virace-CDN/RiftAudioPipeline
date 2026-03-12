@@ -10,15 +10,16 @@
 
 | 名称 | 类型 | 是否当前必需 | 作用 |
 | --- | --- | --- | --- |
-| `RIFT_CONTROL_PLANE_BASE_URL` | Actions variable | 是 | 传给 `job_runner --control-plane-base-url`，当前 relay 仍依赖它 |
+| `RIFT_CONTROL_PLANE_BASE_URL` | Actions variable | 条件必需 | 提供后启用完整 control-plane relay；留空则进入纯 pipeline smoke 模式 |
 | `RIFT_CONTROL_PLANE_BEARER_TOKEN` | Actions secret | 否 | plane Bearer token |
 | `RIFT_CONTROL_PLANE_ACCESS_CLIENT_ID` | Actions secret | 否 | Cloudflare Access client id |
 | `RIFT_CONTROL_PLANE_ACCESS_CLIENT_SECRET` | Actions secret | 否 | Cloudflare Access client secret |
 
 说明：
 
-- 即使手动 dispatch 时在 `inputs.payload.baidu` 里显式提供了百度三元凭据，当前 workflow 仍然会启动 log relay，并继续使用 `RIFT_CONTROL_PLANE_BASE_URL` 做 bootstrap / heartbeat / logs / report。
-- 本次改动只去掉了“百度凭据必须从 `/api/baidu/token` 拉取”的硬依赖，没有把整条运行链改成完全脱离 plane。
+- 若提供 `RIFT_CONTROL_PLANE_BASE_URL`，workflow 会启用完整 relay，并继续向 plane 发送 `bootstrap / heartbeat / logs / report`。
+- 若留空 `RIFT_CONTROL_PLANE_BASE_URL`，`job_runner` 会跳过 relay，只跑 `runtime_init + pipeline-main + upload_worker + finalize_worker` 的纯 pipeline 主线。
+- 当 relay 关闭时，必须在 `inputs.payload.baidu` 中显式提供 `app_key / secret_key / refresh_token`，否则 `runtime_init` 无法获取百度凭据。
 
 ## 手动触发用法
 

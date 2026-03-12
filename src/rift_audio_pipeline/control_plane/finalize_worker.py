@@ -31,8 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baidu-remote-root", required=True)
     parser.add_argument("--database-file", type=Path, required=True)
     parser.add_argument("--log-root", type=Path)
-    parser.add_argument("--relay-state-file", type=Path, required=True)
-    parser.add_argument("--relay-socket-path", type=Path, required=True)
+    parser.add_argument("--relay-state-file", type=Path)
+    parser.add_argument("--relay-socket-path", type=Path)
     parser.add_argument("--final-status", required=True)
     parser.add_argument("--poll-interval-ms", type=int, default=500)
     parser.add_argument("--history-limit", type=int, default=10)
@@ -102,22 +102,23 @@ def main(argv: list[str] | None = None) -> int:
             )
     finally:
         client.close()
-    relay_client = LogRelayClient(
-        run_id=args.run_id,
-        relay_state_file=args.relay_state_file,
-        relay_socket_file=args.relay_socket_path,
-        config=LogSinkConfig(enabled=True),
-        spawn_process=False,
-    )
-    relay_client.attach()
-    relay_client.report_run_result(
-        build_report_payload(
-            state_db_path=args.state_db_path,
+    if args.relay_state_file is not None and args.relay_socket_path is not None:
+        relay_client = LogRelayClient(
             run_id=args.run_id,
-            status=args.final_status,
+            relay_state_file=args.relay_state_file,
+            relay_socket_file=args.relay_socket_path,
+            config=LogSinkConfig(enabled=True),
+            spawn_process=False,
         )
-    )
-    relay_client.shutdown()
+        relay_client.attach()
+        relay_client.report_run_result(
+            build_report_payload(
+                state_db_path=args.state_db_path,
+                run_id=args.run_id,
+                status=args.final_status,
+            )
+        )
+        relay_client.shutdown()
     mark_upload_phase_finalized(
         database_path=args.state_db_path,
         run_id=args.run_id,

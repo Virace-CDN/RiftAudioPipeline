@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from tests._control_plane_capture import ControlPlaneCaptureServer
+from rift_audio_pipeline.control_plane.job_runner import _build_control_plane_config
 from rift_audio_pipeline.control_plane.job_runner import _resolve_run_id
 from rift_audio_pipeline.control_plane.job_runner import build_pipeline_command
 from rift_audio_pipeline.control_plane.job_runner import build_parser
@@ -139,6 +140,20 @@ def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
     }
 
 
+def test_initialize_runtime_should_require_plane_or_dispatch_baidu_token(
+    tmp_path: Path,
+) -> None:
+    """未提供百度凭据且没有 plane 配置时，应给出明确错误。"""
+
+    with pytest.raises(ValueError, match="inputs.payload.baidu"):
+        initialize_runtime(
+            run_id="manual-run",
+            runtime_dir=tmp_path / "runtime",
+            baidu_remote_root="/apps/test",
+            plane_config=None,
+        )
+
+
 def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_run_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -208,6 +223,32 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
     assert "zip-secret" in command
 
 
+def test_build_pipeline_command_should_omit_relay_socket_when_relay_disabled() -> None:
+    """无 plane 场景下，pipeline 主线不应再收到 relay socket 参数。"""
+
+    command = build_pipeline_command(
+        payload=DispatchPayload(
+            ref="main",
+            inputs=DispatchInputs(
+                request=DispatchRequestInputs(mode="remote", stage="extract"),
+                game=DispatchGameInputs(region="zh_CN"),
+            ),
+        ),
+        run_id="manual-smoke",
+        output_root=Path("output"),
+        temp_root=Path("temp"),
+        log_root=Path("output/logs"),
+        baidu_remote_root="/apps/test",
+        relay_socket_path=None,
+        state_db_path=Path("runtime/manual-smoke/state.sqlite3"),
+        default_mode="remote",
+        default_game_region="zh_CN",
+        default_log_level="INFO",
+    )
+
+    assert "--relay-socket-path" not in command
+
+
 def test_build_runtime_plan_should_derive_runtime_paths(tmp_path: Path) -> None:
     """runtime plan 应统一派生 runtime/log/relay 相关路径。"""
 
@@ -242,3 +283,18 @@ def test_build_runtime_plan_should_derive_runtime_paths(tmp_path: Path) -> None:
         plan.upload_stdout_file
         == tmp_path / "storage" / "runs" / "99887766" / "upload-worker.stdout.log"
     )
+
+
+def test_build_control_plane_config_should_return_none_for_blank_base_url() -> None:
+    """空 control plane 地址应被视为关闭 relay。"""
+
+    args = build_parser().parse_args(
+        [
+            "--ref",
+            "main",
+            "--dispatch-inputs-file",
+            "dispatch.json",
+        ]
+    )
+
+    assert _build_control_plane_config(args) is None

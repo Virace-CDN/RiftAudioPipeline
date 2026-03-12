@@ -115,14 +115,16 @@ def build_runtime_plan(
 def prepare_relay(
     *,
     plan: RuntimePlan,
-    control_plane_base_url: str,
+    control_plane_base_url: str | None,
     control_plane_bearer_token: str | None,
     control_plane_access_client_id: str | None,
     control_plane_access_client_secret: str | None,
     control_plane_timeout_seconds: float,
-) -> tuple[subprocess.Popen[str], TextIO]:
+) -> tuple[subprocess.Popen[str] | None, TextIO | None]:
     """写入 relay 配置并启动独立 relay 进程。"""
 
+    if not control_plane_base_url:
+        return None, None
     write_log_relay_config(
         relay_config_file=plan.relay_config_file,
         run_id=plan.run_id,
@@ -206,36 +208,39 @@ def run_finalize_worker(
     plan: RuntimePlan,
     init_result: RuntimeInitializationResult,
     final_status: str,
+    relay_enabled: bool,
 ) -> int:
     """在 upload drain 后同步执行 finalize worker。"""
 
-    finalize_completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "rift_audio_pipeline.control_plane.finalize_worker",
-            "--run-id",
-            plan.run_id,
-            "--state-db-path",
-            str(init_result.state_db_file),
-            "--baidu-token-file",
-            str(init_result.baidu_token_file),
-            "--baidu-remote-root",
-            plan.baidu_remote_root,
-            "--database-file",
-            str(init_result.database_file),
-            "--log-root",
-            str(plan.log_root),
-            "--relay-state-file",
-            str(plan.relay_state_file),
-            "--relay-socket-path",
-            str(plan.relay_socket_path),
-            "--final-status",
-            final_status,
-        ],
-        check=False,
-        text=True,
-    )
+    command = [
+        sys.executable,
+        "-m",
+        "rift_audio_pipeline.control_plane.finalize_worker",
+        "--run-id",
+        plan.run_id,
+        "--state-db-path",
+        str(init_result.state_db_file),
+        "--baidu-token-file",
+        str(init_result.baidu_token_file),
+        "--baidu-remote-root",
+        plan.baidu_remote_root,
+        "--database-file",
+        str(init_result.database_file),
+        "--log-root",
+        str(plan.log_root),
+        "--final-status",
+        final_status,
+    ]
+    if relay_enabled:
+        command.extend(
+            [
+                "--relay-state-file",
+                str(plan.relay_state_file),
+                "--relay-socket-path",
+                str(plan.relay_socket_path),
+            ]
+        )
+    finalize_completed = subprocess.run(command, check=False, text=True)
     return finalize_completed.returncode
 
 
