@@ -11,7 +11,6 @@ import subprocess
 import sys
 from dataclasses import asdict
 from dataclasses import dataclass
-from dataclasses import field
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -23,51 +22,43 @@ from typing import Any
 from typing import Callable
 from urllib.parse import urlparse
 
+from rift_audio_pipeline.control_plane.workflow_dispatch import (
+    DispatchPayload as CoreDispatchPayload,
+)
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchBaiduInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchExecutionInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchGameInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchIdTargets
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchManifestInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchManifestsInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchMetadataInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchRequestInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchTargetsInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import WorkflowDispatchCommandConfig
+from rift_audio_pipeline.control_plane.workflow_dispatch import _ALLOWED_PAYLOAD_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _BAIDU_INPUT_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _EXECUTION_INPUT_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _GAME_INPUT_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _ID_TARGET_INPUT_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _MANIFEST_INPUT_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _MANIFESTS_INPUT_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _METADATA_INPUT_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _REQUEST_INPUT_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _REQUEST_STAGE_TO_FLAGS
+from rift_audio_pipeline.control_plane.workflow_dispatch import _TARGETS_INPUT_FIELDS
+from rift_audio_pipeline.control_plane.workflow_dispatch import build_job_runner_command
+from rift_audio_pipeline.control_plane.workflow_dispatch import (
+    parse_dispatch_payload as parse_core_dispatch_payload,
+)
+from rift_audio_pipeline.control_plane.workflow_dispatch import serialize_dispatch_inputs
+
 _DISPATCH_PATH_PATTERN = re.compile(
     r"^/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/actions/workflows/(?P<workflow_id>[^/]+)/dispatches$"
 )
 _HEALTH_PATH = "/healthz"
 
 PipelineLauncher = Callable[[list[str], Path, Path], int]
-
-_ALLOWED_INPUT_WRAPPER_FIELDS = frozenset(
-    {
-        "payload",
-    }
-)
-_ALLOWED_PAYLOAD_FIELDS = frozenset(
-    {
-        "schema_version",
-        "request",
-        "game",
-        "manifests",
-        "targets",
-        "execution",
-        "metadata",
-    }
-)
-_REQUEST_INPUT_FIELDS = frozenset({"mode", "stage"})
-_GAME_INPUT_FIELDS = frozenset({"region"})
-_MANIFESTS_INPUT_FIELDS = frozenset({"current", "previous"})
-_MANIFEST_INPUT_FIELDS = frozenset({"version", "lcu_url", "game_url"})
-_TARGETS_INPUT_FIELDS = frozenset({"champions", "maps"})
-_ID_TARGET_INPUT_FIELDS = frozenset({"ids"})
-_EXECUTION_INPUT_FIELDS = frozenset(
-    {
-        "force_update",
-        "max_workers",
-        "download_retry_attempts",
-        "entity_retry_attempts",
-        "log_level",
-        "archive_password",
-    }
-)
-_METADATA_INPUT_FIELDS = frozenset({"requested_by"})
-_REQUEST_STAGE_TO_FLAGS: dict[str, tuple[bool, bool, bool]] = {
-    "update": (True, False, False),
-    "extract": (True, True, False),
-    "mapping": (True, True, True),
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,93 +87,6 @@ class FakerGitHubConfig:
     log_http_exchange: bool = False
     working_directory: Path = Path.cwd()
     python_executable: Path = Path(sys.executable)
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchPayload:
-    """workflow_dispatch 请求负载。"""
-
-    ref: str
-    inputs: "DispatchInputs"
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchRequestInputs:
-    """一次 dispatch 的请求维度参数。"""
-
-    mode: str | None = None
-    stage: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchGameInputs:
-    """一次 dispatch 的游戏上下文。"""
-
-    region: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchManifestInputs:
-    """单个 manifest 对。"""
-
-    version: str | None = None
-    lcu_url: str | None = None
-    game_url: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchManifestsInputs:
-    """当前版与上一版 manifest 信息。"""
-
-    current: DispatchManifestInputs = field(default_factory=DispatchManifestInputs)
-    previous: DispatchManifestInputs = field(default_factory=DispatchManifestInputs)
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchIdTargets:
-    """单类实体的 ID 目标集合。"""
-
-    ids: tuple[int, ...] = tuple()
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchTargetsInputs:
-    """实体目标集合。"""
-
-    champions: DispatchIdTargets = field(default_factory=DispatchIdTargets)
-    maps: DispatchIdTargets = field(default_factory=DispatchIdTargets)
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchExecutionInputs:
-    """运行策略参数。"""
-
-    force_update: bool | None = None
-    max_workers: int | None = None
-    download_retry_attempts: int | None = None
-    entity_retry_attempts: int | None = None
-    log_level: str | None = None
-    archive_password: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchMetadataInputs:
-    """请求来源等元信息。"""
-
-    requested_by: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DispatchInputs:
-    """结构化 workflow inputs。"""
-
-    schema_version: str | None = None
-    request: DispatchRequestInputs = field(default_factory=DispatchRequestInputs)
-    game: DispatchGameInputs = field(default_factory=DispatchGameInputs)
-    manifests: DispatchManifestsInputs = field(default_factory=DispatchManifestsInputs)
-    targets: DispatchTargetsInputs = field(default_factory=DispatchTargetsInputs)
-    execution: DispatchExecutionInputs = field(default_factory=DispatchExecutionInputs)
-    metadata: DispatchMetadataInputs = field(default_factory=DispatchMetadataInputs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,16 +254,24 @@ def _parse_manifest_inputs(
 
     _validate_known_fields(raw_inputs, field_name=field_name, allowed_fields=_MANIFEST_INPUT_FIELDS)
     return DispatchManifestInputs(
-        version=_coerce_optional_string(raw_inputs.get("version"), field_name=f"{field_name}.version"),
-        lcu_url=_coerce_optional_string(raw_inputs.get("lcu_url"), field_name=f"{field_name}.lcu_url"),
-        game_url=_coerce_optional_string(raw_inputs.get("game_url"), field_name=f"{field_name}.game_url"),
+        version=_coerce_optional_string(
+            raw_inputs.get("version"), field_name=f"{field_name}.version"
+        ),
+        lcu_url=_coerce_optional_string(
+            raw_inputs.get("lcu_url"), field_name=f"{field_name}.lcu_url"
+        ),
+        game_url=_coerce_optional_string(
+            raw_inputs.get("game_url"), field_name=f"{field_name}.game_url"
+        ),
     )
 
 
 def _parse_id_targets(raw_inputs: dict[str, Any], *, field_name: str) -> DispatchIdTargets:
     """解析只含 ID 的目标集合。"""
 
-    _validate_known_fields(raw_inputs, field_name=field_name, allowed_fields=_ID_TARGET_INPUT_FIELDS)
+    _validate_known_fields(
+        raw_inputs, field_name=field_name, allowed_fields=_ID_TARGET_INPUT_FIELDS
+    )
     return DispatchIdTargets(
         ids=_parse_int_list_input(raw_inputs.get("ids"), field_name=f"{field_name}.ids") or tuple()
     )
@@ -377,6 +289,7 @@ def _validate_dispatch_inputs(raw_inputs: dict[str, Any]) -> DispatchInputs:
         raw_inputs.get("manifests"), field_name="inputs.payload.manifests"
     )
     targets_inputs = _coerce_mapping(raw_inputs.get("targets"), field_name="inputs.payload.targets")
+    baidu_inputs = _coerce_mapping(raw_inputs.get("baidu"), field_name="inputs.payload.baidu")
     execution_inputs = _coerce_mapping(
         raw_inputs.get("execution"), field_name="inputs.payload.execution"
     )
@@ -397,6 +310,9 @@ def _validate_dispatch_inputs(raw_inputs: dict[str, Any]) -> DispatchInputs:
     )
     _validate_known_fields(
         targets_inputs, field_name="inputs.payload.targets", allowed_fields=_TARGETS_INPUT_FIELDS
+    )
+    _validate_known_fields(
+        baidu_inputs, field_name="inputs.payload.baidu", allowed_fields=_BAIDU_INPUT_FIELDS
     )
     _validate_known_fields(
         execution_inputs,
@@ -456,6 +372,20 @@ def _validate_dispatch_inputs(raw_inputs: dict[str, Any]) -> DispatchInputs:
                 field_name="inputs.payload.targets.maps",
             ),
         ),
+        baidu=DispatchBaiduInputs(
+            app_key=_coerce_optional_string(
+                baidu_inputs.get("app_key"),
+                field_name="inputs.payload.baidu.app_key",
+            ),
+            secret_key=_coerce_optional_string(
+                baidu_inputs.get("secret_key"),
+                field_name="inputs.payload.baidu.secret_key",
+            ),
+            refresh_token=_coerce_optional_string(
+                baidu_inputs.get("refresh_token"),
+                field_name="inputs.payload.baidu.refresh_token",
+            ),
+        ),
         execution=DispatchExecutionInputs(
             force_update=(
                 None
@@ -495,40 +425,6 @@ def _validate_dispatch_inputs(raw_inputs: dict[str, Any]) -> DispatchInputs:
     )
 
 
-_OMIT = object()
-
-
-def _prune_empty(value: Any) -> Any:
-    """去掉 None/空容器，便于收据和日志只保留有效字段。"""
-
-    if value is None:
-        return _OMIT
-    if isinstance(value, dict):
-        pruned: dict[str, Any] = {}
-        for key, item in value.items():
-            pruned_item = _prune_empty(item)
-            if pruned_item is _OMIT:
-                continue
-            pruned[key] = pruned_item
-        return pruned if pruned else _OMIT
-    if isinstance(value, tuple):
-        if not value:
-            return _OMIT
-        return [item for item in value]
-    if isinstance(value, list):
-        if not value:
-            return _OMIT
-        return value
-    return value
-
-
-def _serialize_dispatch_inputs(inputs: DispatchInputs) -> dict[str, Any]:
-    """把结构化 inputs 转成适合日志/收据的 JSON object。"""
-
-    serialized = _prune_empty(asdict(inputs))
-    return serialized if isinstance(serialized, dict) else {}
-
-
 def _append_bool_flag(command: list[str], flag_name: str, value: bool) -> None:
     """为 BooleanOptionalAction 形式的参数追加显式值。"""
 
@@ -565,106 +461,6 @@ def _extract_authorization_token(header_value: str | None) -> str | None:
     return token.strip()
 
 
-def parse_dispatch_payload(raw_payload: dict[str, Any]) -> DispatchPayload:
-    """把 GitHub workflow dispatch 请求解析为强类型对象。
-
-    Args:
-        raw_payload: HTTP 请求 JSON。
-
-    Returns:
-        DispatchPayload: 解析后的 payload。
-
-    Raises:
-        ValueError: 当 payload 不满足最小 workflow_dispatch 约束时抛出。
-    """
-
-    raw_inputs = _coerce_mapping(raw_payload.get("inputs"), field_name="inputs")
-    _validate_known_fields(
-        raw_inputs, field_name="inputs", allowed_fields=_ALLOWED_INPUT_WRAPPER_FIELDS
-    )
-    return DispatchPayload(
-        ref=_coerce_string(raw_payload.get("ref"), field_name="ref"),
-        inputs=_validate_dispatch_inputs(
-            _coerce_json_string_mapping(raw_inputs.get("payload"), field_name="inputs.payload")
-        ),
-    )
-
-
-def build_pipeline_command(
-    config: FakerGitHubConfig,
-    payload: DispatchPayload,
-    *,
-    dispatch_inputs_file: Path,
-) -> list[str]:
-    """把 workflow_dispatch 参数翻译成独立 job runner 命令。
-
-    Args:
-        config: faker-github 服务配置。
-        payload: GitHub dispatch 请求。
-
-    Returns:
-        list[str]: 可直接传给 subprocess 的命令数组。
-
-    Raises:
-        ValueError: 当某个 workflow input 无法解析时抛出。
-    """
-
-    inputs = payload.inputs
-    _append_stage_flags([], stage=inputs.request.stage)
-    command = [
-        str(config.python_executable),
-        "-m",
-        "rift_audio_pipeline.control_plane.job_runner",
-        "--ref",
-        payload.ref,
-        "--dispatch-inputs-file",
-        str(dispatch_inputs_file),
-        "--storage-root",
-        str(config.storage_root),
-        "--output-root",
-        str(config.output_root),
-        "--temp-root",
-        str(config.temp_root),
-        "--baidu-remote-root",
-        config.baidu_remote_root,
-        "--default-mode",
-        _coerce_string(inputs.request.mode or config.default_mode, field_name="mode"),
-        "--default-game-region",
-        _coerce_string(inputs.game.region or config.default_game_region, field_name="game_region"),
-        "--control-plane-base-url",
-        config.control_plane_base_url,
-        "--default-requested-by",
-        _coerce_string(
-            inputs.metadata.requested_by or config.default_requested_by,
-            field_name="requested_by",
-        ),
-        "--control-plane-timeout-seconds",
-        str(config.control_plane_timeout_seconds),
-        "--default-log-level",
-        _coerce_string(
-            inputs.execution.log_level or config.default_log_level,
-            field_name="log_level",
-        ),
-    ]
-    if config.log_root is not None:
-        command.extend(["--log-root", str(config.log_root)])
-    if config.control_plane_bearer_token:
-        command.extend(["--control-plane-bearer-token", config.control_plane_bearer_token])
-    if config.control_plane_access_client_id:
-        command.extend(
-            ["--control-plane-access-client-id", config.control_plane_access_client_id]
-        )
-    if config.control_plane_access_client_secret:
-        command.extend(
-            [
-                "--control-plane-access-client-secret",
-                config.control_plane_access_client_secret,
-            ]
-        )
-
-    return command
-
-
 def _launch_pipeline_subprocess(command: list[str], cwd: Path, log_path: Path) -> int:
     """异步拉起 pipeline 子进程。"""
 
@@ -678,6 +474,30 @@ def _launch_pipeline_subprocess(command: list[str], cwd: Path, log_path: Path) -
             env=os.environ.copy(),
         )
     return process.pid
+
+
+def _build_workflow_dispatch_command_config(
+    config: FakerGitHubConfig,
+) -> WorkflowDispatchCommandConfig:
+    """把本地 fake GitHub 配置翻译成 job runner 命令配置。"""
+
+    return WorkflowDispatchCommandConfig(
+        storage_root=config.storage_root,
+        control_plane_base_url=config.control_plane_base_url,
+        control_plane_bearer_token=config.control_plane_bearer_token,
+        control_plane_access_client_id=config.control_plane_access_client_id,
+        control_plane_access_client_secret=config.control_plane_access_client_secret,
+        default_mode=config.default_mode,
+        default_game_region=config.default_game_region,
+        default_requested_by=config.default_requested_by,
+        output_root=config.output_root,
+        temp_root=config.temp_root,
+        log_root=config.log_root,
+        baidu_remote_root=config.baidu_remote_root,
+        default_log_level=config.default_log_level,
+        control_plane_timeout_seconds=config.control_plane_timeout_seconds,
+        python_executable=config.python_executable,
+    )
 
 
 class FakerGitHubState:
@@ -707,7 +527,7 @@ class FakerGitHubState:
         owner: str,
         repo: str,
         workflow_id: str,
-        payload: DispatchPayload,
+        payload: CoreDispatchPayload,
     ) -> DispatchReceipt:
         """处理 workflow_dispatch 请求并拉起 pipeline。"""
 
@@ -715,11 +535,11 @@ class FakerGitHubState:
         dispatch_inputs_file = self.storage_root / "dispatch_inputs" / f"{dispatch_id}.json"
         dispatch_inputs_file.parent.mkdir(parents=True, exist_ok=True)
         dispatch_inputs_file.write_text(
-            json.dumps(_serialize_dispatch_inputs(payload.inputs), ensure_ascii=False, indent=2),
+            json.dumps(serialize_dispatch_inputs(payload.inputs), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        command = build_pipeline_command(
-            config=self.config,
+        command = build_job_runner_command(
+            config=_build_workflow_dispatch_command_config(self.config),
             payload=payload,
             dispatch_inputs_file=dispatch_inputs_file,
         )
@@ -735,7 +555,7 @@ class FakerGitHubState:
             repo=repo,
             workflow_id=workflow_id,
             ref=payload.ref,
-            inputs=_serialize_dispatch_inputs(payload.inputs),
+            inputs=serialize_dispatch_inputs(payload.inputs),
             command=tuple(command),
             dry_run=self.config.dry_run,
             pid=pid,
@@ -818,7 +638,7 @@ class _FakerGitHubRequestHandler(BaseHTTPRequestHandler):
             },
         )
         try:
-            dispatch_payload = parse_dispatch_payload(payload)
+            dispatch_payload = parse_core_dispatch_payload(payload)
             _emit_http_log(
                 self.server.state.config.log_http_exchange,
                 "workflow_inputs",
@@ -827,7 +647,7 @@ class _FakerGitHubRequestHandler(BaseHTTPRequestHandler):
                     "repo": match.group("repo"),
                     "workflow_id": match.group("workflow_id"),
                     "ref": dispatch_payload.ref,
-                    "inputs": _serialize_dispatch_inputs(dispatch_payload.inputs),
+                    "inputs": serialize_dispatch_inputs(dispatch_payload.inputs),
                 },
             )
             receipt = self.server.state.handle_dispatch(
@@ -890,7 +710,7 @@ class _FakerGitHubRequestHandler(BaseHTTPRequestHandler):
                 "error": "unauthorized",
                 "message": "Authorization header must carry the configured GitHub token.",
             },
-            extra_headers={"WWW-Authenticate": "Bearer realm=\"faker-github\""},
+            extra_headers={"WWW-Authenticate": 'Bearer realm="faker-github"'},
         )
         return False
 

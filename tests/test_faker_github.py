@@ -9,21 +9,23 @@ from urllib import request
 
 import pytest
 
-from rift_localdev.github.faker_github import DispatchExecutionInputs
-from rift_localdev.github.faker_github import DispatchGameInputs
-from rift_localdev.github.faker_github import DispatchIdTargets
-from rift_localdev.github.faker_github import DispatchInputs
-from rift_localdev.github.faker_github import DispatchManifestInputs
-from rift_localdev.github.faker_github import DispatchManifestsInputs
-from rift_localdev.github.faker_github import DispatchMetadataInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchBaiduInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchExecutionInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchGameInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchIdTargets
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchManifestInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchManifestsInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchMetadataInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchPayload
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchRequestInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchTargetsInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import WorkflowDispatchCommandConfig
+from rift_audio_pipeline.control_plane.workflow_dispatch import build_job_runner_command
+from rift_audio_pipeline.control_plane.workflow_dispatch import parse_dispatch_payload
 from rift_localdev.github.faker_github import FakerGitHubConfig
 from rift_localdev.github.faker_github import FakerGitHubServer
-from rift_localdev.github.faker_github import DispatchPayload
-from rift_localdev.github.faker_github import DispatchRequestInputs
-from rift_localdev.github.faker_github import DispatchTargetsInputs
 from rift_localdev.github.faker_github import _extract_authorization_token
-from rift_localdev.github.faker_github import build_pipeline_command
-from rift_localdev.github.faker_github import parse_dispatch_payload
 
 
 def test_build_pipeline_command_should_map_dispatch_inputs() -> None:
@@ -35,8 +37,21 @@ def test_build_pipeline_command_should_map_dispatch_inputs() -> None:
         default_mode="remote",
         default_game_region="zh_CN",
     )
-    command = build_pipeline_command(
-        config=config,
+    command = build_job_runner_command(
+        config=WorkflowDispatchCommandConfig(
+            storage_root=config.storage_root,
+            control_plane_base_url=config.control_plane_base_url,
+            default_mode=config.default_mode,
+            default_game_region=config.default_game_region,
+            default_requested_by=config.default_requested_by,
+            output_root=config.output_root,
+            temp_root=config.temp_root,
+            log_root=config.log_root,
+            baidu_remote_root=config.baidu_remote_root,
+            default_log_level=config.default_log_level,
+            control_plane_timeout_seconds=config.control_plane_timeout_seconds,
+            python_executable=config.python_executable,
+        ),
         payload=DispatchPayload(
             ref="main",
             inputs=DispatchInputs(
@@ -49,11 +64,16 @@ def test_build_pipeline_command_should_map_dispatch_inputs() -> None:
                         lcu_url="https://lcu.example/16.5",
                         game_url="https://game.example/16.5",
                     ),
-                    previous=DispatchManifestInputs(version="16.4")
+                    previous=DispatchManifestInputs(version="16.4"),
                 ),
                 targets=DispatchTargetsInputs(
                     champions=DispatchIdTargets(ids=(1, 103)),
                     maps=DispatchIdTargets(ids=(11, 12)),
+                ),
+                baidu=DispatchBaiduInputs(
+                    app_key="manual-app-key",
+                    secret_key="manual-secret-key",
+                    refresh_token="manual-refresh-token",
                 ),
                 execution=DispatchExecutionInputs(
                     force_update=True,
@@ -126,10 +146,15 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
                                 "current": {
                                     "version": "16.5",
                                     "lcu_url": "https://lcu.example/16.5",
-                                    "game_url": "https://game.example/16.5"
+                                    "game_url": "https://game.example/16.5",
                                 }
                             },
                             "targets": {"champions": {"ids": "266,103"}},
+                            "baidu": {
+                                "app_key": "manual-app-key",
+                                "secret_key": "manual-secret-key",
+                                "refresh_token": "manual-refresh-token",
+                            },
                             "execution": {"archive_password": "zip-secret"},
                             "metadata": {"requested_by": "plane-test"},
                         }
@@ -138,10 +163,7 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
             }
         ).encode("utf-8")
         req = request.Request(
-            url=(
-                f"{server.base_url}/repos/octo/test/actions/workflows/"
-                "pipeline.yml/dispatches"
-            ),
+            url=(f"{server.base_url}/repos/octo/test/actions/workflows/pipeline.yml/dispatches"),
             data=payload,
             method="POST",
             headers={
@@ -177,6 +199,7 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
         dispatch_inputs_payload = json.loads(dispatch_inputs_path.read_text(encoding="utf-8"))
         assert dispatch_inputs_payload["targets"]["champions"]["ids"] == [266, 103]
         assert dispatch_inputs_payload["manifests"]["current"]["version"] == "16.5"
+        assert dispatch_inputs_payload["baidu"]["refresh_token"] == "manual-refresh-token"
         assert dispatch_inputs_payload["execution"]["archive_password"] == "zip-secret"
     finally:
         server.close()
@@ -285,16 +308,19 @@ def test_faker_github_server_should_log_request_and_response_when_enabled(
             assert response.status == 204
 
         events = [
-            json.loads(line)
-            for line in capsys.readouterr().out.splitlines()
-            if '"event":' in line
+            json.loads(line) for line in capsys.readouterr().out.splitlines() if '"event":' in line
         ]
         assert [event["event"] for event in events] == [
             "dispatch_request",
             "workflow_inputs",
             "dispatch_response",
         ]
-        assert json.loads(events[0]["request_payload"]["inputs"]["payload"])["metadata"]["requested_by"] == "frontend-test"
+        assert (
+            json.loads(events[0]["request_payload"]["inputs"]["payload"])["metadata"][
+                "requested_by"
+            ]
+            == "frontend-test"
+        )
         assert events[1]["inputs"]["metadata"]["requested_by"] == "frontend-test"
         assert events[2]["status"] == 204
         assert events[2]["response_summary"]["dispatch_id"]
@@ -357,6 +383,32 @@ def test_parse_dispatch_payload_should_reject_runtime_secret_fields() -> None:
         )
 
 
+def test_parse_dispatch_payload_should_accept_baidu_inputs() -> None:
+    """手动 workflow dispatch 可显式携带百度凭据。"""
+
+    payload = parse_dispatch_payload(
+        {
+            "ref": "main",
+            "inputs": {
+                "payload": json.dumps(
+                    {
+                        "request": {"mode": "remote"},
+                        "baidu": {
+                            "app_key": "manual-app-key",
+                            "secret_key": "manual-secret-key",
+                            "refresh_token": "manual-refresh-token",
+                        },
+                    }
+                ),
+            },
+        }
+    )
+
+    assert payload.inputs.baidu.app_key == "manual-app-key"
+    assert payload.inputs.baidu.secret_key == "manual-secret-key"
+    assert payload.inputs.baidu.refresh_token == "manual-refresh-token"
+
+
 def test_parse_dispatch_payload_should_require_nested_inputs() -> None:
     """结构化 inputs 不再接受扁平字段。"""
 
@@ -375,8 +427,11 @@ def test_build_pipeline_command_should_reject_unsupported_stage() -> None:
     """只接受可映射到 pipeline 的 stage。"""
 
     with pytest.raises(ValueError, match="stage"):
-        build_pipeline_command(
-            config=FakerGitHubConfig(storage_root=Path("temp/test-faker-github")),
+        build_job_runner_command(
+            config=WorkflowDispatchCommandConfig(
+                storage_root=Path("temp/test-faker-github"),
+                control_plane_base_url="http://localhost:5173",
+            ),
             payload=DispatchPayload(
                 ref="main",
                 inputs=DispatchInputs(

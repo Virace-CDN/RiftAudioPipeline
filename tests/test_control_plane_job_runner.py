@@ -10,22 +10,23 @@ import sys
 import pytest
 
 from tests._control_plane_capture import ControlPlaneCaptureServer
-from rift_localdev.github.faker_github import DispatchExecutionInputs
-from rift_localdev.github.faker_github import DispatchGameInputs
-from rift_localdev.github.faker_github import DispatchIdTargets
-from rift_localdev.github.faker_github import DispatchInputs
-from rift_localdev.github.faker_github import DispatchManifestInputs
-from rift_localdev.github.faker_github import DispatchManifestsInputs
-from rift_localdev.github.faker_github import DispatchMetadataInputs
-from rift_localdev.github.faker_github import DispatchPayload
-from rift_localdev.github.faker_github import DispatchRequestInputs
-from rift_localdev.github.faker_github import DispatchTargetsInputs
 from rift_audio_pipeline.control_plane.job_runner import _resolve_run_id
 from rift_audio_pipeline.control_plane.job_runner import build_pipeline_command
 from rift_audio_pipeline.control_plane.job_runner import build_parser
 from rift_audio_pipeline.control_plane.job_runner import build_runtime_plan
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchBaiduInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchExecutionInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchGameInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchIdTargets
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchManifestInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchManifestsInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchMetadataInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchPayload
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchRequestInputs
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchTargetsInputs
 
 
 def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
@@ -47,7 +48,9 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
 
     def _fake_download(self, remote_path: str, local_path: Path) -> dict[str, object]:
         downloaded.append((remote_path, local_path))
-        local_path.write_text('{"entries":[{"remote_path":"/apps/test/database.json"}]}', encoding="utf-8")
+        local_path.write_text(
+            '{"entries":[{"remote_path":"/apps/test/database.json"}]}', encoding="utf-8"
+        )
         return {}
 
     monkeypatch.setattr(
@@ -67,7 +70,10 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
     assert server.baidu_token_requests == [{}]
     assert downloaded == [("/apps/test/database.json", result.database_file)]
     assert result.token_payload["app_key"] == "plane-app-key"
-    assert json.loads(result.database_file.read_text(encoding="utf-8"))["entries"][0]["remote_path"] == "/apps/test/database.json"
+    assert (
+        json.loads(result.database_file.read_text(encoding="utf-8"))["entries"][0]["remote_path"]
+        == "/apps/test/database.json"
+    )
     assert result.state_db_file.exists()
     with sqlite3.connect(result.state_db_file) as connection:
         imported_entries = connection.execute(
@@ -81,6 +87,56 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
     assert len(imported_entries) == 1
     assert imported_entries[0][1] == "/apps/test/database.json"
     assert run_control == (1, "open")
+
+
+def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """dispatch payload 若显式提供百度凭据，则不再请求 plane token 接口。"""
+
+    server = ControlPlaneCaptureServer(
+        bootstrap_payload={},
+        baidu_token_payload={
+            "app_key": "plane-app-key",
+            "secret_key": "plane-secret-key",
+            "refresh_token": "plane-refresh-token",
+        },
+    )
+    server.start()
+    downloaded: list[tuple[str, Path]] = []
+
+    def _fake_download(self, remote_path: str, local_path: Path) -> dict[str, object]:
+        downloaded.append((remote_path, local_path))
+        local_path.write_text('{"entries":[]}', encoding="utf-8")
+        return {}
+
+    monkeypatch.setattr(
+        "rift_audio_pipeline.control_plane.runtime_init.BaiduPanClient.download_file",
+        _fake_download,
+    )
+    try:
+        result = initialize_runtime(
+            run_id="manual-run",
+            runtime_dir=tmp_path / "runtime",
+            baidu_remote_root="/apps/test",
+            plane_config=ControlPlaneConfig(base_url=server.base_url),
+            provided_baidu_token_payload={
+                "app_key": "manual-app-key",
+                "secret_key": "manual-secret-key",
+                "refresh_token": "manual-refresh-token",
+            },
+        )
+    finally:
+        server.close()
+
+    assert server.baidu_token_requests == []
+    assert downloaded == [("/apps/test/database.json", result.database_file)]
+    assert result.token_payload == {
+        "app_key": "manual-app-key",
+        "secret_key": "manual-secret-key",
+        "refresh_token": "manual-refresh-token",
+    }
 
 
 def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_run_id(
@@ -108,6 +164,11 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
                 targets=DispatchTargetsInputs(
                     champions=DispatchIdTargets(ids=(1, 103)),
                     maps=DispatchIdTargets(ids=(11,)),
+                ),
+                baidu=DispatchBaiduInputs(
+                    app_key="manual-app-key",
+                    secret_key="manual-secret-key",
+                    refresh_token="manual-refresh-token",
                 ),
                 execution=DispatchExecutionInputs(
                     force_update=False,
@@ -174,5 +235,10 @@ def test_build_runtime_plan_should_derive_runtime_paths(tmp_path: Path) -> None:
     assert plan.log_root == tmp_path / "output" / "logs"
     assert plan.log_dir.parent.parent == tmp_path / "output" / "logs"
     assert plan.log_dir.name == "99887766"
-    assert plan.relay_config_file == tmp_path / "storage" / "runs" / "99887766" / "relay-config.json"
-    assert plan.upload_stdout_file == tmp_path / "storage" / "runs" / "99887766" / "upload-worker.stdout.log"
+    assert (
+        plan.relay_config_file == tmp_path / "storage" / "runs" / "99887766" / "relay-config.json"
+    )
+    assert (
+        plan.upload_stdout_file
+        == tmp_path / "storage" / "runs" / "99887766" / "upload-worker.stdout.log"
+    )

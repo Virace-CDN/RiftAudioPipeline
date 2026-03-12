@@ -16,9 +16,9 @@ from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
 from rift_audio_pipeline.baidu.pan import BaiduPanClient
 from rift_audio_pipeline.artifact_utils import calculate_sha256
-from rift_localdev.simulation import BAIDU_FAILURE_MODE_ENV_VAR
-from rift_localdev.simulation import MOCK_BAIDU_ENV_VAR
-from rift_localdev.simulation import SIMULATION_ENV_VAR
+from rift_audio_pipeline.simulation import BAIDU_FAILURE_MODE_ENV_VAR
+from rift_audio_pipeline.simulation import MOCK_BAIDU_ENV_VAR
+from rift_audio_pipeline.simulation import SIMULATION_ENV_VAR
 from rift_audio_pipeline.control_plane.state_db import claim_next_upload_task
 from rift_audio_pipeline.control_plane.state_db import complete_upload_task
 from rift_audio_pipeline.control_plane.state_db import get_run_drain_state
@@ -56,7 +56,9 @@ class UploadWorker:
                 refresh_token=_require_str(token_payload, "refresh_token"),
             ),
             remote_dir=config.baidu_remote_root,
-            token_store=resolve_token_store(config.baidu_token_file.parent / "baidu-oauth-token.json"),
+            token_store=resolve_token_store(
+                config.baidu_token_file.parent / "baidu-oauth-token.json"
+            ),
         )
 
     def serve(self) -> None:
@@ -101,7 +103,9 @@ class UploadWorker:
                 metadata=payload,
             )
             uploaded_at = _now()
-            packaged_at = datetime.fromtimestamp(local_path.stat().st_ctime).astimezone().isoformat()
+            packaged_at = (
+                datetime.fromtimestamp(local_path.stat().st_ctime).astimezone().isoformat()
+            )
             record_new_file_fact(
                 database_path=self._config.state_db_path,
                 run_id=self._config.run_id,
@@ -165,7 +169,9 @@ class UploadWorker:
                 game_version = metadata.get("game_version")
                 if isinstance(game_version, str) and game_version.strip():
                     payload["version"] = game_version
-                receipt_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                receipt_path.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
             return
         self._client.upload_file(local_path=local_path, remote_path=remote_relative_path)
 

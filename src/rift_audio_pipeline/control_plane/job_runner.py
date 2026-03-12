@@ -9,19 +9,21 @@ from pathlib import Path
 import sys
 import uuid
 
-from rift_localdev.github.faker_github import DispatchPayload
 from rift_audio_pipeline.control_plane.github_actions_workflow import load_dispatch_payload
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 from rift_audio_pipeline.control_plane.runtime.job_support import JobRunnerResult
 from rift_audio_pipeline.control_plane.runtime.job_support import RuntimePlan
 from rift_audio_pipeline.control_plane.runtime.job_support import build_pipeline_environment
-from rift_audio_pipeline.control_plane.runtime.job_support import build_runtime_plan as build_runtime_plan_impl
+from rift_audio_pipeline.control_plane.runtime.job_support import (
+    build_runtime_plan as build_runtime_plan_impl,
+)
 from rift_audio_pipeline.control_plane.runtime.job_support import emit_run_result
 from rift_audio_pipeline.control_plane.runtime.job_support import prepare_relay
 from rift_audio_pipeline.control_plane.runtime.job_support import run_finalize_worker
 from rift_audio_pipeline.control_plane.runtime.job_support import run_pipeline_main
 from rift_audio_pipeline.control_plane.runtime.job_support import start_upload_worker
 from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchPayload
 
 _REQUEST_STAGE_TO_FLAGS = {
     None: (True, True, False),
@@ -64,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime_dir=plan.runtime_root,
         baidu_remote_root=plan.baidu_remote_root,
         plane_config=_build_control_plane_config(args),
+        provided_baidu_token_payload=_build_baidu_token_payload(payload),
     )
     pipeline_command = build_pipeline_command(
         payload=payload,
@@ -160,6 +163,16 @@ def _build_control_plane_config(args: argparse.Namespace) -> ControlPlaneConfig:
     )
 
 
+def _build_baidu_token_payload(payload: DispatchPayload) -> dict[str, object] | None:
+    """从 dispatch payload 中提取可选的百度凭据覆盖值。"""
+
+    baidu_inputs = payload.inputs.baidu
+    token_payload = {
+        "app_key": baidu_inputs.app_key,
+        "secret_key": baidu_inputs.secret_key,
+        "refresh_token": baidu_inputs.refresh_token,
+    }
+    return {key: value for key, value in token_payload.items() if value is not None} or None
 
 
 def build_pipeline_command(
@@ -227,7 +240,9 @@ def build_pipeline_command(
     if inputs.execution.force_update is not None:
         command.append("--force-update" if inputs.execution.force_update else "--no-force-update")
     if inputs.targets.champions.ids:
-        command.extend(["--champion-ids", ",".join(str(item) for item in inputs.targets.champions.ids)])
+        command.extend(
+            ["--champion-ids", ",".join(str(item) for item in inputs.targets.champions.ids)]
+        )
     if inputs.targets.maps.ids:
         command.extend(["--map-ids", ",".join(str(item) for item in inputs.targets.maps.ids)])
     return command

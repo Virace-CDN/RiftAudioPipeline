@@ -2,11 +2,11 @@
 
 > 目的：提供一个本地可运行的假 GitHub 服务端，专门承接 plane 发出的 `workflow_dispatch` 请求。  
 > 作用边界：只覆盖 `POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches` 和 `GET /healthz`，不模拟完整 GitHub Actions API。  
-> 当前事实来源：[`src/rift_audio_pipeline/cloudflare/faker_github.py`](../../src/rift_audio_pipeline/cloudflare/faker_github.py)。
+> 当前事实来源：[`src/rift_audio_pipeline/control_plane/workflow_dispatch.py`](../../src/rift_audio_pipeline/control_plane/workflow_dispatch.py) 与 [`src/rift_localdev/github/faker_github.py`](../../src/rift_localdev/github/faker_github.py)。
 
 ## 1. 设计边界
 
-`faker-github` 现在要求 `inputs` 统一使用一个包装层：`inputs.payload`，并且这个 `payload` 必须是 JSON 字符串。
+`faker-github` 现在只是本地 HTTP 适配层；真正的 `workflow_dispatch` schema、payload 解析和 `job_runner` 命令构造都已经收口到 `rift_audio_pipeline.control_plane.workflow_dispatch`。当前仍要求 `inputs` 统一使用一个包装层：`inputs.payload`，并且这个 `payload` 必须是 JSON 字符串。
 
 这样做的目的有两个：
 
@@ -18,13 +18,13 @@
 - 业务 `payload`
   - 代表一次 dispatch 的业务请求体
   - 会进入 payload 校验、stdout 调试日志和 dispatch 收据
-  - 其中一部分会继续翻译成 `rift_audio_pipeline.pipeline.cli` 参数
+  - 其中一部分会继续翻译成 `rift_audio_pipeline.pipeline.cli` 参数，另一部分会在 `runtime_init` 阶段被消耗
 - 运行环境配置
   - 代表 `faker-github` 自己启动时注入的固定环境
   - 不属于单次 dispatch 的业务差异
   - 不应混入 `payload`
 
-因此，像 `worker_url`、`worker_token` 这类运行时配置或机密不应放进 `inputs.payload` 对应的 JSON 内容里。
+因此，像 `worker_url`、`worker_token` 这类运行时配置或机密不应放进 `inputs.payload` 对应的 JSON 内容里。当前唯一保留的手动运行例外是 `baidu` 对象，它允许 workflow 手动触发时显式传入百度三元凭据，绕过 `GET /api/baidu/token`。
 
 ## 2. 启动方式
 
@@ -180,7 +180,7 @@ uv run rift-faker-github \
 {
   "ref": "main",
   "inputs": {
-    "payload": "{\"schema_version\":\"2026-03-11\",\"request\":{\"mode\":\"remote\",\"stage\":\"update\"},\"game\":{\"region\":\"oc1\"},\"manifests\":{\"current\":{\"version\":\"16.5.7519084\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest\"},\"previous\":{\"version\":\"16.4.7423123\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest\"}},\"targets\":{\"champions\":{\"ids\":[266,103]},\"maps\":{\"ids\":[11,12]}},\"execution\":{\"force_update\":false,\"max_workers\":8,\"download_retry_attempts\":5,\"entity_retry_attempts\":2,\"log_level\":\"INFO\"},\"metadata\":{\"requested_by\":\"scheduler\"}}"
+    "payload": "{\"schema_version\":\"2026-03-12\",\"request\":{\"mode\":\"remote\",\"stage\":\"update\"},\"game\":{\"region\":\"oc1\"},\"manifests\":{\"current\":{\"version\":\"16.5.7519084\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest\"},\"previous\":{\"version\":\"16.4.7423123\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest\"}},\"targets\":{\"champions\":{\"ids\":[266,103]},\"maps\":{\"ids\":[11,12]}},\"baidu\":{\"app_key\":\"manual-app-key\",\"secret_key\":\"manual-secret-key\",\"refresh_token\":\"manual-refresh-token\"},\"execution\":{\"force_update\":false,\"max_workers\":8,\"download_retry_attempts\":5,\"entity_retry_attempts\":2,\"log_level\":\"INFO\"},\"metadata\":{\"requested_by\":\"scheduler\"}}"
   }
 }
 ```
@@ -204,6 +204,7 @@ uv run rift-faker-github \
 | `game` | `object` | 游戏上下文 |
 | `manifests` | `object` | 当前版与上一版 manifest 信息 |
 | `targets` | `object` | 英雄/地图目标 |
+| `baidu` | `object` | 手动 workflow dispatch 可选的百度三元凭据 |
 | `execution` | `object` | 执行策略 |
 | `metadata` | `object` | 请求来源等元信息 |
 
@@ -241,6 +242,20 @@ uv run rift-faker-github \
 - `maps` 当前只有 `ids`
 - `map_aliases` 已从 schema 中移除，因为目前没有实际用途
 
+#### `baidu`
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `app_key` | `string` | 百度 app key |
+| `secret_key` | `string` | 百度 secret key |
+| `refresh_token` | `string` | 百度 refresh token |
+
+说明：
+
+- `baidu` 整体是可选的
+- 但只要出现 `baidu`，当前运行时就要求这三个字段都为非空字符串
+- 若 `baidu` 缺失，`runtime_init` 会回退到 `GET /api/baidu/token`
+
 #### `execution`
 
 | 字段 | 类型 | 说明 |
@@ -269,6 +284,7 @@ uv run rift-faker-github \
 - `targets.*.ids` 接受：
   - JSON 数组，例如 `[266, 103]`
   - 逗号分隔字符串，例如 `"266,103"`
+- 若提供 `baidu`，其内部字段必须都是非空字符串
 
 ### 7.4 明确拒绝的输入
 
@@ -309,14 +325,16 @@ uv run rift-faker-github \
 
 ### 8.2 当前仅保留在 payload/收据的字段
 
-以下字段已经进入结构化 schema，但当前仍不会直接翻译成命令参数：
+以下字段已经进入结构化 schema，但当前不会直接翻译成 pipeline CLI 参数：
 
 - `schema_version`
+- `baidu`
 
 这意味着：
 
 - 它们会出现在请求日志和 dispatch 收据里
-- 但不会影响当前 pipeline CLI 的实际启动参数
+- `schema_version` 不影响实际启动参数
+- `baidu` 不会进入 pipeline CLI，但会在 `runtime_init` 阶段优先写入本地 `baidu-token.json`
 
 ## 9. 启动时注入的固定参数
 

@@ -8,11 +8,11 @@ from pathlib import Path
 import subprocess
 import sys
 
-from rift_localdev.github.faker_github import DispatchPayload
-from rift_localdev.github.faker_github import FakerGitHubConfig
-from rift_localdev.github.faker_github import _serialize_dispatch_inputs
-from rift_localdev.github.faker_github import build_pipeline_command
-from rift_localdev.github.faker_github import parse_dispatch_payload
+from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchPayload
+from rift_audio_pipeline.control_plane.workflow_dispatch import WorkflowDispatchCommandConfig
+from rift_audio_pipeline.control_plane.workflow_dispatch import build_job_runner_command
+from rift_audio_pipeline.control_plane.workflow_dispatch import parse_dispatch_payload
+from rift_audio_pipeline.control_plane.workflow_dispatch import serialize_dispatch_inputs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,10 +56,8 @@ def build_workflow_command(args: argparse.Namespace) -> tuple[DispatchPayload, l
     """基于 workflow 参数构造独立 job runner 命令。"""
 
     payload = load_dispatch_payload(ref=args.ref, dispatch_inputs_file=args.dispatch_inputs_file)
-    config = FakerGitHubConfig(
+    config = WorkflowDispatchCommandConfig(
         storage_root=args.storage_root,
-        github_token="github-actions",
-        github_token_source="workflow",
         control_plane_base_url=args.control_plane_base_url,
         control_plane_bearer_token=args.control_plane_bearer_token,
         control_plane_access_client_id=args.control_plane_access_client_id,
@@ -73,10 +71,9 @@ def build_workflow_command(args: argparse.Namespace) -> tuple[DispatchPayload, l
         baidu_remote_root=args.baidu_remote_root,
         default_log_level=args.default_log_level,
         control_plane_timeout_seconds=args.control_plane_timeout_seconds,
-        working_directory=Path.cwd(),
         python_executable=Path(sys.executable),
     )
-    return payload, build_pipeline_command(
+    return payload, build_job_runner_command(
         config=config,
         payload=payload,
         dispatch_inputs_file=args.dispatch_inputs_file,
@@ -92,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(
             {
                 "ref": payload.ref,
-                "inputs": _serialize_dispatch_inputs(payload.inputs),
+                "inputs": serialize_dispatch_inputs(payload.inputs),
                 "command": command,
             },
             ensure_ascii=False,

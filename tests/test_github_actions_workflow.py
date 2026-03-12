@@ -11,7 +11,7 @@ from rift_audio_pipeline.control_plane import github_actions_workflow
 
 
 def test_build_workflow_command_should_map_structured_dispatch_inputs(tmp_path: Path) -> None:
-    """workflow 入口应把结构化 JSON 转成 pipeline CLI。"""
+    """workflow 入口应把结构化 JSON 转成 job runner 调用。"""
 
     dispatch_payload_file = tmp_path / "dispatch-payload.json"
     dispatch_payload_file.write_text(
@@ -46,10 +46,17 @@ def test_build_workflow_command_should_map_structured_dispatch_inputs(tmp_path: 
     payload, command = github_actions_workflow.build_workflow_command(args)
 
     assert payload.ref == "main"
-    assert "--run-update" in command
-    assert "--no-run-extract" in command
-    assert "--current-version" in command
-    assert "16.5" in command
+    assert command[:3] == [
+        github_actions_workflow.sys.executable,
+        "-m",
+        "rift_audio_pipeline.control_plane.job_runner",
+    ]
+    assert "--dispatch-inputs-file" in command
+    assert str(dispatch_payload_file) in command
+    assert "--default-game-region" in command
+    assert "oc1" in command
+    assert "--default-requested-by" in command
+    assert "actions-test" in command
     assert "--control-plane-base-url" in command
     assert "https://control.example.com" in command
 

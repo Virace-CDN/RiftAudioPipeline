@@ -14,9 +14,9 @@ from rift_audio_pipeline.baidu.pan import BaiduPanClient
 from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.control_plane.client import ControlPlaneClient
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
-from rift_localdev.simulation import MOCK_BAIDU_ENV_VAR
-from rift_localdev.simulation import SIMULATION_ENV_VAR
 from rift_audio_pipeline.control_plane.state_db import bootstrap_state_database
+from rift_audio_pipeline.simulation import MOCK_BAIDU_ENV_VAR
+from rift_audio_pipeline.simulation import SIMULATION_ENV_VAR
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,12 +38,30 @@ def initialize_runtime(
     runtime_dir: Path,
     baidu_remote_root: str,
     plane_config: ControlPlaneConfig,
+    provided_baidu_token_payload: dict[str, object] | None = None,
 ) -> RuntimeInitializationResult:
-    """从 plane 拉取百度凭据并准备本地 database。"""
+    """准备百度凭据、本地 database 与 state.sqlite3。
+
+    Args:
+        run_id: 当前运行 ID。
+        runtime_dir: 当前运行的本地工作目录。
+        baidu_remote_root: 百度远端根目录。
+        plane_config: control plane 访问配置。
+        provided_baidu_token_payload: dispatch payload 中显式提供的百度凭据。
+
+    Returns:
+        RuntimeInitializationResult: 初始化阶段产物。
+
+    Raises:
+        ValueError: 当百度凭据缺少必需字段或 database 非 JSON object 时抛出。
+    """
 
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    token_payload = _fetch_baidu_token_payload(plane_config=plane_config)
-    _validate_baidu_token_payload(token_payload)
+    token_payload, token_source = _resolve_baidu_token_payload(
+        plane_config=plane_config,
+        provided_baidu_token_payload=provided_baidu_token_payload,
+    )
+    _validate_baidu_token_payload(token_payload, source_label=token_source)
     baidu_token_file = runtime_dir / "baidu-token.json"
     baidu_token_file.write_text(
         json.dumps(token_payload, ensure_ascii=False, indent=2),
@@ -128,7 +146,21 @@ def _fetch_baidu_token_payload(*, plane_config: ControlPlaneConfig) -> dict[str,
     return client.request_json("GET", "/api/baidu/token")
 
 
-def _validate_baidu_token_payload(payload: dict[str, object]) -> None:
+def _resolve_baidu_token_payload(
+    *,
+    plane_config: ControlPlaneConfig,
+    provided_baidu_token_payload: dict[str, object] | None,
+) -> tuple[dict[str, object], str]:
+    """决定当前运行应使用的百度凭据来源。"""
+
+    if provided_baidu_token_payload is not None:
+        return dict(provided_baidu_token_payload), "inputs.payload.baidu"
+    return _fetch_baidu_token_payload(plane_config=plane_config), "plane /api/baidu/token"
+
+
+def _validate_baidu_token_payload(payload: dict[str, object], *, source_label: str) -> None:
+    """校验百度凭据负载。"""
+
     required_fields = ("app_key", "secret_key", "refresh_token")
     missing = [
         field_name
@@ -137,7 +169,7 @@ def _validate_baidu_token_payload(payload: dict[str, object]) -> None:
     ]
     if missing:
         joined = ", ".join(missing)
-        raise ValueError(f"plane /api/baidu/token 缺少必需字段：{joined}")
+        raise ValueError(f"{source_label} 缺少必需字段：{joined}")
 
 
 def _download_or_initialize_database(
