@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import re
+import shutil
 
 from rift_audio_pipeline.baidu import BaiduCredentials
 from rift_audio_pipeline.baidu import BaiduPanClient
@@ -40,6 +41,8 @@ from rift_audio_pipeline.pipeline.models import PipelineStage
 from rift_audio_pipeline.pipeline.models import ProcessingTarget
 from rift_audio_pipeline.pipeline.remote import build_remote_app_context
 from rift_audio_pipeline.pipeline.remote import run_remote_pipeline
+
+DEFAULT_ARCHIVE_PASSWORD = "x-item.com"
 
 CHAMPION_WAD_PATTERN = re.compile(r"/champions/(?P<alias>[^/]+)\.wad\.client$", re.IGNORECASE)
 CHAMPION_BIN_PATTERN = re.compile(r"/characters/(?P<alias>[^/]+)/", re.IGNORECASE)
@@ -357,15 +360,15 @@ def handle_entity_artifacts(
     for audio_dir in artifact.audio_output_paths:
         if not audio_dir.is_dir():
             continue
-        archives.append(
-            pack_champion(
-                champion_dir=audio_dir,
-                output_path=output_dir,
-                report_file=report_file,
-                password=config.archive_password,
-                extra_files=extra_files,
-            )
+        archive_path = pack_champion(
+            champion_dir=audio_dir,
+            output_path=output_dir,
+            report_file=report_file,
+            password=config.archive_password or DEFAULT_ARCHIVE_PASSWORD,
+            extra_files=extra_files,
         )
+        archives.append(archive_path)
+        shutil.rmtree(audio_dir)
     return tuple(archives)
 
 

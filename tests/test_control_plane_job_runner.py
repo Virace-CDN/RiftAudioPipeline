@@ -16,6 +16,8 @@ from rift_audio_pipeline.control_plane.job_runner import build_pipeline_command
 from rift_audio_pipeline.control_plane.job_runner import build_parser
 from rift_audio_pipeline.control_plane.job_runner import build_runtime_plan
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
+from rift_audio_pipeline.control_plane.runtime.job_support import UploadQueueSnapshot
+from rift_audio_pipeline.control_plane.runtime.job_support import _estimate_upload_wait_seconds
 from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
 from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchBaiduInputs
 from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchExecutionInputs
@@ -298,3 +300,21 @@ def test_build_control_plane_config_should_return_none_for_blank_base_url() -> N
     )
 
     assert _build_control_plane_config(args) is None
+
+
+def test_estimate_upload_wait_seconds_should_scale_for_large_files() -> None:
+    """1-2GB 级文件上传等待不应过于激进。"""
+
+    timeout_seconds = _estimate_upload_wait_seconds(
+        UploadQueueSnapshot(
+            unfinished_count=2,
+            queued_count=1,
+            claimed_count=1,
+            retry_wait_count=0,
+            done_count=0,
+            remaining_bytes=2 * 1024 * 1024 * 1024,
+            signature=((1, "claimed", "a"), (2, "queued", "b")),
+        )
+    )
+
+    assert timeout_seconds >= 1800

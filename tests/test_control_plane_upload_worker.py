@@ -75,6 +75,7 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
             baidu_token_file=baidu_token_file,
             baidu_remote_root="/apps/test",
             worker_id="worker-1",
+            delete_local_file_after_upload=True,
             poll_interval_ms=10,
         )
     )
@@ -103,3 +104,4 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
     assert fact_row[1] == archive_path.name
     assert isinstance(fact_row[2], str) and fact_row[2]
     assert run_control == ("drained",)
+    assert not archive_path.exists()

@@ -7,8 +7,10 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
+import time
 from typing import Callable
 from typing import TextIO
 
@@ -17,6 +19,14 @@ from rift_audio_pipeline.control_plane.runtime.relay_runtime import write_log_re
 from rift_audio_pipeline.control_plane.runtime_init import RuntimeInitializationResult
 from rift_audio_pipeline.pipeline.logging import _LOG_RELAY_SOCKET_ROOT
 from rift_audio_pipeline.pipeline.logging import LogSinkConfig
+
+_DEFAULT_UPLOAD_WORKER_COUNT = 2
+_MIN_UPLOAD_WAIT_SECONDS = 300.0
+_SECONDS_PER_MIB = 1.0
+_SECONDS_PER_TASK = 90.0
+_MAX_UPLOAD_WAIT_SECONDS = 7200.0
+_UPLOAD_POLL_INTERVAL_SECONDS = 2.0
+_UPLOAD_DRAIN_GRACE_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +84,19 @@ class JobRunnerResult:
             "baidu_token_file": str(self.baidu_token_file),
             "relay_socket_path": str(self.relay_socket_path),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class UploadQueueSnapshot:
+    """上传队列的当前摘要。"""
+
+    unfinished_count: int
+    queued_count: int
+    claimed_count: int
+    retry_wait_count: int
+    done_count: int
+    remaining_bytes: int
+    signature: tuple[tuple[int, str, str], ...]
 
 
 def build_runtime_plan(
@@ -151,12 +174,13 @@ def start_upload_worker(
     plan: RuntimePlan,
     init_result: RuntimeInitializationResult,
 ) -> tuple[subprocess.Popen[str], TextIO]:
-    """启动独立 upload worker 并返回进程句柄。"""
+    """启动单个 upload worker 并返回进程句柄。"""
 
     upload_stdout_handle = plan.upload_stdout_file.open("a", encoding="utf-8")
     upload_process = subprocess.Popen(
         [
             sys.executable,
+            "-u",
             "-m",
             "rift_audio_pipeline.control_plane.upload_worker",
             "--run-id",
@@ -169,12 +193,30 @@ def start_upload_worker(
             plan.baidu_remote_root,
             "--output-root",
             str(plan.output_root),
+            "--delete-local-file-after-upload",
         ],
         stdout=upload_stdout_handle,
         stderr=subprocess.STDOUT,
         text=True,
     )
     return upload_process, upload_stdout_handle
+
+
+def start_upload_workers(
+    *,
+    plan: RuntimePlan,
+    init_result: RuntimeInitializationResult,
+    worker_count: int = _DEFAULT_UPLOAD_WORKER_COUNT,
+) -> tuple[list[subprocess.Popen[str]], list[TextIO]]:
+    """启动多个 upload worker。"""
+
+    processes: list[subprocess.Popen[str]] = []
+    handles: list[TextIO] = []
+    for _ in range(max(worker_count, 1)):
+        process, handle = start_upload_worker(plan=plan, init_result=init_result)
+        processes.append(process)
+        handles.append(handle)
+    return processes, handles
 
 
 def build_pipeline_environment(*, init_result: RuntimeInitializationResult) -> dict[str, str]:
@@ -201,6 +243,62 @@ def run_pipeline_main(
         text=True,
     )
     return pipeline_process.wait()
+
+
+def wait_for_upload_workers(
+    *,
+    state_db_path: Path,
+    run_id: str,
+    upload_processes: list[subprocess.Popen[str]],
+) -> int:
+    """等待 upload worker 排空队列并退出。"""
+
+    last_progress_at = time.monotonic()
+    last_signature: tuple[tuple[int, str, str], ...] | None = None
+    while True:
+        snapshot = _read_upload_queue_snapshot(state_db_path=state_db_path, run_id=run_id)
+        if snapshot.signature != last_signature:
+            last_signature = snapshot.signature
+            last_progress_at = time.monotonic()
+        exit_codes = [process.poll() for process in upload_processes]
+        failing_codes = [code for code in exit_codes if code not in (None, 0)]
+        if failing_codes:
+            return failing_codes[0]
+        if snapshot.unfinished_count == 0 and all(code == 0 for code in exit_codes):
+            return 0
+        if snapshot.unfinished_count == 0 and all(code is not None for code in exit_codes):
+            return 0
+        if snapshot.unfinished_count == 0:
+            if time.monotonic() - last_progress_at > _UPLOAD_DRAIN_GRACE_SECONDS:
+                for process in upload_processes:
+                    if process.poll() is None:
+                        process.terminate()
+                raise subprocess.TimeoutExpired(
+                    cmd=[process.args for process in upload_processes],
+                    timeout=_UPLOAD_DRAIN_GRACE_SECONDS,
+                    output=(
+                        f"upload drain 已完成但 worker 未在 {_UPLOAD_DRAIN_GRACE_SECONDS:.0f}s 内退出："
+                        f"{snapshot}"
+                    ),
+                )
+            time.sleep(_UPLOAD_POLL_INTERVAL_SECONDS)
+            continue
+        allowed_wait = _estimate_upload_wait_seconds(snapshot)
+        if time.monotonic() - last_progress_at > allowed_wait:
+            for process in upload_processes:
+                if process.poll() is None:
+                    process.terminate()
+            raise subprocess.TimeoutExpired(
+                cmd=[process.args for process in upload_processes],
+                timeout=allowed_wait,
+                output=(
+                    "upload worker 长时间未见进度，当前摘要："
+                    f"unfinished={snapshot.unfinished_count}, queued={snapshot.queued_count}, "
+                    f"claimed={snapshot.claimed_count}, retry_wait={snapshot.retry_wait_count}, "
+                    f"done={snapshot.done_count}, remaining_bytes={snapshot.remaining_bytes}"
+                ),
+            )
+        time.sleep(_UPLOAD_POLL_INTERVAL_SECONDS)
 
 
 def run_finalize_worker(
@@ -248,3 +346,65 @@ def emit_run_result(result: JobRunnerResult) -> None:
     """输出 job runner 的统一 JSON 摘要。"""
 
     print(json.dumps(result.to_payload(), ensure_ascii=False, indent=2))
+
+
+def _read_upload_queue_snapshot(*, state_db_path: Path, run_id: str) -> UploadQueueSnapshot:
+    """读取当前上传队列摘要。"""
+
+    with sqlite3.connect(state_db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, local_path, status, updated_at
+            FROM upload_tasks
+            WHERE run_id = ?
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    unfinished_statuses = {"queued", "claimed", "retry_wait"}
+    unfinished_count = 0
+    queued_count = 0
+    claimed_count = 0
+    retry_wait_count = 0
+    done_count = 0
+    remaining_bytes = 0
+    signature: list[tuple[int, str, str]] = []
+    for row in rows:
+        task_id = int(row[0])
+        local_path = Path(str(row[1]))
+        status = str(row[2])
+        updated_at = str(row[3]) if row[3] is not None else ""
+        if status == "queued":
+            queued_count += 1
+        elif status == "claimed":
+            claimed_count += 1
+        elif status == "retry_wait":
+            retry_wait_count += 1
+        elif status == "done":
+            done_count += 1
+        if status in unfinished_statuses:
+            unfinished_count += 1
+            signature.append((task_id, status, updated_at))
+            if local_path.is_file():
+                remaining_bytes += local_path.stat().st_size
+    return UploadQueueSnapshot(
+        unfinished_count=unfinished_count,
+        queued_count=queued_count,
+        claimed_count=claimed_count,
+        retry_wait_count=retry_wait_count,
+        done_count=done_count,
+        remaining_bytes=remaining_bytes,
+        signature=tuple(signature),
+    )
+
+
+def _estimate_upload_wait_seconds(snapshot: UploadQueueSnapshot) -> float:
+    """根据剩余文件大小和队列长度估算等待时长。"""
+
+    remaining_mib = snapshot.remaining_bytes / (1024 * 1024)
+    estimated = (
+        _MIN_UPLOAD_WAIT_SECONDS
+        + (remaining_mib * _SECONDS_PER_MIB)
+        + (snapshot.unfinished_count * _SECONDS_PER_TASK)
+    )
+    return min(max(estimated, _MIN_UPLOAD_WAIT_SECONDS), _MAX_UPLOAD_WAIT_SECONDS)

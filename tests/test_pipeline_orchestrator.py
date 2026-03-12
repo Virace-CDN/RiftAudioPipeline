@@ -113,6 +113,61 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
     assert archives == (tmp_path / "output" / "packages" / "16.5" / "champion" / "annie.7z",)
 
 
+def test_handle_entity_artifacts_should_use_default_password_and_cleanup_audio_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """未显式提供密码时应使用默认密码，并在打包后删除源音频目录。"""
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_pack_champion(
+        champion_dir: Path,
+        output_path: Path,
+        *,
+        archive_name: str | None = None,
+        report_file: Path | None = None,
+        password: str | None = None,
+        encrypt_filenames: bool = True,
+        extra_files: tuple[Path, ...] = tuple(),
+        compression_level: int = 0,
+        seven_zip_executable: str | None = None,
+    ) -> Path:
+        del archive_name, report_file, encrypt_filenames, extra_files, compression_level, seven_zip_executable
+        calls.append(
+            {
+                "champion_dir": champion_dir,
+                "output_path": output_path,
+                "password": password,
+            }
+        )
+        output_path.mkdir(parents=True, exist_ok=True)
+        archive_path = output_path / f"{champion_dir.name}.7z"
+        archive_path.write_text("archive", encoding="utf-8")
+        return archive_path
+
+    monkeypatch.setattr(orchestrator, "pack_champion", _fake_pack_champion)
+
+    audio_dir = tmp_path / "audios" / "annie"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    (audio_dir / "sample.txt").write_text("voice", encoding="utf-8")
+    config = _build_remote_config(tmp_path)
+
+    archives = orchestrator.handle_entity_artifacts(
+        config=config,
+        artifact=EntityArtifacts(
+            entity_type="champion",
+            entity_id=1,
+            audio_output_paths=(audio_dir,),
+        ),
+        version="16.5",
+    )
+
+    assert calls[0]["password"] == "x-item.com"
+    assert archives == (tmp_path / "output" / "packages" / "16.5" / "champion" / "annie.7z",)
+    assert not audio_dir.exists()
+
+
 def test_build_processing_targets_should_prefer_explicit_ids(tmp_path: Path) -> None:
     """显式 ID 存在时应直接生成对应目标。"""
 

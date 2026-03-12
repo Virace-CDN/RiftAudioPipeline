@@ -37,6 +37,7 @@ class UploadWorkerConfig:
     baidu_remote_root: str
     worker_id: str
     output_root: Path | None = None
+    delete_local_file_after_upload: bool = False
     poll_interval_ms: int = 500
     retry_backoff_seconds: tuple[int, ...] = (2, 5, 15, 30)
 
@@ -64,6 +65,17 @@ class UploadWorker:
     def serve(self) -> None:
         """持续消费上传队列，直到 drain。"""
 
+        print(
+            json.dumps(
+                {
+                    "event": "upload_worker_started",
+                    "run_id": self._config.run_id,
+                    "worker_id": self._config.worker_id,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
         try:
             while True:
                 task = claim_next_upload_task(
@@ -81,6 +93,17 @@ class UploadWorker:
                             database_path=self._config.state_db_path,
                             run_id=self._config.run_id,
                         )
+                        print(
+                            json.dumps(
+                                {
+                                    "event": "upload_worker_drained",
+                                    "run_id": self._config.run_id,
+                                    "worker_id": self._config.worker_id,
+                                },
+                                ensure_ascii=False,
+                            ),
+                            flush=True,
+                        )
                         return
                     time.sleep(self._config.poll_interval_ms / 1000)
                     continue
@@ -97,6 +120,20 @@ class UploadWorker:
         if not isinstance(remote_relative_path, str) or not remote_relative_path.strip():
             raise ValueError(f"上传任务缺少 remote_relative_path：task_id={task.id}")
         try:
+            print(
+                json.dumps(
+                    {
+                        "event": "upload_task_started",
+                        "run_id": self._config.run_id,
+                        "worker_id": self._config.worker_id,
+                        "task_id": task.id,
+                        "local_path": str(local_path),
+                        "remote_relative_path": remote_relative_path,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
             self._upload_file(
                 local_path=local_path,
                 remote_relative_path=remote_relative_path,
@@ -121,9 +158,24 @@ class UploadWorker:
                     **payload,
                 },
             )
+            if self._config.delete_local_file_after_upload:
+                local_path.unlink()
             complete_upload_task(
                 database_path=self._config.state_db_path,
                 task_id=task.id,
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "upload_task_completed",
+                        "run_id": self._config.run_id,
+                        "worker_id": self._config.worker_id,
+                        "task_id": task.id,
+                        "remote_path": task.remote_path,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
             )
         except Exception as error:  # noqa: BLE001
             next_retry_at = _next_retry_at(
@@ -136,6 +188,20 @@ class UploadWorker:
                 task_id=task.id,
                 last_error=str(error),
                 next_retry_at=next_retry_at,
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "upload_task_rescheduled",
+                        "run_id": self._config.run_id,
+                        "worker_id": self._config.worker_id,
+                        "task_id": task.id,
+                        "error": str(error),
+                        "next_retry_at": next_retry_at,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
             )
 
     def _upload_file(
@@ -184,6 +250,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baidu-remote-root", required=True)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--worker-id")
+    parser.add_argument(
+        "--delete-local-file-after-upload",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     return parser
 
 
@@ -197,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
             baidu_remote_root=args.baidu_remote_root,
             worker_id=args.worker_id or f"upload-worker-{uuid.uuid4().hex[:8]}",
             output_root=args.output_root,
+            delete_local_file_after_upload=args.delete_local_file_after_upload,
         )
     )
     worker.serve()

@@ -10,6 +10,12 @@ from rift_audio_pipeline.artifact_utils import join_remote_file_path
 DEFAULT_ARCHIVE_AUDIO_TYPES: tuple[str, ...] = ("VO",)
 RESOURCE_TYPE_BUCKETS = ("VO", "SFX", "MUSIC")
 RESOURCE_TARGET_GROUPS = ("champions", "maps")
+RESOURCE_TARGET_GROUP_ALIASES = {
+    "champion": "champions",
+    "champions": "champions",
+    "map": "maps",
+    "maps": "maps",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,8 +74,9 @@ def _resolve_archive_target_group(archive: Path) -> str:
 
     for part in reversed(archive.parts[:-1]):
         lowered = part.casefold()
-        if lowered in RESOURCE_TARGET_GROUPS:
-            return lowered
+        normalized = RESOURCE_TARGET_GROUP_ALIASES.get(lowered)
+        if normalized in RESOURCE_TARGET_GROUPS:
+            return normalized
     return "champions"
 
 

@@ -33,3 +33,18 @@ def test_build_archive_publish_layout_should_route_archive_by_group_and_type() -
     assert layout.target_group == "maps"
     assert layout.resource_type == "SFX"
     assert layout.entity_key == "11-map11"
+
+
+def test_build_archive_publish_layout_should_accept_singular_directory_name() -> None:
+    """单数目录名 map/champion 也应映射到正确远端分组。"""
+
+    archive = Path("/tmp/output/packages/16.5/map/11·sr·召唤师峡谷.7z")
+
+    layout = build_archive_publish_layout(
+        archive,
+        remote_root="/apps/test",
+        default_resource_type="VO",
+    )
+
+    assert layout.remote_relative_path == "VO/maps/11·sr·召唤师峡谷.7z"
+    assert layout.target_group == "maps"

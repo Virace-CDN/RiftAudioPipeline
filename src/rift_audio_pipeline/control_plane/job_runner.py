@@ -21,7 +21,8 @@ from rift_audio_pipeline.control_plane.runtime.job_support import emit_run_resul
 from rift_audio_pipeline.control_plane.runtime.job_support import prepare_relay
 from rift_audio_pipeline.control_plane.runtime.job_support import run_finalize_worker
 from rift_audio_pipeline.control_plane.runtime.job_support import run_pipeline_main
-from rift_audio_pipeline.control_plane.runtime.job_support import start_upload_worker
+from rift_audio_pipeline.control_plane.runtime.job_support import start_upload_workers
+from rift_audio_pipeline.control_plane.runtime.job_support import wait_for_upload_workers
 from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
 from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchPayload
 
@@ -52,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-requested-by", default="github-actions")
     parser.add_argument("--default-log-level", default="INFO")
     parser.add_argument("--baidu-remote-root", default="/apps/rift-audio-pipeline")
+    parser.add_argument("--upload-worker-count", type=int, default=2)
     return parser
 
 
@@ -91,9 +93,10 @@ def main(argv: list[str] | None = None) -> int:
         control_plane_access_client_secret=args.control_plane_access_client_secret,
         control_plane_timeout_seconds=args.control_plane_timeout_seconds,
     )
-    upload_process, upload_stdout_handle = start_upload_worker(
+    upload_processes, upload_stdout_handles = start_upload_workers(
         plan=plan,
         init_result=init_result,
+        worker_count=args.upload_worker_count,
     )
     result = JobRunnerResult(
         run_id=plan.run_id,
@@ -114,7 +117,11 @@ def main(argv: list[str] | None = None) -> int:
             pipeline_command=pipeline_command,
             pipeline_env=build_pipeline_environment(init_result=init_result),
         )
-        upload_returncode = upload_process.wait(timeout=60.0)
+        upload_returncode = wait_for_upload_workers(
+            state_db_path=init_result.state_db_file,
+            run_id=plan.run_id,
+            upload_processes=upload_processes,
+        )
         finalize_returncode = run_finalize_worker(
             plan=plan,
             init_result=init_result,
@@ -139,7 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if relay_stdout_handle is not None:
             relay_stdout_handle.close()
-        upload_stdout_handle.close()
+        for handle in upload_stdout_handles:
+            handle.close()
     emit_run_result(result)
     return result.pipeline_returncode
 
