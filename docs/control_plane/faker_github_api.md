@@ -1,6 +1,6 @@
 # faker-github API
 
-> 目的：提供一个本地可运行的假 GitHub 服务端，专门承接 plane 发出的 `workflow_dispatch` 请求。  
+> 目的：提供一个本地可运行的 fake GitHub 服务端，在本地联调时模拟 `workflow_dispatch` 接收端。  
 > 作用边界：只覆盖 `POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches` 和 `GET /healthz`，不模拟完整 GitHub Actions API。  
 > 当前事实来源：[`src/rift_audio_pipeline/control_plane/workflow_dispatch.py`](../../src/rift_audio_pipeline/control_plane/workflow_dispatch.py) 与 [`src/rift_localdev/github/faker_github.py`](../../src/rift_localdev/github/faker_github.py)。
 
