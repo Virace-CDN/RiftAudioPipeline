@@ -28,6 +28,15 @@ _SECONDS_PER_TASK = 90.0
 _MAX_UPLOAD_WAIT_SECONDS = 7200.0
 _UPLOAD_POLL_INTERVAL_SECONDS = 2.0
 _UPLOAD_DRAIN_GRACE_SECONDS = 30.0
+_UPLOAD_WORKER_MIRRORED_EVENTS = frozenset(
+    {
+        "upload_worker_started",
+        "upload_worker_drained",
+        "upload_task_started",
+        "upload_task_completed",
+        "upload_task_rescheduled",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +225,7 @@ def start_upload_worker(
         ],
         log_file=upload_stdout_file,
         stream_label=worker_id,
+        mirror_predicate=_should_mirror_upload_worker_line,
     )
 
 
@@ -427,3 +437,19 @@ def _estimate_upload_wait_seconds(snapshot: UploadQueueSnapshot) -> float:
         + (snapshot.unfinished_count * _SECONDS_PER_TASK)
     )
     return min(max(estimated, _MIN_UPLOAD_WAIT_SECONDS), _MAX_UPLOAD_WAIT_SECONDS)
+
+
+def _should_mirror_upload_worker_line(line: str) -> bool:
+    """只把 upload worker 的高层事件镜像到父进程 stdout。"""
+
+    stripped = line.strip()
+    if not stripped:
+        return False
+    try:
+        payload = json.loads(stripped)
+    except ValueError:
+        return True
+    if not isinstance(payload, dict):
+        return True
+    event_name = payload.get("event")
+    return isinstance(event_name, str) and event_name in _UPLOAD_WORKER_MIRRORED_EVENTS

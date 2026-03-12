@@ -40,10 +40,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Write dispatch payload
-        env:
-          DISPATCH_PAYLOAD_JSON: ${{ github.event.inputs.payload }}
         run: |
-          printf '%s' "$DISPATCH_PAYLOAD_JSON" > "$RUNNER_TEMP/dispatch-payload.json"
           uv run python - <<'PY'
           import json
           import os
@@ -53,10 +50,24 @@ jobs:
               redact_raw_dispatch_payload,
           )
 
-          raw_payload = json.loads(os.environ["DISPATCH_PAYLOAD_JSON"])
+          event_payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          dispatch_payload_json = event_payload["inputs"]["payload"]
+          Path(os.environ["RUNNER_TEMP"]).joinpath("dispatch-payload.json").write_text(
+              dispatch_payload_json,
+              encoding="utf-8",
+          )
           redacted_path = Path(os.environ["RUNNER_TEMP"]) / "dispatch-payload.redacted.json"
           redacted_path.write_text(
-              json.dumps(redact_raw_dispatch_payload({"ref": "${{ github.ref_name }}", "inputs": {"payload": os.environ["DISPATCH_PAYLOAD_JSON"]}}), ensure_ascii=False, indent=2),
+              json.dumps(
+                  redact_raw_dispatch_payload(
+                      {
+                          "ref": os.environ.get("GITHUB_REF_NAME", ""),
+                          "inputs": {"payload": dispatch_payload_json},
+                      }
+                  ),
+                  ensure_ascii=False,
+                  indent=2,
+              ),
               encoding="utf-8",
           )
           PY

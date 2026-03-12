@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+from typing import Callable
 from typing import IO
 from typing import Mapping
 from typing import TextIO
@@ -37,6 +38,7 @@ def start_streamed_process(
     env: Mapping[str, str] | None = None,
     close_fds: bool = True,
     start_new_session: bool = False,
+    mirror_predicate: Callable[[str], bool] | None = None,
 ) -> tuple[subprocess.Popen[str], ProcessOutputHandle]:
     """启动子进程，并把 stdout 同步写入文件与父进程 stdout。"""
 
@@ -56,7 +58,7 @@ def start_streamed_process(
         raise RuntimeError(f"启动 {stream_label} 失败：stdout pipe 不可用。")
     reader_thread = threading.Thread(
         target=_pump_process_output,
-        args=(process.stdout, log_handle, stream_label),
+        args=(process.stdout, log_handle, stream_label, mirror_predicate),
         daemon=True,
         name=f"{stream_label}-stdout-pump",
     )
@@ -73,6 +75,7 @@ def _pump_process_output(
     source: IO[str],
     log_handle: TextIO,
     stream_label: str,
+    mirror_predicate: Callable[[str], bool] | None = None,
 ) -> None:
     """持续消费子进程 stdout，并镜像到文件与父进程 stdout。"""
 
@@ -81,6 +84,8 @@ def _pump_process_output(
             normalized_line = raw_line if raw_line.endswith("\n") else f"{raw_line}\n"
             log_handle.write(normalized_line)
             log_handle.flush()
+            if mirror_predicate is not None and not mirror_predicate(normalized_line):
+                continue
             sys.stdout.write(_format_stream_line(stream_label=stream_label, line=normalized_line))
             sys.stdout.flush()
     finally:

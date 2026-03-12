@@ -20,6 +20,7 @@ from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 from rift_audio_pipeline.control_plane.runtime import process_output as process_output_module
 from rift_audio_pipeline.control_plane.runtime.job_support import UploadQueueSnapshot
 from rift_audio_pipeline.control_plane.runtime.job_support import _estimate_upload_wait_seconds
+from rift_audio_pipeline.control_plane.runtime.job_support import _should_mirror_upload_worker_line
 from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
 from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchBaiduInputs
 from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchExecutionInputs
@@ -318,6 +319,46 @@ def test_pump_process_output_should_mirror_to_stdout_and_log_file(
     assert mirrored_stdout.getvalue() == (
         "[upload-worker-01] line-one\n"
         "[upload-worker-01] line-two\n"
+    )
+
+
+def test_pump_process_output_should_keep_verbose_lines_in_file_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """详细上传进度应只落文件，不实时镜像到 shell。"""
+
+    source = io.StringIO(
+        '{"event":"upload_task_progress","task_id":1}\n'
+        '{"event":"upload_task_completed","task_id":1}\n'
+    )
+    log_file = tmp_path / "upload-worker-01.stdout.log"
+    log_handle = log_file.open("w", encoding="utf-8")
+    mirrored_stdout = io.StringIO()
+    monkeypatch.setattr(process_output_module.sys, "stdout", mirrored_stdout)
+
+    process_output_module._pump_process_output(
+        source=source,
+        log_handle=log_handle,
+        stream_label="upload-worker-01",
+        mirror_predicate=_should_mirror_upload_worker_line,
+    )
+    log_handle.close()
+
+    assert '"upload_task_progress"' in log_file.read_text(encoding="utf-8")
+    assert '"upload_task_completed"' in log_file.read_text(encoding="utf-8")
+    assert '"upload_task_progress"' not in mirrored_stdout.getvalue()
+    assert '"upload_task_completed"' in mirrored_stdout.getvalue()
+
+
+def test_should_mirror_upload_worker_line_should_filter_progress_only() -> None:
+    """upload worker 详细分片进度不应镜像到父进程 stdout。"""
+
+    assert _should_mirror_upload_worker_line(
+        '{"event":"upload_task_started","task_id":1}\n'
+    )
+    assert not _should_mirror_upload_worker_line(
+        '{"event":"upload_task_progress","task_id":1}\n'
     )
 
 
