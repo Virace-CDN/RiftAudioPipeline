@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         default_game_region=plan.default_game_region,
         default_log_level=plan.default_log_level,
     )
-    relay_process, relay_stdout_handle = prepare_relay(
+    relay_process, relay_output_handle = prepare_relay(
         plan=plan,
         control_plane_base_url=control_plane_config.base_url if control_plane_config else None,
         control_plane_bearer_token=args.control_plane_bearer_token,
@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         control_plane_access_client_secret=args.control_plane_access_client_secret,
         control_plane_timeout_seconds=args.control_plane_timeout_seconds,
     )
-    upload_processes, upload_stdout_handles = start_upload_workers(
+    upload_processes, upload_output_handles = start_upload_workers(
         plan=plan,
         init_result=init_result,
         worker_count=args.upload_worker_count,
@@ -144,9 +144,24 @@ def main(argv: list[str] | None = None) -> int:
             relay_socket_path=result.relay_socket_path,
         )
     finally:
-        if relay_stdout_handle is not None:
-            relay_stdout_handle.close()
-        for handle in upload_stdout_handles:
+        for process in upload_processes:
+            if process.poll() is None:
+                process.terminate()
+        if relay_process is not None and relay_process.poll() is None:
+            relay_process.terminate()
+        if relay_process is not None:
+            try:
+                relay_process.wait(timeout=5.0)
+            except Exception:  # noqa: BLE001
+                pass
+        for process in upload_processes:
+            try:
+                process.wait(timeout=5.0)
+            except Exception:  # noqa: BLE001
+                pass
+        if relay_output_handle is not None:
+            relay_output_handle.close()
+        for handle in upload_output_handles:
             handle.close()
     emit_run_result(result)
     return result.pipeline_returncode

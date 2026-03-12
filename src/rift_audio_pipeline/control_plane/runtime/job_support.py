@@ -12,10 +12,11 @@ import subprocess
 import sys
 import time
 from typing import Callable
-from typing import TextIO
 
 from rift_audio_pipeline.control_plane.runtime.relay_runtime import spawn_log_relay_process
 from rift_audio_pipeline.control_plane.runtime.relay_runtime import write_log_relay_config
+from rift_audio_pipeline.control_plane.runtime.process_output import ProcessOutputHandle
+from rift_audio_pipeline.control_plane.runtime.process_output import start_streamed_process
 from rift_audio_pipeline.control_plane.runtime_init import RuntimeInitializationResult
 from rift_audio_pipeline.pipeline.logging import _LOG_RELAY_SOCKET_ROOT
 from rift_audio_pipeline.pipeline.logging import LogSinkConfig
@@ -143,7 +144,7 @@ def prepare_relay(
     control_plane_access_client_id: str | None,
     control_plane_access_client_secret: str | None,
     control_plane_timeout_seconds: float,
-) -> tuple[subprocess.Popen[str] | None, TextIO | None]:
+    ) -> tuple[subprocess.Popen[str] | None, ProcessOutputHandle | None]:
     """写入 relay 配置并启动独立 relay 进程。"""
 
     if not control_plane_base_url:
@@ -186,16 +187,15 @@ def start_upload_worker(
     plan: RuntimePlan,
     init_result: RuntimeInitializationResult,
     worker_id: str,
-) -> tuple[subprocess.Popen[str], TextIO]:
+) -> tuple[subprocess.Popen[str], ProcessOutputHandle]:
     """启动单个 upload worker 并返回进程句柄。"""
 
     upload_stdout_file = _build_upload_worker_stdout_file(
         runtime_root=plan.runtime_root,
         worker_id=worker_id,
     )
-    upload_stdout_handle = upload_stdout_file.open("a", encoding="utf-8")
-    upload_process = subprocess.Popen(
-        [
+    return start_streamed_process(
+        command=[
             sys.executable,
             "-u",
             "-m",
@@ -214,11 +214,9 @@ def start_upload_worker(
             worker_id,
             "--delete-local-file-after-upload",
         ],
-        stdout=upload_stdout_handle,
-        stderr=subprocess.STDOUT,
-        text=True,
+        log_file=upload_stdout_file,
+        stream_label=worker_id,
     )
-    return upload_process, upload_stdout_handle
 
 
 def start_upload_workers(
@@ -226,11 +224,11 @@ def start_upload_workers(
     plan: RuntimePlan,
     init_result: RuntimeInitializationResult,
     worker_count: int = _DEFAULT_UPLOAD_WORKER_COUNT,
-) -> tuple[list[subprocess.Popen[str]], list[TextIO]]:
+) -> tuple[list[subprocess.Popen[str]], list[ProcessOutputHandle]]:
     """启动多个 upload worker。"""
 
     processes: list[subprocess.Popen[str]] = []
-    handles: list[TextIO] = []
+    handles: list[ProcessOutputHandle] = []
     for worker_index in range(1, max(worker_count, 1) + 1):
         worker_id = _build_upload_worker_id(worker_index)
         process, handle = start_upload_worker(

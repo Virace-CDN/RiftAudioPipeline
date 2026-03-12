@@ -10,6 +10,7 @@ import importlib
 import io
 import json
 from pathlib import Path
+from pathlib import PurePath
 from pathlib import PurePosixPath
 import posixpath
 from typing import Any
@@ -815,7 +816,21 @@ def _emit_upload_progress(
 
     if progress_callback is None:
         return
-    progress_callback(payload)
+    progress_callback(_normalize_progress_payload(payload))
+
+
+def _normalize_progress_payload(value: Any) -> Any:
+    """把进度事件中的 Path 等对象转成 JSON 友好值。"""
+
+    if isinstance(value, PurePath):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _normalize_progress_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_progress_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_normalize_progress_payload(item) for item in value]
+    return value
 
 
 def _token_not_expired(token: BaiduOAuthToken) -> bool:

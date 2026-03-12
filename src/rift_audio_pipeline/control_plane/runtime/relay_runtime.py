@@ -8,7 +8,9 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Protocol
-from typing import TextIO
+
+from rift_audio_pipeline.control_plane.runtime.process_output import ProcessOutputHandle
+from rift_audio_pipeline.control_plane.runtime.process_output import start_streamed_process
 
 
 class RelayProcessConfig(Protocol):
@@ -85,11 +87,9 @@ def spawn_log_relay_process(
     *,
     relay_config_file: Path,
     relay_stdout_file: Path,
-) -> tuple[subprocess.Popen[str], TextIO]:
+) -> tuple[subprocess.Popen[str], ProcessOutputHandle]:
     """外部启动 relay 进程。"""
 
-    relay_stdout_file.parent.mkdir(parents=True, exist_ok=True)
-    stdout_handle = relay_stdout_file.open("a", encoding="utf-8")
     src_root = Path(__file__).resolve().parents[3]
     env = dict(os.environ)
     existing_pythonpath = env.get("PYTHONPATH")
@@ -98,19 +98,17 @@ def spawn_log_relay_process(
         if existing_pythonpath
         else str(src_root)
     )
-    process = subprocess.Popen(
-        [
+    return start_streamed_process(
+        command=[
             sys.executable,
             "-m",
             "rift_audio_pipeline.control_plane.log_relay",
             "--config",
             str(relay_config_file),
         ],
-        stdout=stdout_handle,
-        stderr=subprocess.STDOUT,
+        log_file=relay_stdout_file,
+        stream_label="log-relay",
         env=env,
         close_fds=True,
         start_new_session=True,
-        text=True,
     )
-    return process, stdout_handle

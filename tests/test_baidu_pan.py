@@ -543,6 +543,8 @@ def test_upload_file_should_forward_timeouts_and_emit_progress(
         "started",
         "completed",
     ]
+    assert isinstance(progress_events[0]["local_path"], str)
+    assert progress_events[0]["local_path"].endswith("sample.bin")
 
 
 def test_upload_file_should_block_outside_work_dir(

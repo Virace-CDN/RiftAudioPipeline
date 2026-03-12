@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import sqlite3
@@ -16,6 +17,7 @@ from rift_audio_pipeline.control_plane.job_runner import build_pipeline_command
 from rift_audio_pipeline.control_plane.job_runner import build_parser
 from rift_audio_pipeline.control_plane.job_runner import build_runtime_plan
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
+from rift_audio_pipeline.control_plane.runtime import process_output as process_output_module
 from rift_audio_pipeline.control_plane.runtime.job_support import UploadQueueSnapshot
 from rift_audio_pipeline.control_plane.runtime.job_support import _estimate_upload_wait_seconds
 from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
@@ -290,6 +292,33 @@ def test_build_parser_should_default_to_single_upload_worker() -> None:
     )
 
     assert args.upload_worker_count == 1
+
+
+def test_pump_process_output_should_mirror_to_stdout_and_log_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """子进程日志应同时写入文件和父进程 stdout。"""
+
+    source = io.StringIO("line-one\nline-two")
+    log_file = tmp_path / "upload-worker-01.stdout.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_file.open("w", encoding="utf-8")
+    mirrored_stdout = io.StringIO()
+    monkeypatch.setattr(process_output_module.sys, "stdout", mirrored_stdout)
+
+    process_output_module._pump_process_output(
+        source=source,
+        log_handle=log_handle,
+        stream_label="upload-worker-01",
+    )
+    log_handle.close()
+
+    assert log_file.read_text(encoding="utf-8") == "line-one\nline-two\n"
+    assert mirrored_stdout.getvalue() == (
+        "[upload-worker-01] line-one\n"
+        "[upload-worker-01] line-two\n"
+    )
 
 
 def test_build_control_plane_config_should_return_none_for_blank_base_url() -> None:
