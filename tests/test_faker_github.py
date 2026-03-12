@@ -23,6 +23,8 @@ from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchTargetsI
 from rift_audio_pipeline.control_plane.workflow_dispatch import WorkflowDispatchCommandConfig
 from rift_audio_pipeline.control_plane.workflow_dispatch import build_job_runner_command
 from rift_audio_pipeline.control_plane.workflow_dispatch import parse_dispatch_payload
+from rift_audio_pipeline.control_plane.workflow_dispatch import redact_raw_dispatch_payload
+from rift_audio_pipeline.control_plane.workflow_dispatch import serialize_dispatch_inputs
 from rift_localdev.github.faker_github import FakerGitHubConfig
 from rift_localdev.github.faker_github import FakerGitHubServer
 from rift_localdev.github.faker_github import _extract_authorization_token
@@ -399,6 +401,42 @@ def test_parse_dispatch_payload_should_accept_baidu_inputs() -> None:
     )
 
     assert payload.inputs.baidu.access_token == "manual-access-token"
+
+
+def test_serialize_dispatch_inputs_should_support_secret_redaction() -> None:
+    """日志/收据序列化应支持百度敏感字段脱敏。"""
+
+    payload = DispatchInputs(
+        request=DispatchRequestInputs(mode="remote"),
+        baidu=DispatchBaiduInputs(access_token="manual-access-token"),
+    )
+
+    assert serialize_dispatch_inputs(payload)["baidu"]["access_token"] == "manual-access-token"
+    assert (
+        serialize_dispatch_inputs(payload, redact_secrets=True)["baidu"]["access_token"]
+        == "***REDACTED***"
+    )
+
+
+def test_redact_raw_dispatch_payload_should_mask_nested_payload_token() -> None:
+    """原始 workflow dispatch 请求日志也应掩码 token。"""
+
+    redacted = redact_raw_dispatch_payload(
+        {
+            "ref": "main",
+            "inputs": {
+                "payload": json.dumps(
+                    {
+                        "request": {"mode": "remote"},
+                        "baidu": {"access_token": "manual-access-token"},
+                    }
+                )
+            },
+        }
+    )
+
+    decoded = json.loads(redacted["inputs"]["payload"])
+    assert decoded["baidu"]["access_token"] == "***REDACTED***"
 
 
 def test_parse_dispatch_payload_should_require_nested_inputs() -> None:

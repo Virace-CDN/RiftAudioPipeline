@@ -41,6 +41,8 @@ _EXECUTION_INPUT_FIELDS = frozenset(
     }
 )
 _METADATA_INPUT_FIELDS = frozenset({"requested_by"})
+_SENSITIVE_BAIDU_FIELDS = frozenset({"access_token", "app_key", "secret_key", "refresh_token"})
+_REDACTED_SECRET = "***REDACTED***"
 _REQUEST_STAGE_TO_FLAGS = {
     None: (True, True, False),
     "update": (True, False, False),
@@ -445,11 +447,63 @@ def _prune_empty(value: Any) -> Any:
     return value
 
 
-def serialize_dispatch_inputs(inputs: DispatchInputs) -> dict[str, Any]:
+def serialize_dispatch_inputs(
+    inputs: DispatchInputs,
+    *,
+    redact_secrets: bool = False,
+) -> dict[str, Any]:
     """把结构化 inputs 转成适合日志/收据的 JSON object。"""
 
     serialized = _prune_empty(asdict(inputs))
-    return serialized if isinstance(serialized, dict) else {}
+    result = serialized if isinstance(serialized, dict) else {}
+    return _redact_dispatch_inputs_mapping(result) if redact_secrets else result
+
+
+def redact_raw_dispatch_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
+    """把 workflow_dispatch 原始请求中的敏感字段脱敏。"""
+
+    sanitized = json.loads(json.dumps(raw_payload, ensure_ascii=False))
+    inputs = sanitized.get("inputs")
+    if not isinstance(inputs, dict):
+        return sanitized if isinstance(sanitized, dict) else {}
+    wrapped_payload = inputs.get("payload")
+    if not isinstance(wrapped_payload, str):
+        return sanitized if isinstance(sanitized, dict) else {}
+    try:
+        decoded_payload = json.loads(wrapped_payload)
+    except ValueError:
+        return sanitized if isinstance(sanitized, dict) else {}
+    if not isinstance(decoded_payload, dict):
+        return sanitized if isinstance(sanitized, dict) else {}
+    inputs["payload"] = json.dumps(
+        _redact_dispatch_inputs_mapping(decoded_payload),
+        ensure_ascii=False,
+    )
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _redact_dispatch_inputs_mapping(payload: dict[str, Any]) -> dict[str, Any]:
+    """递归脱敏 dispatch payload 中的百度敏感字段。"""
+
+    redacted: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key == "baidu" and isinstance(value, dict):
+            redacted[key] = {
+                item_key: (_REDACTED_SECRET if item_key in _SENSITIVE_BAIDU_FIELDS else item_value)
+                for item_key, item_value in value.items()
+            }
+            continue
+        if isinstance(value, dict):
+            redacted[key] = _redact_dispatch_inputs_mapping(value)
+            continue
+        if isinstance(value, list):
+            redacted[key] = [
+                _redact_dispatch_inputs_mapping(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+            continue
+        redacted[key] = value
+    return redacted
 
 
 def parse_dispatch_payload(raw_payload: dict[str, Any]) -> DispatchPayload:

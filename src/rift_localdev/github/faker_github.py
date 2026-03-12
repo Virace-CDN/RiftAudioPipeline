@@ -51,6 +51,7 @@ from rift_audio_pipeline.control_plane.workflow_dispatch import build_job_runner
 from rift_audio_pipeline.control_plane.workflow_dispatch import (
     parse_dispatch_payload as parse_core_dispatch_payload,
 )
+from rift_audio_pipeline.control_plane.workflow_dispatch import redact_raw_dispatch_payload
 from rift_audio_pipeline.control_plane.workflow_dispatch import serialize_dispatch_inputs
 
 _DISPATCH_PATH_PATTERN = re.compile(
@@ -555,7 +556,7 @@ class FakerGitHubState:
             repo=repo,
             workflow_id=workflow_id,
             ref=payload.ref,
-            inputs=serialize_dispatch_inputs(payload.inputs),
+            inputs=serialize_dispatch_inputs(payload.inputs, redact_secrets=True),
             command=tuple(command),
             dry_run=self.config.dry_run,
             pid=pid,
@@ -634,7 +635,7 @@ class _FakerGitHubRequestHandler(BaseHTTPRequestHandler):
                 "owner": match.group("owner"),
                 "repo": match.group("repo"),
                 "workflow_id": match.group("workflow_id"),
-                "request_payload": payload,
+                "request_payload": redact_raw_dispatch_payload(payload),
             },
         )
         try:
@@ -647,7 +648,10 @@ class _FakerGitHubRequestHandler(BaseHTTPRequestHandler):
                     "repo": match.group("repo"),
                     "workflow_id": match.group("workflow_id"),
                     "ref": dispatch_payload.ref,
-                    "inputs": serialize_dispatch_inputs(dispatch_payload.inputs),
+                    "inputs": serialize_dispatch_inputs(
+                        dispatch_payload.inputs,
+                        redact_secrets=True,
+                    ),
                 },
             )
             receipt = self.server.state.handle_dispatch(

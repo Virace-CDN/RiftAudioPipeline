@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(
             {
                 "ref": payload.ref,
-                "inputs": serialize_dispatch_inputs(payload.inputs),
+                "inputs": serialize_dispatch_inputs(payload.inputs, redact_secrets=True),
                 "command": command,
             },
             ensure_ascii=False,

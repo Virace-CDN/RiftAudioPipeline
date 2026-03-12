@@ -163,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             relay_output_handle.close()
         for handle in upload_output_handles:
             handle.close()
+        init_result.baidu_token_file.unlink(missing_ok=True)
     emit_run_result(result)
     return result.pipeline_returncode
 

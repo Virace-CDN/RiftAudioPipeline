@@ -44,6 +44,22 @@ jobs:
           DISPATCH_PAYLOAD_JSON: ${{ github.event.inputs.payload }}
         run: |
           printf '%s' "$DISPATCH_PAYLOAD_JSON" > "$RUNNER_TEMP/dispatch-payload.json"
+          uv run python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from rift_audio_pipeline.control_plane.workflow_dispatch import (
+              redact_raw_dispatch_payload,
+          )
+
+          raw_payload = json.loads(os.environ["DISPATCH_PAYLOAD_JSON"])
+          redacted_path = Path(os.environ["RUNNER_TEMP"]) / "dispatch-payload.redacted.json"
+          redacted_path.write_text(
+              json.dumps(redact_raw_dispatch_payload({"ref": "${{ github.ref_name }}", "inputs": {"payload": os.environ["DISPATCH_PAYLOAD_JSON"]}}), ensure_ascii=False, indent=2),
+              encoding="utf-8",
+          )
+          PY
 
       - name: Run pipeline
         run: >
@@ -68,6 +84,12 @@ jobs:
             printf 'output not found\n' > "$RUNNER_TEMP/output-tree.txt"
           fi
 
+      - name: Sanitize Runtime Artifact
+        if: always()
+        run: |
+          find "$RUNNER_TEMP/rift-control-plane" -type f -name 'baidu-token.json' -delete 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/dispatch-payload.json"
+
       - name: Upload Runtime Artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -79,4 +101,4 @@ jobs:
             output/logs
             ${{ runner.temp }}/output-tree.txt
             ${{ runner.temp }}/rift-control-plane
-            ${{ runner.temp }}/dispatch-payload.json
+            ${{ runner.temp }}/dispatch-payload.redacted.json
