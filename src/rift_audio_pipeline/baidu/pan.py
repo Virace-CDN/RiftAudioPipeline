@@ -34,9 +34,10 @@ TOKEN_EXPIRY_SAFETY_SECONDS = 120
 class BaiduCredentials:
     """百度开放平台凭据。"""
 
-    app_key: str
-    secret_key: str
-    refresh_token: str
+    app_key: str | None = None
+    secret_key: str | None = None
+    refresh_token: str | None = None
+    access_token: str | None = None
 
 
 class BaiduPanApiError(RuntimeError):
@@ -73,6 +74,7 @@ class BaiduPanClient:
         credentials: BaiduCredentials,
         remote_dir: str,
         token_store: LocalBaiduTokenStore | None = None,
+        allow_token_refresh: bool = True,
     ) -> None:
         """初始化客户端。
 
@@ -80,18 +82,21 @@ class BaiduPanClient:
             credentials: 百度开放平台凭据。
             remote_dir: 网盘工作目录。
             token_store: 本地 token 存储（可选）。
+            allow_token_refresh: 是否允许在 access token 失效时自动刷新。
 
         Raises:
-            ValueError: refresh token 为空。
+            ValueError: 缺少执行当前模式所需的 token。
         """
 
         self._credentials = credentials
         self._remote_dir = _normalize_remote_path(remote_dir)
         self._token_store = token_store
+        self._allow_token_refresh = allow_token_refresh
         self._oauth_token: BaiduOAuthToken | None = None
+        self._access_token = credentials.access_token.strip() if credentials.access_token else None
 
-        self._refresh_token = credentials.refresh_token.strip()
-        if token_store is not None:
+        self._refresh_token = credentials.refresh_token.strip() if credentials.refresh_token else ""
+        if token_store is not None and self._allow_token_refresh:
             try:
                 local_token = token_store.load_token()
                 self._oauth_token = local_token
@@ -100,7 +105,9 @@ class BaiduPanClient:
             except FileNotFoundError:
                 self._oauth_token = None
 
-        if not self._refresh_token:
+        if not self._allow_token_refresh and not self._access_token:
+            raise ValueError("初始化 BaiduPanClient 失败：access token 为空。")
+        if self._allow_token_refresh and not self._refresh_token:
             raise ValueError("初始化 BaiduPanClient 失败：refresh token 为空。")
 
         ensure_official_sdk_path()
@@ -141,9 +148,11 @@ class BaiduPanClient:
     def refresh_access_token(self) -> str:
         """刷新 access token 并返回最新值。"""
 
+        if not self._allow_token_refresh:
+            raise BaiduPanApiError("当前执行上下文已禁用 refresh token 刷新。")
         app_credentials = BaiduAppCredentials(
-            app_key=self._credentials.app_key,
-            secret_key=self._credentials.secret_key,
+            app_key=str(self._credentials.app_key),
+            secret_key=str(self._credentials.secret_key),
         )
         with BaiduOAuthClient(timeout=30.0) as oauth_client:
             token = oauth_client.refresh_access_token(
@@ -152,6 +161,7 @@ class BaiduPanClient:
             )
 
         self._oauth_token = token
+        self._access_token = token.access_token
         self._refresh_token = token.refresh_token
         if self._token_store is not None:
             self._token_store.save_token(token=token)
@@ -591,8 +601,12 @@ class BaiduPanClient:
     def _ensure_access_token(self) -> str:
         """确保存在可用 access token。"""
 
+        if self._access_token:
+            return self._access_token
         if self._oauth_token is not None and _token_not_expired(self._oauth_token):
             return self._oauth_token.access_token
+        if not self._allow_token_refresh:
+            raise BaiduPanApiError("当前执行上下文缺少可用 access token，且禁止自动刷新。")
         return self.refresh_access_token()
 
     def _resolve_workdir_path(

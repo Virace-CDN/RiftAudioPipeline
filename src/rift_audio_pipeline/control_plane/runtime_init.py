@@ -11,7 +11,6 @@ from pathlib import Path
 
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
 from rift_audio_pipeline.baidu.pan import BaiduPanClient
-from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.control_plane.client import ControlPlaneClient
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 from rift_audio_pipeline.control_plane.state_db import bootstrap_state_database
@@ -47,7 +46,7 @@ def initialize_runtime(
         runtime_dir: 当前运行的本地工作目录。
         baidu_remote_root: 百度远端根目录。
         plane_config: control plane 访问配置；仅在需要向 plane 拉百度凭据时使用。
-        provided_baidu_token_payload: dispatch payload 中显式提供的百度凭据。
+        provided_baidu_token_payload: dispatch payload 中显式提供的百度 access token。
 
     Returns:
         RuntimeInitializationResult: 初始化阶段产物。
@@ -165,7 +164,7 @@ def _resolve_baidu_token_payload(
 def _validate_baidu_token_payload(payload: dict[str, object], *, source_label: str) -> None:
     """校验百度凭据负载。"""
 
-    required_fields = ("app_key", "secret_key", "refresh_token")
+    required_fields = ("access_token",)
     missing = [
         field_name
         for field_name in required_fields
@@ -196,15 +195,13 @@ def _download_or_initialize_database(
             encoding="utf-8",
         )
         return
-    token_store = resolve_token_store(database_file.parent / "baidu-oauth-token.json")
     client = BaiduPanClient(
         credentials=BaiduCredentials(
-            app_key=str(token_payload["app_key"]),
-            secret_key=str(token_payload["secret_key"]),
-            refresh_token=str(token_payload["refresh_token"]),
+            access_token=str(token_payload["access_token"]),
         ),
         remote_dir=baidu_remote_root,
-        token_store=token_store,
+        token_store=None,
+        allow_token_refresh=False,
     )
     remote_database_path = f"{baidu_remote_root.rstrip('/')}/database.json"
     try:

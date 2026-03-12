@@ -41,9 +41,7 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
     server = ControlPlaneCaptureServer(
         bootstrap_payload={},
         baidu_token_payload={
-            "app_key": "plane-app-key",
-            "secret_key": "plane-secret-key",
-            "refresh_token": "plane-refresh-token",
+            "access_token": "plane-access-token",
         },
     )
     server.start()
@@ -72,7 +70,7 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
 
     assert server.baidu_token_requests == [{}]
     assert downloaded == [("/apps/test/database.json", result.database_file)]
-    assert result.token_payload["app_key"] == "plane-app-key"
+    assert result.token_payload["access_token"] == "plane-access-token"
     assert (
         json.loads(result.database_file.read_text(encoding="utf-8"))["entries"][0]["remote_path"]
         == "/apps/test/database.json"
@@ -101,9 +99,7 @@ def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
     server = ControlPlaneCaptureServer(
         bootstrap_payload={},
         baidu_token_payload={
-            "app_key": "plane-app-key",
-            "secret_key": "plane-secret-key",
-            "refresh_token": "plane-refresh-token",
+            "access_token": "plane-access-token",
         },
     )
     server.start()
@@ -125,9 +121,7 @@ def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
             baidu_remote_root="/apps/test",
             plane_config=ControlPlaneConfig(base_url=server.base_url),
             provided_baidu_token_payload={
-                "app_key": "manual-app-key",
-                "secret_key": "manual-secret-key",
-                "refresh_token": "manual-refresh-token",
+                "access_token": "manual-access-token",
             },
         )
     finally:
@@ -136,9 +130,7 @@ def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
     assert server.baidu_token_requests == []
     assert downloaded == [("/apps/test/database.json", result.database_file)]
     assert result.token_payload == {
-        "app_key": "manual-app-key",
-        "secret_key": "manual-secret-key",
-        "refresh_token": "manual-refresh-token",
+        "access_token": "manual-access-token",
     }
 
 
@@ -183,9 +175,7 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
                     maps=DispatchIdTargets(ids=(11,)),
                 ),
                 baidu=DispatchBaiduInputs(
-                    app_key="manual-app-key",
-                    secret_key="manual-secret-key",
-                    refresh_token="manual-refresh-token",
+                    access_token="manual-access-token",
                 ),
                 execution=DispatchExecutionInputs(
                     force_update=False,

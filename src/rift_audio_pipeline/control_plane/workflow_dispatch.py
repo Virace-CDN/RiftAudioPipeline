@@ -29,7 +29,7 @@ _MANIFESTS_INPUT_FIELDS = frozenset({"current", "previous"})
 _MANIFEST_INPUT_FIELDS = frozenset({"version", "lcu_url", "game_url"})
 _TARGETS_INPUT_FIELDS = frozenset({"champions", "maps"})
 _ID_TARGET_INPUT_FIELDS = frozenset({"ids"})
-_BAIDU_INPUT_FIELDS = frozenset({"app_key", "secret_key", "refresh_token"})
+_BAIDU_INPUT_FIELDS = frozenset({"access_token", "app_key", "secret_key", "refresh_token"})
 _EXECUTION_INPUT_FIELDS = frozenset(
     {
         "force_update",
@@ -129,6 +129,7 @@ class DispatchTargetsInputs:
 class DispatchBaiduInputs:
     """手动 workflow dispatch 使用的百度凭据。"""
 
+    access_token: str | None = None
     app_key: str | None = None
     secret_key: str | None = None
     refresh_token: str | None = None
@@ -365,6 +366,10 @@ def _validate_dispatch_inputs(raw_inputs: dict[str, Any]) -> DispatchInputs:
             ),
         ),
         baidu=DispatchBaiduInputs(
+            access_token=_coerce_optional_string(
+                baidu_inputs.get("access_token"),
+                field_name="inputs.payload.baidu.access_token",
+            ),
             app_key=_coerce_optional_string(
                 baidu_inputs.get("app_key"), field_name="inputs.payload.baidu.app_key"
             ),

@@ -180,7 +180,7 @@ uv run rift-faker-github \
 {
   "ref": "main",
   "inputs": {
-    "payload": "{\"schema_version\":\"2026-03-12\",\"request\":{\"mode\":\"remote\",\"stage\":\"update\"},\"game\":{\"region\":\"oc1\"},\"manifests\":{\"current\":{\"version\":\"16.5.7519084\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest\"},\"previous\":{\"version\":\"16.4.7423123\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest\"}},\"targets\":{\"champions\":{\"ids\":[266,103]},\"maps\":{\"ids\":[11,12]}},\"baidu\":{\"app_key\":\"manual-app-key\",\"secret_key\":\"manual-secret-key\",\"refresh_token\":\"manual-refresh-token\"},\"execution\":{\"force_update\":false,\"max_workers\":8,\"download_retry_attempts\":5,\"entity_retry_attempts\":2,\"log_level\":\"INFO\"},\"metadata\":{\"requested_by\":\"scheduler\"}}"
+    "payload": "{\"schema_version\":\"2026-03-12\",\"request\":{\"mode\":\"remote\",\"stage\":\"update\"},\"game\":{\"region\":\"oc1\"},\"manifests\":{\"current\":{\"version\":\"16.5.7519084\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest\"},\"previous\":{\"version\":\"16.4.7423123\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest\"}},\"targets\":{\"champions\":{\"ids\":[266,103]},\"maps\":{\"ids\":[11,12]}},\"baidu\":{\"access_token\":\"manual-access-token\"},\"execution\":{\"force_update\":false,\"max_workers\":8,\"download_retry_attempts\":5,\"entity_retry_attempts\":2,\"log_level\":\"INFO\"},\"metadata\":{\"requested_by\":\"scheduler\"}}"
   }
 }
 ```
@@ -246,14 +246,12 @@ uv run rift-faker-github \
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `app_key` | `string` | 百度 app key |
-| `secret_key` | `string` | 百度 secret key |
-| `refresh_token` | `string` | 百度 refresh token |
+| `access_token` | `string` | 百度 access token |
 
 说明：
 
 - `baidu` 整体是可选的
-- 但只要出现 `baidu`，当前运行时就要求这三个字段都为非空字符串
+- 但只要出现 `baidu`，当前执行线程就要求 `access_token` 为非空字符串
 - 若 `baidu` 缺失，`runtime_init` 会回退到 `GET /api/baidu/token`
 
 #### `execution`

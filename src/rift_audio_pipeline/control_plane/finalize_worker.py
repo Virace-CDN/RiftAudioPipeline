@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import time
 
-from rift_audio_pipeline.baidu.oauth import resolve_token_store
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
 from rift_audio_pipeline.baidu.pan import BaiduPanClient
 from rift_audio_pipeline.simulation import BAIDU_FAILURE_MODE_ENV_VAR
@@ -51,12 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(f"baidu token 文件顶层必须是对象：{args.baidu_token_file}")
     client = BaiduPanClient(
         credentials=BaiduCredentials(
-            app_key=_require_str(token_payload, "app_key"),
-            secret_key=_require_str(token_payload, "secret_key"),
-            refresh_token=_require_str(token_payload, "refresh_token"),
+            access_token=_require_str(token_payload, "access_token"),
         ),
         remote_dir=args.baidu_remote_root,
-        token_store=resolve_token_store(args.baidu_token_file.parent / "baidu-oauth-token.json"),
+        token_store=None,
+        allow_token_refresh=False,
     )
     try:
         payload = build_database_payload(

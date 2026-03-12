@@ -19,7 +19,7 @@
 
 - 若提供 `RIFT_CONTROL_PLANE_BASE_URL`，workflow 会启用完整 relay，并继续向 plane 发送 `bootstrap / heartbeat / logs / report`。
 - 若留空 `RIFT_CONTROL_PLANE_BASE_URL`，`job_runner` 会跳过 relay，只跑 `runtime_init + pipeline-main + upload_worker + finalize_worker` 的纯 pipeline 主线。
-- 当 relay 关闭时，必须在 `inputs.payload.baidu` 中显式提供 `app_key / secret_key / refresh_token`，否则 `runtime_init` 无法获取百度凭据。
+- 当 relay 关闭时，必须在 `inputs.payload.baidu` 中显式提供 `access_token`，否则 `runtime_init` 无法访问百度网盘固定工作目录。
 
 ## 手动触发用法
 
@@ -27,7 +27,7 @@
 
 1. 打开 `Actions -> Pipeline Dispatch -> Run workflow`。
 2. `payload` 输入框里填入一个 JSON 字符串，而不是 JSON object。
-3. 若只想绕过 plane 的百度凭据接口，可在这个字符串里带上 `baidu.app_key / secret_key / refresh_token`。
+3. 若只想绕过 plane 的百度凭据接口，可在这个字符串里带上 `baidu.access_token`。
 
 ### GitHub CLI
 
@@ -42,9 +42,7 @@ payload="$(
     --arg previous_version "16.4.7423123" \
     --arg previous_lcu "https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest" \
     --arg previous_game "https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest" \
-    --arg baidu_app_key "$BAIDU_APP_KEY" \
-    --arg baidu_secret_key "$BAIDU_SECRET_KEY" \
-    --arg baidu_refresh_token "$BAIDU_REFRESH_TOKEN" \
+    --arg baidu_access_token "$BAIDU_ACCESS_TOKEN" \
     '{
       schema_version: "2026-03-12",
       request: {
@@ -75,9 +73,7 @@ payload="$(
         }
       },
       baidu: {
-        app_key: $baidu_app_key,
-        secret_key: $baidu_secret_key,
-        refresh_token: $baidu_refresh_token
+        access_token: $baidu_access_token
       },
       execution: {
         force_update: false,
@@ -136,9 +132,7 @@ gh workflow run pipeline.yml --ref main -f payload="$payload"
     }
   },
   "baidu": {
-    "app_key": "manual-app-key",
-    "secret_key": "manual-secret-key",
-    "refresh_token": "manual-refresh-token"
+    "access_token": "manual-access-token"
   },
   "execution": {
     "force_update": false,
@@ -158,7 +152,7 @@ gh workflow run pipeline.yml --ref main -f payload="$payload"
 
 - `request.stage` 当前只支持 `update` / `extract` / `mapping`。
 - `targets.*.ids` 支持 JSON 数组，也支持逗号分隔字符串。
-- `baidu` 整体可选；若提供，就必须同时包含 `app_key`、`secret_key`、`refresh_token` 三项非空字符串。
+- `baidu` 整体可选；若提供，当前执行线程只要求 `access_token` 为非空字符串。
 - 若不提供 `baidu`，`runtime_init` 会回退到 plane `GET /api/baidu/token`。
 - `schema_version` 目前主要用于日志与收据，不直接影响 CLI 参数。
 

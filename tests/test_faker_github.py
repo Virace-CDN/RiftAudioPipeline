@@ -71,9 +71,7 @@ def test_build_pipeline_command_should_map_dispatch_inputs() -> None:
                     maps=DispatchIdTargets(ids=(11, 12)),
                 ),
                 baidu=DispatchBaiduInputs(
-                    app_key="manual-app-key",
-                    secret_key="manual-secret-key",
-                    refresh_token="manual-refresh-token",
+                    access_token="manual-access-token",
                 ),
                 execution=DispatchExecutionInputs(
                     force_update=True,
@@ -151,9 +149,7 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
                             },
                             "targets": {"champions": {"ids": "266,103"}},
                             "baidu": {
-                                "app_key": "manual-app-key",
-                                "secret_key": "manual-secret-key",
-                                "refresh_token": "manual-refresh-token",
+                                "access_token": "manual-access-token",
                             },
                             "execution": {"archive_password": "zip-secret"},
                             "metadata": {"requested_by": "plane-test"},
@@ -199,7 +195,7 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
         dispatch_inputs_payload = json.loads(dispatch_inputs_path.read_text(encoding="utf-8"))
         assert dispatch_inputs_payload["targets"]["champions"]["ids"] == [266, 103]
         assert dispatch_inputs_payload["manifests"]["current"]["version"] == "16.5"
-        assert dispatch_inputs_payload["baidu"]["refresh_token"] == "manual-refresh-token"
+        assert dispatch_inputs_payload["baidu"]["access_token"] == "manual-access-token"
         assert dispatch_inputs_payload["execution"]["archive_password"] == "zip-secret"
     finally:
         server.close()
@@ -394,9 +390,7 @@ def test_parse_dispatch_payload_should_accept_baidu_inputs() -> None:
                     {
                         "request": {"mode": "remote"},
                         "baidu": {
-                            "app_key": "manual-app-key",
-                            "secret_key": "manual-secret-key",
-                            "refresh_token": "manual-refresh-token",
+                            "access_token": "manual-access-token",
                         },
                     }
                 ),
@@ -404,9 +398,7 @@ def test_parse_dispatch_payload_should_accept_baidu_inputs() -> None:
         }
     )
 
-    assert payload.inputs.baidu.app_key == "manual-app-key"
-    assert payload.inputs.baidu.secret_key == "manual-secret-key"
-    assert payload.inputs.baidu.refresh_token == "manual-refresh-token"
+    assert payload.inputs.baidu.access_token == "manual-access-token"
 
 
 def test_parse_dispatch_payload_should_require_nested_inputs() -> None:

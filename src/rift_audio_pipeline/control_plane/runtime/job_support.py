@@ -223,9 +223,6 @@ def build_pipeline_environment(*, init_result: RuntimeInitializationResult) -> d
     """构造 pipeline-main 启动所需环境变量。"""
 
     pipeline_env = dict(os.environ)
-    pipeline_env["RIFT_BAIDU_APP_KEY"] = str(init_result.token_payload["app_key"])
-    pipeline_env["RIFT_BAIDU_SECRET_KEY"] = str(init_result.token_payload["secret_key"])
-    pipeline_env["RIFT_BAIDU_REFRESH_TOKEN"] = str(init_result.token_payload["refresh_token"])
     pipeline_env["RIFT_BAIDU_DATABASE_FILE"] = str(init_result.database_file)
     return pipeline_env
 

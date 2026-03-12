@@ -49,9 +49,7 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
     baidu_token_file.write_text(
         json.dumps(
             {
-                "app_key": "app",
-                "secret_key": "secret",
-                "refresh_token": "refresh",
+                "access_token": "access-token",
             },
             ensure_ascii=False,
         ),

@@ -183,9 +183,7 @@ def _build_baidu_token_payload(payload: DispatchPayload) -> dict[str, object] | 
 
     baidu_inputs = payload.inputs.baidu
     token_payload = {
-        "app_key": baidu_inputs.app_key,
-        "secret_key": baidu_inputs.secret_key,
-        "refresh_token": baidu_inputs.refresh_token,
+        "access_token": baidu_inputs.access_token,
     }
     return {key: value for key, value in token_payload.items() if value is not None} or None
 

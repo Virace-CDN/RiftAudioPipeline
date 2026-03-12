@@ -58,9 +58,7 @@ class ControlPlaneCaptureServer:
                         self,
                         outer.baidu_token_payload
                         or {
-                            "app_key": "mock-app-key",
-                            "secret_key": "mock-secret-key",
-                            "refresh_token": "mock-refresh-token",
+                            "access_token": "mock-access-token",
                         },
                     )
                     return
