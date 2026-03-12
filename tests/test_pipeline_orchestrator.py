@@ -61,7 +61,6 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
         seven_zip_executable: str | None = None,
     ) -> Path:
         del (
-            archive_name,
             encrypt_filenames,
             seven_zip_executable,
         )
@@ -69,6 +68,7 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
             {
                 "champion_dir": champion_dir,
                 "output_path": output_path,
+                "archive_name": archive_name,
                 "report_file": report_file,
                 "password": password,
                 "extra_files": extra_files,
@@ -104,6 +104,7 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
     assert len(calls) == 1
     assert calls[0]["champion_dir"] == audio_dir
     assert calls[0]["output_path"] == tmp_path / "output" / "packages" / "16.5" / "champion"
+    assert calls[0]["archive_name"] == "annie-16.5-VO.7z"
     assert calls[0]["report_file"] == report_file
     assert calls[0]["password"] == "unit-test-password"
     assert calls[0]["extra_files"] == (
@@ -133,11 +134,12 @@ def test_handle_entity_artifacts_should_use_default_password_and_cleanup_audio_d
         compression_level: int = 0,
         seven_zip_executable: str | None = None,
     ) -> Path:
-        del archive_name, report_file, encrypt_filenames, extra_files, compression_level, seven_zip_executable
+        del report_file, encrypt_filenames, extra_files, compression_level, seven_zip_executable
         calls.append(
             {
                 "champion_dir": champion_dir,
                 "output_path": output_path,
+                "archive_name": archive_name,
                 "password": password,
             }
         )
@@ -164,6 +166,7 @@ def test_handle_entity_artifacts_should_use_default_password_and_cleanup_audio_d
     )
 
     assert calls[0]["password"] == "x-item.com"
+    assert calls[0]["archive_name"] == "annie-16.5-VO.7z"
     assert archives == (tmp_path / "output" / "packages" / "16.5" / "champion" / "annie.7z",)
     assert not audio_dir.exists()
 

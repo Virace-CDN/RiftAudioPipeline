@@ -245,6 +245,7 @@ def _build_client(
             uploadid: str,
             block_list: str,
             rtype: int,
+            **kwargs: Any,
         ) -> dict[str, Any]:
             """模拟 xpanfilecreate。"""
 
@@ -256,6 +257,7 @@ def _build_client(
                 "uploadid": uploadid,
                 "block_list": block_list,
                 "rtype": rtype,
+                **kwargs,
             }
             self.create_calls.append(call_data)
             if isdir == 1:
@@ -271,6 +273,7 @@ def _build_client(
             autoinit: int,
             block_list: str,
             rtype: int,
+            **kwargs: Any,
         ) -> dict[str, Any]:
             """模拟预上传接口。"""
 
@@ -283,6 +286,7 @@ def _build_client(
                     "autoinit": autoinit,
                     "block_list": block_list,
                     "rtype": rtype,
+                    **kwargs,
                 }
             )
             return self.precreate_response
@@ -295,6 +299,7 @@ def _build_client(
             uploadid: str,
             file_type: str,
             file: Any,
+            **kwargs: Any,
         ) -> dict[str, Any]:
             """模拟分片上传接口。"""
 
@@ -308,6 +313,7 @@ def _build_client(
                     "uploadid": uploadid,
                     "type": file_type,
                     "md5": md5_value,
+                    **kwargs,
                 }
             )
             return {"errno": 0, "md5": md5_value}
@@ -499,6 +505,44 @@ def test_upload_file_should_complete_precreate_upload_create(
     )
     assert len(runtime.fileupload_api.part_calls) == 1
     assert runtime.fileupload_api.create_calls[-1]["isdir"] == 0
+
+
+def test_upload_file_should_forward_timeouts_and_emit_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """上传应带显式超时，并输出阶段级进度。"""
+
+    client, runtime = _build_client(monkeypatch)
+    local_file = tmp_path / "sample.bin"
+    local_file.write_bytes(b"hello-baidu")
+    progress_events: list[dict[str, Any]] = []
+
+    client.upload_file(
+        local_path=local_file,
+        remote_path="upload/sample.bin",
+        progress_callback=progress_events.append,
+    )
+
+    assert runtime.fileupload_api.precreate_calls[-1]["_request_timeout"] == (30, 180)
+    assert runtime.fileupload_api.part_calls[-1]["_request_timeout"] == (30, 180)
+    assert runtime.fileupload_api.create_calls[-1]["_request_timeout"] == (30, 180)
+    assert [event["phase"] for event in progress_events] == [
+        "precreate",
+        "precreate",
+        "part_upload",
+        "part_upload",
+        "create",
+        "create",
+    ]
+    assert [event["status"] for event in progress_events] == [
+        "started",
+        "completed",
+        "started",
+        "completed",
+        "started",
+        "completed",
+    ]
 
 
 def test_upload_file_should_block_outside_work_dir(

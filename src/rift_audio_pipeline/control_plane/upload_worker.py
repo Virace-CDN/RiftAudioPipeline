@@ -134,6 +134,7 @@ class UploadWorker:
                 local_path=local_path,
                 remote_relative_path=remote_relative_path,
                 metadata=payload,
+                task_id=task.id,
             )
             uploaded_at = _now()
             packaged_at = (
@@ -206,6 +207,7 @@ class UploadWorker:
         local_path: Path,
         remote_relative_path: str,
         metadata: dict[str, object],
+        task_id: int,
     ) -> None:
         if os.getenv(SIMULATION_ENV_VAR) == "1" or os.getenv(MOCK_BAIDU_ENV_VAR) == "1":
             failure_mode = os.getenv(BAIDU_FAILURE_MODE_ENV_VAR, "none")
@@ -235,7 +237,37 @@ class UploadWorker:
                     json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
             return
-        self._client.upload_file(local_path=local_path, remote_path=remote_relative_path)
+        self._client.upload_file(
+            local_path=local_path,
+            remote_path=remote_relative_path,
+            progress_callback=lambda event: self._emit_upload_progress(
+                task_id=task_id,
+                local_path=local_path,
+                remote_relative_path=remote_relative_path,
+                event=event,
+            ),
+        )
+
+    def _emit_upload_progress(
+        self,
+        *,
+        task_id: int,
+        local_path: Path,
+        remote_relative_path: str,
+        event: dict[str, object],
+    ) -> None:
+        """输出上传阶段级调试日志。"""
+
+        payload = {
+            "event": "upload_task_progress",
+            "run_id": self._config.run_id,
+            "worker_id": self._config.worker_id,
+            "task_id": task_id,
+            "local_path": str(local_path),
+            "remote_relative_path": remote_relative_path,
+            **event,
+        }
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:

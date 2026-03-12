@@ -277,6 +277,21 @@ def test_build_runtime_plan_should_derive_runtime_paths(tmp_path: Path) -> None:
     )
 
 
+def test_build_parser_should_default_to_single_upload_worker() -> None:
+    """上传默认并发应保守收口到 1。"""
+
+    args = build_parser().parse_args(
+        [
+            "--ref",
+            "main",
+            "--dispatch-inputs-file",
+            "dispatch.json",
+        ]
+    )
+
+    assert args.upload_worker_count == 1
+
+
 def test_build_control_plane_config_should_return_none_for_blank_base_url() -> None:
     """空 control plane 地址应被视为关闭 relay。"""
 

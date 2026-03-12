@@ -57,8 +57,17 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
     )
     upload_calls: list[tuple[Path, str]] = []
 
-    def _fake_upload_file(self, local_path: Path, remote_path: str, rtype: int = 3):
+    def _fake_upload_file(
+        self,
+        local_path: Path,
+        remote_path: str,
+        rtype: int = 3,
+        progress_callback=None,
+    ):
         upload_calls.append((local_path, remote_path))
+        if progress_callback is not None:
+            progress_callback({"phase": "precreate", "status": "started"})
+            progress_callback({"phase": "create", "status": "completed"})
         return {"path": remote_path, "rtype": rtype}
 
     monkeypatch.setattr(

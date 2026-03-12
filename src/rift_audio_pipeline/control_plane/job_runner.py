@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-requested-by", default="github-actions")
     parser.add_argument("--default-log-level", default="INFO")
     parser.add_argument("--baidu-remote-root", default="/apps/rift-audio-pipeline")
-    parser.add_argument("--upload-worker-count", type=int, default=2)
+    parser.add_argument("--upload-worker-count", type=int, default=1)
     return parser
 
 

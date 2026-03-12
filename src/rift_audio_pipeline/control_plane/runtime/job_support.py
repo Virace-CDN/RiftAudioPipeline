@@ -20,7 +20,7 @@ from rift_audio_pipeline.control_plane.runtime_init import RuntimeInitialization
 from rift_audio_pipeline.pipeline.logging import _LOG_RELAY_SOCKET_ROOT
 from rift_audio_pipeline.pipeline.logging import LogSinkConfig
 
-_DEFAULT_UPLOAD_WORKER_COUNT = 2
+_DEFAULT_UPLOAD_WORKER_COUNT = 1
 _MIN_UPLOAD_WAIT_SECONDS = 300.0
 _SECONDS_PER_MIB = 1.0
 _SECONDS_PER_TASK = 90.0
@@ -169,14 +169,31 @@ def prepare_relay(
     )
 
 
+def _build_upload_worker_id(worker_index: int) -> str:
+    """生成 upload worker 的稳定可读标识。"""
+
+    return f"upload-worker-{worker_index:02d}"
+
+
+def _build_upload_worker_stdout_file(*, runtime_root: Path, worker_id: str) -> Path:
+    """为每个 upload worker 派生独立 stdout 日志文件。"""
+
+    return runtime_root / f"{worker_id}.stdout.log"
+
+
 def start_upload_worker(
     *,
     plan: RuntimePlan,
     init_result: RuntimeInitializationResult,
+    worker_id: str,
 ) -> tuple[subprocess.Popen[str], TextIO]:
     """启动单个 upload worker 并返回进程句柄。"""
 
-    upload_stdout_handle = plan.upload_stdout_file.open("a", encoding="utf-8")
+    upload_stdout_file = _build_upload_worker_stdout_file(
+        runtime_root=plan.runtime_root,
+        worker_id=worker_id,
+    )
+    upload_stdout_handle = upload_stdout_file.open("a", encoding="utf-8")
     upload_process = subprocess.Popen(
         [
             sys.executable,
@@ -193,6 +210,8 @@ def start_upload_worker(
             plan.baidu_remote_root,
             "--output-root",
             str(plan.output_root),
+            "--worker-id",
+            worker_id,
             "--delete-local-file-after-upload",
         ],
         stdout=upload_stdout_handle,
@@ -212,8 +231,13 @@ def start_upload_workers(
 
     processes: list[subprocess.Popen[str]] = []
     handles: list[TextIO] = []
-    for _ in range(max(worker_count, 1)):
-        process, handle = start_upload_worker(plan=plan, init_result=init_result)
+    for worker_index in range(1, max(worker_count, 1) + 1):
+        worker_id = _build_upload_worker_id(worker_index)
+        process, handle = start_upload_worker(
+            plan=plan,
+            init_result=init_result,
+            worker_id=worker_id,
+        )
         processes.append(process)
         handles.append(handle)
     return processes, handles

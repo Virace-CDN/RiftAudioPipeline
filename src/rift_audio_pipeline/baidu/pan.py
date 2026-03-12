@@ -28,6 +28,9 @@ from rift_audio_pipeline.baidu.sdk import load_openapi_client_module
 PCS_API_HOST = "https://d.pcs.baidu.com"
 UPLOAD_BLOCK_SIZE_BYTES = 4 * 1024 * 1024
 TOKEN_EXPIRY_SAFETY_SECONDS = 120
+UPLOAD_PRECREATE_TIMEOUT = (30, 180)
+UPLOAD_PART_TIMEOUT = (30, 180)
+UPLOAD_CREATE_TIMEOUT = (30, 180)
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,7 +317,13 @@ class BaiduPanClient:
         ]
         return self._filemanager_operation(opera="delete", filelist=filelist, ondup=None)
 
-    def upload_file(self, local_path: Path, remote_path: str, rtype: int = 3) -> dict[str, Any]:
+    def upload_file(
+        self,
+        local_path: Path,
+        remote_path: str,
+        rtype: int = 3,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """上传单个文件（precreate -> superfile2 -> create）。"""
 
         if not local_path.exists():
@@ -332,6 +341,15 @@ class BaiduPanClient:
         block_md5s = _calculate_block_md5s(local_path)
         block_list_json = json.dumps(block_md5s, ensure_ascii=False)
 
+        _emit_upload_progress(
+            progress_callback,
+            phase="precreate",
+            status="started",
+            local_path=local_path,
+            remote_path=normalized_remote_path,
+            file_size=file_size,
+            part_count=len(block_md5s),
+        )
         precreate_payload = self._invoke_sdk(
             lambda: self._fileupload_api.xpanfileprecreate(
                 access_token,
@@ -341,6 +359,7 @@ class BaiduPanClient:
                 1,
                 block_list_json,
                 rtype=rtype,
+                _request_timeout=UPLOAD_PRECREATE_TIMEOUT,
             ),
             operation="xpanfileprecreate",
         )
@@ -350,6 +369,16 @@ class BaiduPanClient:
                 message=f"预上传响应缺少 uploadid，path={normalized_remote_path}",
                 payload=precreate_payload,
             )
+        _emit_upload_progress(
+            progress_callback,
+            phase="precreate",
+            status="completed",
+            local_path=local_path,
+            remote_path=normalized_remote_path,
+            file_size=file_size,
+            part_count=len(block_md5s),
+            upload_id=upload_id,
+        )
 
         with local_path.open("rb") as file_obj:
             for part_index, expected_md5 in enumerate(block_md5s):
@@ -360,6 +389,18 @@ class BaiduPanClient:
                     )
                 chunk_file = io.BytesIO(chunk)
                 chunk_file.name = f"{local_path.name}.part{part_index}"
+                _emit_upload_progress(
+                    progress_callback,
+                    phase="part_upload",
+                    status="started",
+                    local_path=local_path,
+                    remote_path=normalized_remote_path,
+                    file_size=file_size,
+                    part_count=len(block_md5s),
+                    part_index=part_index,
+                    upload_id=upload_id,
+                    chunk_size=len(chunk),
+                )
                 part_payload = self._invoke_sdk(
                     lambda chunk_file=chunk_file, part_index=part_index: (
                         self._fileupload_api.pcssuperfile2(
@@ -369,6 +410,7 @@ class BaiduPanClient:
                             upload_id,
                             "tmpfile",
                             file=chunk_file,
+                            _request_timeout=UPLOAD_PART_TIMEOUT,
                         )
                     ),
                     operation=f"pcssuperfile2(part={part_index})",
@@ -382,8 +424,30 @@ class BaiduPanClient:
                         ),
                         payload=part_payload,
                     )
+                _emit_upload_progress(
+                    progress_callback,
+                    phase="part_upload",
+                    status="completed",
+                    local_path=local_path,
+                    remote_path=normalized_remote_path,
+                    file_size=file_size,
+                    part_count=len(block_md5s),
+                    part_index=part_index,
+                    upload_id=upload_id,
+                    chunk_size=len(chunk),
+                )
 
-        return self._invoke_sdk(
+        _emit_upload_progress(
+            progress_callback,
+            phase="create",
+            status="started",
+            local_path=local_path,
+            remote_path=normalized_remote_path,
+            file_size=file_size,
+            part_count=len(block_md5s),
+            upload_id=upload_id,
+        )
+        payload = self._invoke_sdk(
             lambda: self._fileupload_api.xpanfilecreate(
                 access_token,
                 normalized_remote_path,
@@ -392,9 +456,21 @@ class BaiduPanClient:
                 upload_id,
                 block_list_json,
                 rtype=rtype,
+                _request_timeout=UPLOAD_CREATE_TIMEOUT,
             ),
             operation="xpanfilecreate(isdir=0)",
         )
+        _emit_upload_progress(
+            progress_callback,
+            phase="create",
+            status="completed",
+            local_path=local_path,
+            remote_path=normalized_remote_path,
+            file_size=file_size,
+            part_count=len(block_md5s),
+            upload_id=upload_id,
+        )
+        return payload
 
     def get_file_version_info(self, remote_path: str) -> dict[str, Any]:
         """获取文件版本信息（含 dlink、md5、mtime 等）。"""
@@ -729,6 +805,17 @@ def _calculate_block_md5s(local_path: Path) -> list[str]:
     if not block_md5s:
         block_md5s.append(hashlib.md5(b"").hexdigest())
     return block_md5s
+
+
+def _emit_upload_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    **payload: Any,
+) -> None:
+    """安全触发上传阶段进度回调。"""
+
+    if progress_callback is None:
+        return
+    progress_callback(payload)
 
 
 def _token_not_expired(token: BaiduOAuthToken) -> bool:

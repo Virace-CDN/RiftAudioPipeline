@@ -15,6 +15,7 @@ from rift_audio_pipeline.baidu import resolve_token_store
 from rift_audio_pipeline.control_plane.state_db import enqueue_upload_task
 from rift_audio_pipeline.control_plane.state_db import mark_task_production_closed
 from rift_audio_pipeline.packer import pack_champion
+from rift_audio_pipeline.packer import _build_archive_name
 from rift_audio_pipeline.pipeline.archive_publish import build_archive_publish_layout
 from rift_audio_pipeline.pipeline.archive_publish import resolve_default_archive_resource_type
 from rift_audio_pipeline.pipeline.local import run_local_pipeline
@@ -363,6 +364,11 @@ def handle_entity_artifacts(
         archive_path = pack_champion(
             champion_dir=audio_dir,
             output_path=output_dir,
+            archive_name=_build_archive_name(
+                directory_name=audio_dir.name,
+                version=version,
+                audio_type=resolve_default_archive_resource_type(),
+            ),
             report_file=report_file,
             password=config.archive_password or DEFAULT_ARCHIVE_PASSWORD,
             extra_files=extra_files,
