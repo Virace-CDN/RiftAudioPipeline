@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       payload:
-        description: "结构化 dispatch payload JSON，内容遵循 docs/control_plane/faker_github_api.md"
+        description: "结构化 dispatch payload JSON 字符串；完整 schema 与手动调用示例见 README.md"
         required: true
         type: string
 
