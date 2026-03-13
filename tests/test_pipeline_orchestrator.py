@@ -9,10 +9,12 @@ import sqlite3
 
 import pytest
 
+import rift_audio_pipeline.pipeline.artifact_tasks as artifact_tasks
 import rift_audio_pipeline.pipeline.orchestrator as orchestrator
 from rift_audio_pipeline.control_plane.state_db import bootstrap_state_database
 from rift_audio_pipeline.pipeline.models import EntityArtifacts
 from rift_audio_pipeline.pipeline.models import ManifestPairRef
+from rift_audio_pipeline.pipeline.models import DEFAULT_ARCHIVE_PASSWORD
 from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunConfig
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
@@ -41,44 +43,10 @@ def _build_remote_config(tmp_path: Path) -> PipelineRunConfig:
     return config
 
 
-def test_handle_entity_artifacts_should_pack_audio_directories(
-    monkeypatch: pytest.MonkeyPatch,
+def test_build_artifact_task_plans_should_derive_archive_and_remote_paths(
     tmp_path: Path,
 ) -> None:
-    """应对实体输出目录逐个打包。"""
-
-    calls: list[dict[str, object]] = []
-
-    def _fake_pack_champion(
-        champion_dir: Path,
-        output_path: Path,
-        *,
-        archive_name: str | None = None,
-        report_file: Path | None = None,
-        password: str | None = None,
-        encrypt_filenames: bool = True,
-        extra_files: tuple[Path, ...] = tuple(),
-        compression_level: int = 0,
-        seven_zip_executable: str | None = None,
-    ) -> Path:
-        del (
-            encrypt_filenames,
-            seven_zip_executable,
-        )
-        calls.append(
-            {
-                "champion_dir": champion_dir,
-                "output_path": output_path,
-                "archive_name": archive_name,
-                "report_file": report_file,
-                "password": password,
-                "extra_files": extra_files,
-                "compression_level": compression_level,
-            }
-        )
-        return output_path / f"{champion_dir.name}.7z"
-
-    monkeypatch.setattr(orchestrator, "pack_champion", _fake_pack_champion)
+    """应从单实体产物导出打包计划与远端路径。"""
 
     audio_dir = tmp_path / "audios" / "annie"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -89,10 +57,9 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
     report_file.parent.mkdir(parents=True, exist_ok=True)
     report_file.write_text("meta: 1", encoding="utf-8")
     config = _build_remote_config(tmp_path)
-    config = replace(config, archive_password="unit-test-password")
-
-    archives = orchestrator.handle_entity_artifacts(
-        config=config,
+    plans = artifact_tasks.build_artifact_task_plans(
+        output_root=config.output_root,
+        archive_remote_root=config.archive_remote_root,
         artifact=EntityArtifacts(
             entity_type="champion",
             entity_id=1,
@@ -102,24 +69,24 @@ def test_handle_entity_artifacts_should_pack_audio_directories(
         version="16.5",
     )
 
-    assert len(calls) == 1
-    assert calls[0]["champion_dir"] == audio_dir
-    assert calls[0]["output_path"] == tmp_path / "output" / "packages" / "16.5" / "champion"
-    assert calls[0]["archive_name"] == "annie-16.5-VO.7z"
-    assert calls[0]["report_file"] == report_file
-    assert calls[0]["password"] == "unit-test-password"
-    assert calls[0]["extra_files"] == (
+    assert len(plans) == 1
+    assert plans[0].source_dir == audio_dir
+    assert plans[0].archive_output_dir == tmp_path / "output" / "packages" / "16.5" / "champion"
+    assert plans[0].archive_name == "annie-16.5-VO.7z"
+    assert plans[0].report_file == report_file
+    assert plans[0].extra_files == (
         mapping_file,
         (Path(orchestrator.__file__).resolve().parents[1] / "pack_extra"),
     )
-    assert archives == (tmp_path / "output" / "packages" / "16.5" / "champion" / "annie.7z",)
+    assert plans[0].remote_relative_path == "champions/annie-16.5-VO.7z"
+    assert plans[0].remote_path == "/apps/test-data/champions/annie-16.5-VO.7z"
 
 
-def test_handle_entity_artifacts_should_use_default_password_and_cleanup_audio_dir(
+def test_artifact_task_plan_should_round_trip_and_pack_with_default_password(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """未显式提供密码时应使用默认密码，并在打包后删除源音频目录。"""
+    """artifact task 计划应能序列化回写，并在 worker 侧复用默认密码打包。"""
 
     calls: list[dict[str, object]] = []
 
@@ -149,27 +116,32 @@ def test_handle_entity_artifacts_should_use_default_password_and_cleanup_audio_d
         archive_path.write_text("archive", encoding="utf-8")
         return archive_path
 
-    monkeypatch.setattr(orchestrator, "pack_champion", _fake_pack_champion)
+    monkeypatch.setattr(artifact_tasks, "pack_champion", _fake_pack_champion)
 
     audio_dir = tmp_path / "audios" / "annie"
     audio_dir.mkdir(parents=True, exist_ok=True)
     (audio_dir / "sample.txt").write_text("voice", encoding="utf-8")
     config = _build_remote_config(tmp_path)
-
-    archives = orchestrator.handle_entity_artifacts(
-        config=config,
+    plan = artifact_tasks.build_artifact_task_plans(
+        output_root=config.output_root,
+        archive_remote_root=config.archive_remote_root,
         artifact=EntityArtifacts(
             entity_type="champion",
             entity_id=1,
             audio_output_paths=(audio_dir,),
         ),
         version="16.5",
+    )[0]
+    payload = artifact_tasks.serialize_artifact_task_plan(plan)
+    parsed_plan = artifact_tasks.parse_artifact_task_plan(payload, remote_path=plan.remote_path)
+    archive_path = artifact_tasks.pack_artifact_task(
+        parsed_plan,
+        archive_password=DEFAULT_ARCHIVE_PASSWORD,
     )
 
-    assert calls[0]["password"] == "x-item.com"
+    assert calls[0]["password"] == DEFAULT_ARCHIVE_PASSWORD
     assert calls[0]["archive_name"] == "annie-16.5-VO.7z"
-    assert archives == (tmp_path / "output" / "packages" / "16.5" / "champion" / "annie.7z",)
-    assert not audio_dir.exists()
+    assert archive_path == tmp_path / "output" / "packages" / "16.5" / "champion" / "annie.7z"
 
 
 def test_build_processing_targets_should_prefer_explicit_ids(tmp_path: Path) -> None:
@@ -390,9 +362,6 @@ def test_run_pipeline_should_run_remote_and_upload_archives(
     config = _build_remote_config(tmp_path)
     audio_dir = tmp_path / "audios" / "annie"
     audio_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = tmp_path / "output" / "packages" / "16.5" / "champion" / "annie.7z"
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    archive_path.write_text("archive", encoding="utf-8")
 
     monkeypatch.setattr(
         orchestrator,
@@ -426,12 +395,14 @@ def test_run_pipeline_should_run_remote_and_upload_archives(
     monkeypatch.setattr(
         orchestrator,
         "run_remote_pipeline",
-        lambda config, pair, log_ctx: [
-            EntityArtifacts(entity_type="champion", entity_id=1, audio_output_paths=(audio_dir,))
-        ],
-    )
-    monkeypatch.setattr(
-        orchestrator, "pack_champion", lambda champion_dir, output_path, **kwargs: archive_path
+        lambda config, pair, log_ctx, on_entity_complete=None: (
+            on_entity_complete(
+                EntityArtifacts(entity_type="champion", entity_id=1, audio_output_paths=(audio_dir,))
+            )
+            if on_entity_complete is not None
+            else None
+        )
+        or [EntityArtifacts(entity_type="champion", entity_id=1, audio_output_paths=(audio_dir,))],
     )
     summary = orchestrator.run_pipeline(config)
     artifacts_payload = json.loads(summary.log_dir.joinpath("artifacts.json").read_text(encoding="utf-8"))
@@ -463,9 +434,9 @@ def test_run_pipeline_should_run_remote_and_upload_archives(
     assert summary.processed_targets == 1
     assert upload_tasks == [
         (
-            str(archive_path),
-            "/apps/test-data/champions/annie.7z",
-            "archive",
+            str(audio_dir),
+            "/apps/test-data/champions/annie-16.5-VO.7z",
+            "artifact",
             "queued",
         )
     ]

@@ -9,6 +9,7 @@ from datetime import timedelta
 import json
 import os
 from pathlib import Path
+import shutil
 import time
 import uuid
 
@@ -24,6 +25,10 @@ from rift_audio_pipeline.control_plane.state_db import get_run_drain_state
 from rift_audio_pipeline.control_plane.state_db import mark_upload_phase_drained
 from rift_audio_pipeline.control_plane.state_db import record_new_file_fact
 from rift_audio_pipeline.control_plane.state_db import reschedule_upload_task
+from rift_audio_pipeline.control_plane.state_db import update_upload_task_local_path
+from rift_audio_pipeline.pipeline.artifact_tasks import parse_artifact_task_plan
+from rift_audio_pipeline.pipeline.artifact_tasks import pack_artifact_task
+from rift_audio_pipeline.pipeline.models import DEFAULT_ARCHIVE_PASSWORD
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,23 +135,25 @@ class UploadWorker:
                 ),
                 flush=True,
             )
-            self._upload_file(
+            archive_path, packaged_at = self._prepare_archive_for_upload(
+                task=task,
                 local_path=local_path,
+                payload=payload,
+            )
+            self._upload_file(
+                local_path=archive_path,
                 remote_relative_path=remote_relative_path,
                 metadata=payload,
                 task_id=task.id,
             )
             uploaded_at = _now()
-            packaged_at = (
-                datetime.fromtimestamp(local_path.stat().st_ctime).astimezone().isoformat()
-            )
             record_new_file_fact(
                 database_path=self._config.state_db_path,
                 run_id=self._config.run_id,
-                local_path=str(local_path),
+                local_path=str(archive_path),
                 remote_path=task.remote_path,
-                file_name=local_path.name,
-                sha256=calculate_sha256(local_path),
+                file_name=archive_path.name,
+                sha256=calculate_sha256(archive_path),
                 packaged_at=packaged_at,
                 uploaded_at=uploaded_at,
                 metadata={
@@ -156,7 +163,7 @@ class UploadWorker:
                 },
             )
             if self._config.delete_local_file_after_upload:
-                local_path.unlink()
+                archive_path.unlink()
             complete_upload_task(
                 database_path=self._config.state_db_path,
                 task_id=task.id,
@@ -200,6 +207,36 @@ class UploadWorker:
                 ),
                 flush=True,
             )
+
+    def _prepare_archive_for_upload(
+        self,
+        *,
+        task: object,
+        local_path: Path,
+        payload: dict[str, object],
+    ) -> tuple[Path, str]:
+        """确保当前任务已有可上传的本地压缩包文件。"""
+
+        if local_path.is_file():
+            packaged_at = datetime.fromtimestamp(local_path.stat().st_ctime).astimezone().isoformat()
+            return local_path, packaged_at
+        if not local_path.is_dir():
+            raise FileNotFoundError(f"上传任务本地路径不存在：task_id={task.id}, path={local_path}")
+        plan = parse_artifact_task_plan(payload, remote_path=task.remote_path)
+        archive_path = pack_artifact_task(
+            plan,
+            archive_password=payload.get("archive_password")
+            if isinstance(payload.get("archive_password"), str)
+            else DEFAULT_ARCHIVE_PASSWORD,
+        )
+        shutil.rmtree(local_path)
+        update_upload_task_local_path(
+            database_path=self._config.state_db_path,
+            task_id=task.id,
+            local_path=str(archive_path),
+        )
+        packaged_at = datetime.fromtimestamp(archive_path.stat().st_ctime).astimezone().isoformat()
+        return archive_path, packaged_at
 
     def _upload_file(
         self,

@@ -16,6 +16,7 @@ PIPELINE_ERROR_SCHEMA_VERSION = 1
 PIPELINE_PENDING_LOG_UPLOAD_SCHEMA_VERSION = 1
 DEFAULT_ARCHIVE_REMOTE_ROOT = "/apps/rift-audio-pipeline-data"
 DEFAULT_META_REMOTE_ROOT = "/apps/rift-audio-pipeline-meta"
+DEFAULT_ARCHIVE_PASSWORD = "x-item.com"
 
 
 class PipelineMode(str, Enum):

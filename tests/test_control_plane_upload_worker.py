@@ -25,17 +25,31 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
         run_id="run-1",
         remote_database_payload={},
     )
-    archive_path = tmp_path / "output" / "packages" / "16.5" / "champions" / "1·annie·黑暗之女·安妮-16.5-VO.7z"
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    archive_path.write_text("archive-bytes", encoding="utf-8")
+    audio_dir = tmp_path / "output" / "audios" / "16.5" / "1·annie·黑暗之女·安妮"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    (audio_dir / "sample.wem").write_text("archive-bytes", encoding="utf-8")
+    archive_path = tmp_path / "output" / "packages" / "16.5" / "champion" / "1·annie·黑暗之女·安妮-16.5-VO.7z"
     enqueue_upload_task(
         database_path=state_db_path,
         run_id="run-1",
-        local_path=str(archive_path),
+        local_path=str(audio_dir),
         remote_path="/apps/test/champions/1·annie·黑暗之女·安妮-16.5-VO.7z",
+        task_type="artifact",
         payload={
+            "entity_type": "champion",
+            "entity_id": 1,
+            "source_dir": str(audio_dir),
+            "archive_output_dir": str(archive_path.parent),
+            "archive_name": archive_path.name,
+            "report_file": None,
+            "extra_files": [],
             "remote_relative_path": "champions/1·annie·黑暗之女·安妮-16.5-VO.7z",
+            "remote_name": archive_path.name,
+            "target_group": "champions",
+            "resource_type": "VO",
+            "entity_key": "1·annie·黑暗之女·安妮",
             "game_version": "16.5",
+            "archive_password": "x-item.com",
         },
     )
     mark_task_production_closed(
@@ -75,6 +89,17 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
         _fake_upload_file,
     )
 
+    def _fake_pack_artifact_task(plan, archive_password: str) -> Path:
+        del plan, archive_password
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_text("archive-bytes", encoding="utf-8")
+        return archive_path
+
+    monkeypatch.setattr(
+        "rift_audio_pipeline.control_plane.upload_worker.pack_artifact_task",
+        _fake_pack_artifact_task,
+    )
+
     worker = UploadWorker(
         UploadWorkerConfig(
             run_id="run-1",
@@ -111,4 +136,5 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
     assert fact_row[1] == archive_path.name
     assert isinstance(fact_row[2], str) and fact_row[2]
     assert run_control == ("drained",)
+    assert not audio_dir.exists()
     assert not archive_path.exists()

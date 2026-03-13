@@ -47,6 +47,14 @@ class NewFileFactRecord:
     metadata_json: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class UploadQueuePressure:
+    """上传队列背压摘要。"""
+
+    unfinished_count: int
+    pending_bytes: int
+
+
 def bootstrap_state_database(
     *,
     database_path: Path,
@@ -398,6 +406,58 @@ def mark_upload_phase_finalized(
             (now, now, run_id),
         )
         connection.commit()
+
+
+def update_upload_task_local_path(
+    *,
+    database_path: Path,
+    task_id: int,
+    local_path: str,
+) -> None:
+    """更新上传任务当前占用的本地路径。"""
+
+    now = _now()
+    with sqlite3.connect(database_path) as connection:
+        _initialize_connection(connection)
+        connection.execute(
+            """
+            UPDATE upload_tasks
+            SET local_path = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (local_path, now, task_id),
+        )
+        connection.commit()
+
+
+def get_upload_queue_pressure(
+    *,
+    database_path: Path,
+    run_id: str,
+) -> UploadQueuePressure:
+    """返回未完成任务数与其本地占用字节数。"""
+
+    with sqlite3.connect(database_path) as connection:
+        _initialize_connection(connection)
+        rows = connection.execute(
+            """
+            SELECT local_path
+            FROM upload_tasks
+            WHERE run_id = ?
+              AND status IN ('queued', 'claimed', 'retry_wait')
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    pending_bytes = 0
+    for (raw_local_path,) in rows:
+        if not isinstance(raw_local_path, str) or not raw_local_path.strip():
+            continue
+        pending_bytes += _measure_local_path_bytes(Path(raw_local_path))
+    return UploadQueuePressure(
+        unfinished_count=len(rows),
+        pending_bytes=pending_bytes,
+    )
 
 
 def build_database_entries_for_export(
@@ -775,6 +835,18 @@ def _optional_str(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _measure_local_path_bytes(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    if path.is_dir():
+        total_bytes = 0
+        for child in path.rglob("*"):
+            if child.is_file():
+                total_bytes += child.stat().st_size
+        return total_bytes
+    return 0
 
 
 def _now() -> str:

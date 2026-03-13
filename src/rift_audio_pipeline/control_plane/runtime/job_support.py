@@ -416,8 +416,7 @@ def _read_upload_queue_snapshot(*, state_db_path: Path, run_id: str) -> UploadQu
         if status in unfinished_statuses:
             unfinished_count += 1
             signature.append((task_id, status, updated_at))
-            if local_path.is_file():
-                remaining_bytes += local_path.stat().st_size
+            remaining_bytes += _measure_upload_task_bytes(local_path)
     return UploadQueueSnapshot(
         unfinished_count=unfinished_count,
         queued_count=queued_count,
@@ -439,6 +438,18 @@ def _estimate_upload_wait_seconds(snapshot: UploadQueueSnapshot) -> float:
         + (snapshot.unfinished_count * _SECONDS_PER_TASK)
     )
     return min(max(estimated, _MIN_UPLOAD_WAIT_SECONDS), _MAX_UPLOAD_WAIT_SECONDS)
+
+
+def _measure_upload_task_bytes(local_path: Path) -> int:
+    if local_path.is_file():
+        return local_path.stat().st_size
+    if local_path.is_dir():
+        total_bytes = 0
+        for child in local_path.rglob("*"):
+            if child.is_file():
+                total_bytes += child.stat().st_size
+        return total_bytes
+    return 0
 
 
 def _should_mirror_upload_worker_line(line: str) -> bool:

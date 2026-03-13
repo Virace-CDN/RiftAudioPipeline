@@ -8,16 +8,16 @@ from datetime import datetime
 from pathlib import Path
 import re
 import shutil
+import time
 
 from rift_audio_pipeline.baidu import BaiduCredentials
 from rift_audio_pipeline.baidu import BaiduPanClient
 from rift_audio_pipeline.baidu import resolve_token_store
 from rift_audio_pipeline.control_plane.state_db import enqueue_upload_task
+from rift_audio_pipeline.control_plane.state_db import get_upload_queue_pressure
 from rift_audio_pipeline.control_plane.state_db import mark_task_production_closed
-from rift_audio_pipeline.packer import pack_champion
-from rift_audio_pipeline.packer import _build_archive_name
-from rift_audio_pipeline.pipeline.archive_publish import build_archive_publish_layout
-from rift_audio_pipeline.pipeline.archive_publish import resolve_default_archive_resource_type
+from rift_audio_pipeline.pipeline.artifact_tasks import build_artifact_task_plans
+from rift_audio_pipeline.pipeline.artifact_tasks import serialize_artifact_task_plan
 from rift_audio_pipeline.pipeline.local import run_local_pipeline
 from rift_audio_pipeline.pipeline.logging import build_log_sink_config
 from rift_audio_pipeline.pipeline.logging import emit_event
@@ -34,6 +34,7 @@ from rift_audio_pipeline.pipeline.models import PipelineArtifactsSnapshot
 from rift_audio_pipeline.pipeline.models import PipelineDecisionSnapshot
 from rift_audio_pipeline.pipeline.models import PipelineEvent
 from rift_audio_pipeline.pipeline.models import PipelineLogTerminalSummary
+from rift_audio_pipeline.pipeline.models import DEFAULT_ARCHIVE_PASSWORD
 from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunConfig
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
@@ -43,7 +44,10 @@ from rift_audio_pipeline.pipeline.models import ProcessingTarget
 from rift_audio_pipeline.pipeline.remote import build_remote_app_context
 from rift_audio_pipeline.pipeline.remote import run_remote_pipeline
 
-DEFAULT_ARCHIVE_PASSWORD = "x-item.com"
+_ARTIFACT_BACKPRESSURE_POLL_SECONDS = 2.0
+_ARTIFACT_BACKPRESSURE_MAX_PENDING_BYTES = 4 * 1024 * 1024 * 1024
+_ARTIFACT_BACKPRESSURE_MIN_PENDING_BYTES = 512 * 1024 * 1024
+_ARTIFACT_BACKPRESSURE_STALL_SECONDS = 300.0
 
 CHAMPION_WAD_PATTERN = re.compile(r"/champions/(?P<alias>[^/]+)\.wad\.client$", re.IGNORECASE)
 CHAMPION_BIN_PATTERN = re.compile(r"/characters/(?P<alias>[^/]+)/", re.IGNORECASE)
@@ -93,6 +97,7 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
 
         artifacts: list[EntityArtifacts]
         artifact_records: list[PipelineArtifactRecord] = []
+        all_archives: list[Path] = []
         targets: tuple[ProcessingTarget, ...] = tuple()
         if runtime_config.mode is PipelineMode.REMOTE:
             active_stage = PipelineStage.RESOLVE_MANIFEST_PAIR
@@ -126,8 +131,40 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
                 ),
             )
             active_stage = PipelineStage.EXTRACT if config.run_extract else PipelineStage.UPDATE
+
+            def _on_remote_entity_complete(artifact: EntityArtifacts) -> None:
+                archives = _queue_artifact_upload_tasks(
+                    config=runtime_config,
+                    state_db_path=state_db_path,
+                    run_id=log_ctx.run_id,
+                    artifact=artifact,
+                    version=resolved_version,
+                    log_ctx=log_ctx,
+                )
+                all_archives.extend(archives)
+                artifact_records.append(
+                    PipelineArtifactRecord(
+                        entity_type=artifact.entity_type,
+                        entity_id=artifact.entity_id,
+                        audio_output_paths=artifact.audio_output_paths,
+                        mapping_output_path=artifact.mapping_output_path,
+                        archive_paths=archives,
+                    )
+                )
+                _wait_for_artifact_queue_capacity(
+                    config=runtime_config,
+                    state_db_path=state_db_path,
+                    run_id=log_ctx.run_id,
+                    log_ctx=log_ctx,
+                )
+
             artifacts = (
-                run_remote_pipeline(config=effective_config, pair=pair, log_ctx=log_ctx)
+                run_remote_pipeline(
+                    config=effective_config,
+                    pair=pair,
+                    log_ctx=log_ctx,
+                    on_entity_complete=_on_remote_entity_complete,
+                )
                 if targets
                 else []
             )
@@ -150,35 +187,35 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
             active_stage = PipelineStage.EXTRACT if config.run_extract else PipelineStage.UPDATE
             artifacts = run_local_pipeline(config=effective_config, log_ctx=log_ctx)
             resolved_version = _resolve_local_version(config=runtime_config)
-
-        all_archives: list[Path] = []
-        active_stage = PipelineStage.PACK
-        for artifact in artifacts:
-            archives = handle_entity_artifacts(
-                config=runtime_config,
-                artifact=artifact,
-                version=resolved_version,
-            )
-            all_archives.extend(archives)
-            artifact_records.append(
-                PipelineArtifactRecord(
-                    entity_type=artifact.entity_type,
-                    entity_id=artifact.entity_id,
-                    audio_output_paths=artifact.audio_output_paths,
-                    mapping_output_path=artifact.mapping_output_path,
-                    archive_paths=archives,
+            active_stage = PipelineStage.PACK
+            for artifact in artifacts:
+                archives = _queue_artifact_upload_tasks(
+                    config=runtime_config,
+                    state_db_path=state_db_path,
+                    run_id=log_ctx.run_id,
+                    artifact=artifact,
+                    version=resolved_version,
+                    log_ctx=log_ctx,
                 )
-            )
+                all_archives.extend(archives)
+                artifact_records.append(
+                    PipelineArtifactRecord(
+                        entity_type=artifact.entity_type,
+                        entity_id=artifact.entity_id,
+                        audio_output_paths=artifact.audio_output_paths,
+                        mapping_output_path=artifact.mapping_output_path,
+                        archive_paths=archives,
+                    )
+                )
+                _wait_for_artifact_queue_capacity(
+                    config=runtime_config,
+                    state_db_path=state_db_path,
+                    run_id=log_ctx.run_id,
+                    log_ctx=log_ctx,
+                )
 
         if all_archives and resolved_version is not None:
             active_stage = PipelineStage.UPLOAD
-            _enqueue_archive_upload_tasks_for_run(
-                config=runtime_config,
-                state_db_path=state_db_path,
-                run_id=log_ctx.run_id,
-                archives=tuple(all_archives),
-                version=resolved_version,
-            )
             uploaded_archives = len(all_archives)
 
         summary = PipelineRunSummary(
@@ -335,74 +372,123 @@ def _resolve_remote_targets(
     )
 
 
-def handle_entity_artifacts(
+def _queue_artifact_upload_tasks(
+    *,
     config: PipelineRunConfig,
+    state_db_path: Path,
+    run_id: str,
     artifact: EntityArtifacts,
     version: str | None,
+    log_ctx: object,
 ) -> tuple[Path, ...]:
-    """将单实体产物打包为归档文件。
-
-    Args:
-        config: Pipeline 运行配置。
-        artifact: 单实体产物。
-        version: 本轮版本号。
-
-    Returns:
-        tuple[Path, ...]: 归档文件路径集合。
-    """
+    """把单实体产物转换成异步打包上传任务。"""
 
     if version is None:
         return tuple()
-
-    output_dir = config.output_root / "packages" / version / artifact.entity_type
-    report_file = _resolve_report_file(config=config, artifact=artifact, version=version)
-    extra_files = _resolve_pack_extra_items(artifact=artifact)
-    archives: list[Path] = []
-    for audio_dir in artifact.audio_output_paths:
-        if not audio_dir.is_dir():
-            continue
-        archive_path = pack_champion(
-            champion_dir=audio_dir,
-            output_path=output_dir,
-            archive_name=_build_archive_name(
-                directory_name=audio_dir.name,
-                version=version,
-                audio_type=resolve_default_archive_resource_type(),
-            ),
-            report_file=report_file,
-            password=config.archive_password or DEFAULT_ARCHIVE_PASSWORD,
-            extra_files=extra_files,
+    plans = build_artifact_task_plans(
+        output_root=config.output_root,
+        archive_remote_root=config.archive_remote_root,
+        artifact=artifact,
+        version=version,
+    )
+    queued_archives: list[Path] = []
+    for plan in plans:
+        archive_path = plan.archive_output_dir / plan.archive_name
+        enqueue_upload_task(
+            database_path=state_db_path,
+            run_id=run_id,
+            local_path=str(plan.source_dir),
+            remote_path=plan.remote_path,
+            task_type="artifact",
+            payload={
+                **serialize_artifact_task_plan(plan),
+                "archive_password": config.archive_password or DEFAULT_ARCHIVE_PASSWORD,
+            },
         )
-        archives.append(archive_path)
-        shutil.rmtree(audio_dir)
-    return tuple(archives)
+        queued_archives.append(archive_path)
+    if plans:
+        emit_event(
+            log_ctx,
+            PipelineEvent(
+                run_id=run_id,
+                stage=PipelineStage.PACK,
+                event_type="artifact_tasks_enqueued",
+                message="单实体打包上传任务已入队",
+                payload={
+                    "entity_type": artifact.entity_type,
+                    "entity_id": artifact.entity_id,
+                    "task_count": len(plans),
+                    "archive_paths": [str(plan.archive_output_dir / plan.archive_name) for plan in plans],
+                },
+                created_at=datetime.now().astimezone().isoformat(),
+                status_hint="running",
+                entity_type=artifact.entity_type,
+                entity_id=artifact.entity_id,
+                operation="enqueue_artifact_tasks",
+            ),
+        )
+    return tuple(queued_archives)
 
 
-def _resolve_report_file(
+def _wait_for_artifact_queue_capacity(
     *,
     config: PipelineRunConfig,
-    artifact: EntityArtifacts,
-    version: str,
-) -> Path | None:
-    """解析当前实体对应的 `_id_metadata.yaml`。"""
+    state_db_path: Path,
+    run_id: str,
+    log_ctx: object,
+) -> None:
+    """当待打包/上传产物堆积过多时阻塞主线。"""
 
-    entity_dir_name = f"{artifact.entity_type}s"
-    candidate = config.output_root / "reports" / version / entity_dir_name / f"_{artifact.entity_id}_metadata.yaml"
-    if candidate.is_file():
-        return candidate
-    return None
+    max_pending_tasks = max(config.max_workers * 2, 2)
+    max_pending_bytes = _resolve_artifact_backpressure_byte_limit(config.output_root)
+    waiting_logged = False
+    last_signature: tuple[int, int] | None = None
+    last_progress_at = time.monotonic()
+    while True:
+        pressure = get_upload_queue_pressure(database_path=state_db_path, run_id=run_id)
+        signature = (pressure.unfinished_count, pressure.pending_bytes)
+        if signature != last_signature:
+            last_signature = signature
+            last_progress_at = time.monotonic()
+        if (
+            pressure.unfinished_count <= max_pending_tasks
+            and pressure.pending_bytes <= max_pending_bytes
+        ):
+            return
+        if not waiting_logged:
+            waiting_logged = True
+            emit_event(
+                log_ctx,
+                PipelineEvent(
+                    run_id=run_id,
+                    stage=PipelineStage.UPLOAD,
+                    event_type="artifact_backpressure_wait_started",
+                    message="待上传产物过多，主线等待 upload worker 排空",
+                    payload={
+                        "unfinished_count": pressure.unfinished_count,
+                        "pending_bytes": pressure.pending_bytes,
+                        "max_pending_tasks": max_pending_tasks,
+                        "max_pending_bytes": max_pending_bytes,
+                    },
+                    created_at=datetime.now().astimezone().isoformat(),
+                    status_hint="running",
+                    operation="artifact_backpressure",
+                ),
+            )
+        if time.monotonic() - last_progress_at > _ARTIFACT_BACKPRESSURE_STALL_SECONDS:
+            raise TimeoutError(
+                "artifact 上传队列长时间无进度，"
+                f"unfinished={pressure.unfinished_count}, pending_bytes={pressure.pending_bytes}, "
+                f"max_pending_tasks={max_pending_tasks}, max_pending_bytes={max_pending_bytes}"
+            )
+        time.sleep(_ARTIFACT_BACKPRESSURE_POLL_SECONDS)
 
 
-def _resolve_pack_extra_items(*, artifact: EntityArtifacts) -> tuple[Path, ...]:
-    """汇总需要打进压缩包根目录的附加项。"""
-
-    extras: list[Path] = []
-    if artifact.mapping_output_path is not None and artifact.mapping_output_path.is_file():
-        extras.append(artifact.mapping_output_path)
-    pack_extra_dir = Path(__file__).resolve().parents[1] / "pack_extra"
-    if pack_extra_dir.is_dir():
-        extras.append(pack_extra_dir)
-    return tuple(extras)
+def _resolve_artifact_backpressure_byte_limit(output_root: Path) -> int:
+    output_root.mkdir(parents=True, exist_ok=True)
+    free_bytes = shutil.disk_usage(output_root).free
+    adaptive_limit = max(free_bytes // 3, _ARTIFACT_BACKPRESSURE_MIN_PENDING_BYTES)
+    return min(adaptive_limit, _ARTIFACT_BACKPRESSURE_MAX_PENDING_BYTES)
 
 
 def build_processing_targets(
@@ -646,41 +732,6 @@ def _build_terminal_log_summary(
         summary={"status": summary.status.value},
         error_brief=error_brief,
     )
-
-
-def _enqueue_archive_upload_tasks_for_run(
-    config: PipelineRunConfig,
-    *,
-    state_db_path: Path,
-    run_id: str,
-    archives: tuple[Path, ...],
-    version: str,
-) -> None:
-    """将 archive 上传任务写入本地状态库。"""
-
-    default_resource_type = resolve_default_archive_resource_type()
-    for archive in archives:
-        layout = build_archive_publish_layout(
-            archive=archive,
-            remote_root=config.archive_remote_root,
-            default_resource_type=default_resource_type,
-        )
-        enqueue_upload_task(
-            database_path=state_db_path,
-            run_id=run_id,
-            local_path=str(archive),
-            remote_path=layout.remote_path,
-            task_type="archive",
-            payload={
-                "remote_relative_path": layout.remote_relative_path,
-                "remote_name": layout.remote_name,
-                "target_group": layout.target_group,
-                "resource_type": layout.resource_type,
-                "entity_key": layout.entity_key,
-                "game_version": version,
-            },
-        )
-
 
 def _close_upload_task_production(
     *,
