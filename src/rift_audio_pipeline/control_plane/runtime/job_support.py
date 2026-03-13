@@ -54,7 +54,8 @@ class RuntimePlan:
     relay_state_file: Path
     relay_stdout_file: Path
     upload_stdout_file: Path
-    baidu_remote_root: str
+    archive_remote_root: str
+    meta_remote_root: str
     default_mode: str
     default_game_region: str
     default_log_level: str
@@ -138,7 +139,8 @@ def build_runtime_plan(
         relay_state_file=log_dir / "log_relay_state.json",
         relay_stdout_file=runtime_root / "relay.stdout.log",
         upload_stdout_file=runtime_root / "upload-worker.stdout.log",
-        baidu_remote_root=args.baidu_remote_root,
+        archive_remote_root=args.archive_remote_root,
+        meta_remote_root=args.meta_remote_root,
         default_mode=args.default_mode,
         default_game_region=args.default_game_region,
         default_log_level=args.default_log_level,
@@ -215,8 +217,8 @@ def start_upload_worker(
             str(init_result.state_db_file),
             "--baidu-token-file",
             str(init_result.baidu_token_file),
-            "--baidu-remote-root",
-            plan.baidu_remote_root,
+            "--archive-remote-root",
+            plan.archive_remote_root,
             "--output-root",
             str(plan.output_root),
             "--worker-id",
@@ -349,8 +351,8 @@ def run_finalize_worker(
         str(init_result.state_db_file),
         "--baidu-token-file",
         str(init_result.baidu_token_file),
-        "--baidu-remote-root",
-        plan.baidu_remote_root,
+        "--meta-remote-root",
+        plan.meta_remote_root,
         "--database-file",
         str(init_result.database_file),
         "--log-root",

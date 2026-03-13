@@ -13,6 +13,8 @@ from rift_audio_pipeline.control_plane.workflow_dispatch import WorkflowDispatch
 from rift_audio_pipeline.control_plane.workflow_dispatch import build_job_runner_command
 from rift_audio_pipeline.control_plane.workflow_dispatch import parse_dispatch_payload
 from rift_audio_pipeline.control_plane.workflow_dispatch import serialize_dispatch_inputs
+from rift_audio_pipeline.pipeline.models import DEFAULT_ARCHIVE_REMOTE_ROOT
+from rift_audio_pipeline.pipeline.models import DEFAULT_META_REMOTE_ROOT
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,7 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=Path("output"))
     parser.add_argument("--temp-root", type=Path, default=Path("temp"))
     parser.add_argument("--log-root", type=Path)
-    parser.add_argument("--baidu-remote-root", default="/apps/rift-audio-pipeline")
+    parser.add_argument("--archive-remote-root", default=DEFAULT_ARCHIVE_REMOTE_ROOT)
+    parser.add_argument("--meta-remote-root", default=DEFAULT_META_REMOTE_ROOT)
     parser.add_argument("--default-log-level", default="INFO")
     parser.add_argument("--control-plane-timeout-seconds", type=float, default=30.0)
     return parser
@@ -68,7 +71,8 @@ def build_workflow_command(args: argparse.Namespace) -> tuple[DispatchPayload, l
         output_root=args.output_root,
         temp_root=args.temp_root,
         log_root=args.log_root,
-        baidu_remote_root=args.baidu_remote_root,
+        archive_remote_root=args.archive_remote_root,
+        meta_remote_root=args.meta_remote_root,
         default_log_level=args.default_log_level,
         control_plane_timeout_seconds=args.control_plane_timeout_seconds,
         python_executable=Path(sys.executable),

@@ -36,7 +36,8 @@ def _build_config(tmp_path: Path) -> PipelineRunConfig:
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
     )
 
 
@@ -455,7 +456,8 @@ def test_build_log_sink_config_should_disable_relay_without_socket_path(tmp_path
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
     )
     log_ctx = initialize_run_logging(config)
 

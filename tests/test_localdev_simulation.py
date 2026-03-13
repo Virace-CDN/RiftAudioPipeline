@@ -28,7 +28,8 @@ def test_patch_pipeline_for_baidu_mock_should_preserve_manifest_pair_resolution(
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/rift-audio-pipeline",
+        archive_remote_root="/apps/rift-audio-pipeline-data",
+        meta_remote_root="/apps/rift-audio-pipeline-meta",
     )
     expected_pair = ManifestPairRef(
         version="16.5",

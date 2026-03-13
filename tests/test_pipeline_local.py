@@ -24,7 +24,8 @@ def _build_local_config(tmp_path: Path) -> PipelineRunConfig:
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
         game_path=tmp_path / "League of Legends",
         champion_ids=(1,),
         map_ids=(11,),
@@ -41,7 +42,8 @@ def test_build_local_app_context_should_require_game_path(tmp_path: Path) -> Non
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
         game_path=None,
     )
 

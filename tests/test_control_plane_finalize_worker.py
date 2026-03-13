@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import sqlite3
 import threading
@@ -28,7 +27,7 @@ def test_build_database_payload_should_merge_remote_snapshot_and_new_file_facts(
         remote_database_payload={
             "entries": [
                 {
-                    "remote_path": "/apps/test/VO/champions/old.7z",
+                    "remote_path": "/apps/test/champions/old.7z",
                     "remote_name": "old.7z",
                 }
             ]
@@ -38,7 +37,7 @@ def test_build_database_payload_should_merge_remote_snapshot_and_new_file_facts(
         database_path=state_db_path,
         run_id="run-1",
         local_path="/tmp/new.7z",
-        remote_path="/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.5-VO.7z",
+        remote_path="/apps/test/champions/1·annie·黑暗之女·安妮-16.5-VO.7z",
         file_name="1·annie·黑暗之女·安妮-16.5-VO.7z",
         sha256="abc123",
         packaged_at="2026-03-11T12:00:00+08:00",
@@ -57,8 +56,8 @@ def test_build_database_payload_should_merge_remote_snapshot_and_new_file_facts(
     entries = payload["entries"]
     assert isinstance(entries, list)
     remote_paths = [entry["remote_path"] for entry in entries]
-    assert "/apps/test/VO/champions/old.7z" in remote_paths
-    assert "/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.5-VO.7z" in remote_paths
+    assert "/apps/test/champions/old.7z" in remote_paths
+    assert "/apps/test/champions/1·annie·黑暗之女·安妮-16.5-VO.7z" in remote_paths
 
 
 def test_rotate_and_upload_database_should_rotate_current_and_prune_history(tmp_path: Path) -> None:

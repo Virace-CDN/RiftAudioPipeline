@@ -40,37 +40,12 @@ jobs:
         run: uv sync --frozen
 
       - name: Write dispatch payload
-        run: |
-          uv run python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          from rift_audio_pipeline.control_plane.workflow_dispatch import (
-              redact_raw_dispatch_payload,
-          )
-
-          event_payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-          dispatch_payload_json = event_payload["inputs"]["payload"]
-          Path(os.environ["RUNNER_TEMP"]).joinpath("dispatch-payload.json").write_text(
-              dispatch_payload_json,
-              encoding="utf-8",
-          )
-          redacted_path = Path(os.environ["RUNNER_TEMP"]) / "dispatch-payload.redacted.json"
-          redacted_path.write_text(
-              json.dumps(
-                  redact_raw_dispatch_payload(
-                      {
-                          "ref": os.environ.get("GITHUB_REF_NAME", ""),
-                          "inputs": {"payload": dispatch_payload_json},
-                      }
-                  ),
-                  ensure_ascii=False,
-                  indent=2,
-              ),
-              encoding="utf-8",
-          )
-          PY
+        run: >
+          uv run python -m rift_audio_pipeline.control_plane.write_dispatch_payload
+          --github-event-path "$GITHUB_EVENT_PATH"
+          --dispatch-inputs-file "$RUNNER_TEMP/dispatch-payload.json"
+          --redacted-output-file "$RUNNER_TEMP/dispatch-payload.redacted.json"
+          --ref "${{ github.ref_name }}"
 
       - name: Run pipeline
         run: >

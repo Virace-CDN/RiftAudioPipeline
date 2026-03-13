@@ -28,8 +28,8 @@ def test_build_archive_publish_layout_should_route_archive_by_group_and_type() -
     )
 
     assert layout.remote_name == "11-map11-16.5-SFX.7z"
-    assert layout.remote_relative_path == "SFX/maps/11-map11-16.5-SFX.7z"
-    assert layout.remote_path == "/apps/test/SFX/maps/11-map11-16.5-SFX.7z"
+    assert layout.remote_relative_path == "maps/11-map11-16.5-SFX.7z"
+    assert layout.remote_path == "/apps/test/maps/11-map11-16.5-SFX.7z"
     assert layout.target_group == "maps"
     assert layout.resource_type == "SFX"
     assert layout.entity_key == "11-map11"
@@ -46,5 +46,5 @@ def test_build_archive_publish_layout_should_accept_singular_directory_name() ->
         default_resource_type="VO",
     )
 
-    assert layout.remote_relative_path == "VO/maps/11·sr·召唤师峡谷.7z"
+    assert layout.remote_relative_path == "maps/11·sr·召唤师峡谷.7z"
     assert layout.target_group == "maps"

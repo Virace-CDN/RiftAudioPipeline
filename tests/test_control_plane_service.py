@@ -52,7 +52,7 @@ def test_report_pipeline_run_result_should_parse_response() -> None:
             status=PipelineRunStatus.SUCCESS,
             changes=(
                 {
-                    "remote_path": "/apps/test/VO/champions/demo.7z",
+                    "remote_path": "/apps/test-data/champions/demo.7z",
                     "file_name": "demo.7z",
                 },
             ),

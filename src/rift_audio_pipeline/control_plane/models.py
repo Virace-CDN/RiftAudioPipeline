@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
 
 
@@ -106,4 +105,3 @@ class RunLogFinalizeRequest:
 
     run_id: str
     summary: dict[str, object]
-

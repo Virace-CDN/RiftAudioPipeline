@@ -10,6 +10,9 @@ from dataclasses import field
 from pathlib import Path
 from typing import Any
 
+from rift_audio_pipeline.pipeline.models import DEFAULT_ARCHIVE_REMOTE_ROOT
+from rift_audio_pipeline.pipeline.models import DEFAULT_META_REMOTE_ROOT
+
 _ALLOWED_INPUT_WRAPPER_FIELDS = frozenset({"payload"})
 _ALLOWED_PAYLOAD_FIELDS = frozenset(
     {
@@ -38,6 +41,8 @@ _EXECUTION_INPUT_FIELDS = frozenset(
         "entity_retry_attempts",
         "log_level",
         "archive_password",
+        "archive_remote_root",
+        "meta_remote_root",
     }
 )
 _METADATA_INPUT_FIELDS = frozenset({"requested_by"})
@@ -66,7 +71,8 @@ class WorkflowDispatchCommandConfig:
     output_root: Path = Path("output")
     temp_root: Path = Path("temp")
     log_root: Path | None = None
-    baidu_remote_root: str = "/apps/rift-audio-pipeline"
+    archive_remote_root: str = DEFAULT_ARCHIVE_REMOTE_ROOT
+    meta_remote_root: str = DEFAULT_META_REMOTE_ROOT
     default_log_level: str = "INFO"
     control_plane_timeout_seconds: float = 30.0
     python_executable: Path = Path(sys.executable)
@@ -147,6 +153,8 @@ class DispatchExecutionInputs:
     entity_retry_attempts: int | None = None
     log_level: str | None = None
     archive_password: str | None = None
+    archive_remote_root: str | None = None
+    meta_remote_root: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,6 +420,14 @@ def _validate_dispatch_inputs(raw_inputs: dict[str, Any]) -> DispatchInputs:
                 execution_inputs.get("archive_password"),
                 field_name="inputs.payload.execution.archive_password",
             ),
+            archive_remote_root=_coerce_optional_string(
+                execution_inputs.get("archive_remote_root"),
+                field_name="inputs.payload.execution.archive_remote_root",
+            ),
+            meta_remote_root=_coerce_optional_string(
+                execution_inputs.get("meta_remote_root"),
+                field_name="inputs.payload.execution.meta_remote_root",
+            ),
         ),
         metadata=DispatchMetadataInputs(
             requested_by=_coerce_optional_string(
@@ -545,8 +561,16 @@ def build_job_runner_command(
         str(config.output_root),
         "--temp-root",
         str(config.temp_root),
-        "--baidu-remote-root",
-        config.baidu_remote_root,
+        "--archive-remote-root",
+        _coerce_string(
+            inputs.execution.archive_remote_root or config.archive_remote_root,
+            field_name="archive_remote_root",
+        ),
+        "--meta-remote-root",
+        _coerce_string(
+            inputs.execution.meta_remote_root or config.meta_remote_root,
+            field_name="meta_remote_root",
+        ),
         "--default-mode",
         _coerce_string(inputs.request.mode or config.default_mode, field_name="mode"),
         "--default-game-region",

@@ -55,7 +55,7 @@ def build_archive_publish_layout(
     target_group = _resolve_archive_target_group(archive=archive)
     entity_key, _, archive_resource_type = _parse_archive_file_name(archive.name)
     resource_type = archive_resource_type or default_resource_type
-    remote_relative_path = f"{resource_type}/{target_group}/{archive.name}"
+    remote_relative_path = f"{target_group}/{archive.name}"
     return ArchivePublishLayout(
         remote_name=archive.name,
         remote_relative_path=remote_relative_path,

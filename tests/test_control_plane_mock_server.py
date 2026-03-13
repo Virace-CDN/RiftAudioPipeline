@@ -85,7 +85,7 @@ def test_mock_control_plane_server_should_round_trip_http(tmp_path: Path) -> Non
                 status=PipelineRunStatus.SUCCESS,
                 changes=(
                     {
-                        "remote_path": "/apps/rift-audio-pipeline/VO/champions/demo.7z",
+                        "remote_path": "/apps/rift-audio-pipeline-data/champions/demo.7z",
                         "file_name": "demo.7z",
                     },
                 ),

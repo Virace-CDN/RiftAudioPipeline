@@ -12,6 +12,8 @@ from typing import Sequence
 
 from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunConfig
+from rift_audio_pipeline.pipeline.models import DEFAULT_ARCHIVE_REMOTE_ROOT
+from rift_audio_pipeline.pipeline.models import DEFAULT_META_REMOTE_ROOT
 from rift_audio_pipeline.pipeline.orchestrator import run_pipeline
 from rift_audio_pipeline.simulation import maybe_patch_pipeline_for_simulation
 
@@ -26,7 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temp-root", type=Path, default=Path("temp"))
     parser.add_argument("--log-root", type=Path, default=None)
     parser.add_argument("--run-id")
-    parser.add_argument("--baidu-remote-root", default="/apps/rift-audio-pipeline")
+    parser.add_argument("--archive-remote-root", default=DEFAULT_ARCHIVE_REMOTE_ROOT)
+    parser.add_argument("--meta-remote-root", default=DEFAULT_META_REMOTE_ROOT)
     parser.add_argument("--remote-live-region")
     parser.add_argument("--baidu-app-key")
     parser.add_argument("--baidu-secret-key")
@@ -83,7 +86,8 @@ def build_run_config(args: argparse.Namespace) -> PipelineRunConfig:
         temp_root=args.temp_root,
         log_root=log_root,
         run_id=args.run_id,
-        baidu_remote_root=args.baidu_remote_root,
+        archive_remote_root=args.archive_remote_root,
+        meta_remote_root=args.meta_remote_root,
         remote_live_region=args.remote_live_region,
         baidu_app_key=baidu_app_key,
         baidu_secret_key=baidu_secret_key,

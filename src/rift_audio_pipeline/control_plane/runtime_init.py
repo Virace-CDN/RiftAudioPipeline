@@ -35,7 +35,7 @@ def initialize_runtime(
     *,
     run_id: str,
     runtime_dir: Path,
-    baidu_remote_root: str,
+    meta_remote_root: str,
     plane_config: ControlPlaneConfig | None,
     provided_baidu_token_payload: dict[str, object] | None = None,
 ) -> RuntimeInitializationResult:
@@ -44,7 +44,7 @@ def initialize_runtime(
     Args:
         run_id: 当前运行 ID。
         runtime_dir: 当前运行的本地工作目录。
-        baidu_remote_root: 百度远端根目录。
+        meta_remote_root: 百度远端数据库与日志根目录。
         plane_config: control plane 访问配置；仅在需要向 plane 拉百度凭据时使用。
         provided_baidu_token_payload: dispatch payload 中显式提供的百度 access token。
 
@@ -69,7 +69,7 @@ def initialize_runtime(
     database_file = runtime_dir / "database.json"
     _download_or_initialize_database(
         token_payload=token_payload,
-        baidu_remote_root=baidu_remote_root,
+        meta_remote_root=meta_remote_root,
         database_file=database_file,
     )
     database_payload = json.loads(database_file.read_text(encoding="utf-8"))
@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="初始化 GitHub Actions 运行前上下文。")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--runtime-dir", type=Path, required=True)
-    parser.add_argument("--baidu-remote-root", required=True)
+    parser.add_argument("--meta-remote-root", required=True)
     parser.add_argument("--plane-base-url", required=True)
     parser.add_argument("--plane-bearer-token")
     parser.add_argument("--plane-access-client-id")
@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     result = initialize_runtime(
         run_id=args.run_id,
         runtime_dir=args.runtime_dir,
-        baidu_remote_root=args.baidu_remote_root,
+        meta_remote_root=args.meta_remote_root,
         plane_config=ControlPlaneConfig(
             base_url=args.plane_base_url,
             bearer_token=args.plane_bearer_token,
@@ -178,7 +178,7 @@ def _validate_baidu_token_payload(payload: dict[str, object], *, source_label: s
 def _download_or_initialize_database(
     *,
     token_payload: dict[str, object],
-    baidu_remote_root: str,
+    meta_remote_root: str,
     database_file: Path,
 ) -> None:
     if os.getenv(SIMULATION_ENV_VAR) == "1" or os.getenv(MOCK_BAIDU_ENV_VAR) == "1":
@@ -199,11 +199,11 @@ def _download_or_initialize_database(
         credentials=BaiduCredentials(
             access_token=str(token_payload["access_token"]),
         ),
-        remote_dir=baidu_remote_root,
+        remote_dir=meta_remote_root,
         token_store=None,
         allow_token_refresh=False,
     )
-    remote_database_path = f"{baidu_remote_root.rstrip('/')}/database.json"
+    remote_database_path = f"{meta_remote_root.rstrip('/')}/database.json"
     try:
         client.download_file(remote_database_path, database_file)
     except FileNotFoundError:

@@ -19,6 +19,8 @@ from rift_audio_pipeline.pipeline.models import PipelineMode
 from rift_audio_pipeline.pipeline.models import PipelineRunConfig
 from rift_audio_pipeline.pipeline.models import PipelineRunStatus
 from rift_audio_pipeline.pipeline.models import PipelineRunSummary
+from rift_audio_pipeline.pipeline.models import DEFAULT_ARCHIVE_REMOTE_ROOT
+from rift_audio_pipeline.pipeline.models import DEFAULT_META_REMOTE_ROOT
 from rift_audio_pipeline.pipeline.orchestrator import run_pipeline
 from rift_localdev.plane.mock_server import MockControlPlaneConfig
 from rift_localdev.plane.mock_server import MockControlPlaneServer
@@ -36,7 +38,8 @@ class MockSmokeConfig:
     host: str = "127.0.0.1"
     port: int = 0
     game_region: str = "zh_CN"
-    baidu_remote_root: str = "/apps/rift-audio-pipeline"
+    archive_remote_root: str = DEFAULT_ARCHIVE_REMOTE_ROOT
+    meta_remote_root: str = DEFAULT_META_REMOTE_ROOT
     requested_by: str = "mock-smoke"
     champion_ids: tuple[int, ...] = (1,)
 
@@ -90,7 +93,8 @@ def run_mock_control_plane_smoke(config: MockSmokeConfig) -> MockSmokeResult:
             output_root=config.output_root,
             temp_root=config.temp_root,
             log_root=config.output_root / "logs",
-            baidu_remote_root=config.baidu_remote_root,
+            archive_remote_root=config.archive_remote_root,
+            meta_remote_root=config.meta_remote_root,
             run_id=run_id,
             state_db_path=state_db_result.database_path,
             control_plane_base_url=server.base_url,
@@ -111,7 +115,7 @@ def run_mock_control_plane_smoke(config: MockSmokeConfig) -> MockSmokeResult:
                     run_id=run_id,
                     state_db_path=state_db_result.database_path,
                     baidu_token_file=baidu_token_file,
-                    baidu_remote_root=config.baidu_remote_root,
+                    archive_remote_root=config.archive_remote_root,
                     worker_id="mock-smoke-upload-worker",
                     output_root=config.output_root,
                 )
@@ -158,7 +162,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--game-region", default="zh_CN")
-    parser.add_argument("--baidu-remote-root", default="/apps/rift-audio-pipeline")
+    parser.add_argument("--archive-remote-root", default=DEFAULT_ARCHIVE_REMOTE_ROOT)
+    parser.add_argument("--meta-remote-root", default=DEFAULT_META_REMOTE_ROOT)
     parser.add_argument("--requested-by", default="mock-smoke")
     parser.add_argument("--champion-ids", default="1")
     return parser
@@ -177,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             game_region=args.game_region,
-            baidu_remote_root=args.baidu_remote_root,
+            archive_remote_root=args.archive_remote_root,
+            meta_remote_root=args.meta_remote_root,
             requested_by=args.requested_by,
             champion_ids=_parse_id_list(args.champion_ids),
         )

@@ -28,7 +28,8 @@ def _build_remote_config(tmp_path: Path) -> PipelineRunConfig:
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
         run_id="run-test",
         state_db_path=state_db_path,
     )
@@ -180,7 +181,8 @@ def test_build_processing_targets_should_prefer_explicit_ids(tmp_path: Path) -> 
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
         champion_ids=(1, 103),
         map_ids=(11,),
     )
@@ -293,7 +295,8 @@ def test_apply_targets_to_config_should_only_override_known_ids(tmp_path: Path) 
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
         champion_ids=(5,),
     )
     targets = (
@@ -318,7 +321,8 @@ def test_resolve_remote_targets_should_infer_map_ids_from_previous_pair(
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
         previous_version="16.4",
         previous_lcu_manifest_url="https://lcu.example/16.4",
         previous_game_manifest_url="https://game.example/16.4",
@@ -362,7 +366,8 @@ def test_resolve_current_manifest_pair_should_prefer_explicit_runtime_config(tmp
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
         current_version="16.5",
         current_lcu_manifest_url="https://lcu.example/16.5",
         current_game_manifest_url="https://game.example/16.5",
@@ -459,7 +464,7 @@ def test_run_pipeline_should_run_remote_and_upload_archives(
     assert upload_tasks == [
         (
             str(archive_path),
-            "/apps/test/VO/champions/annie.7z",
+            "/apps/test-data/champions/annie.7z",
             "archive",
             "queued",
         )
@@ -548,7 +553,8 @@ def test_run_pipeline_should_require_state_db_path(tmp_path: Path) -> None:
         output_root=tmp_path / "output",
         temp_root=tmp_path / "temp",
         log_root=tmp_path / "output" / "logs",
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
     )
 
     with pytest.raises(ValueError, match="state_db_path"):

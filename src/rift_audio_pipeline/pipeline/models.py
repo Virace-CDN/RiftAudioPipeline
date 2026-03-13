@@ -14,6 +14,8 @@ PIPELINE_DECISION_SCHEMA_VERSION = 1
 PIPELINE_ARTIFACTS_SCHEMA_VERSION = 1
 PIPELINE_ERROR_SCHEMA_VERSION = 1
 PIPELINE_PENDING_LOG_UPLOAD_SCHEMA_VERSION = 1
+DEFAULT_ARCHIVE_REMOTE_ROOT = "/apps/rift-audio-pipeline-data"
+DEFAULT_META_REMOTE_ROOT = "/apps/rift-audio-pipeline-meta"
 
 
 class PipelineMode(str, Enum):
@@ -58,7 +60,8 @@ class PipelineRunConfig:
         temp_root: 临时目录根。
         log_root: 日志目录根。
         run_id: 本轮运行 ID；为空时按当前时间自动生成。
-        baidu_remote_root: 百度网盘远端根目录。
+        archive_remote_root: 百度网盘压缩包远端根目录。
+        meta_remote_root: 百度网盘数据库与日志远端根目录。
         remote_live_region: remote live 区服，如 `EUW`。
         baidu_app_key: 百度 app key。
         baidu_secret_key: 百度 secret key。
@@ -104,7 +107,8 @@ class PipelineRunConfig:
     output_root: Path
     temp_root: Path
     log_root: Path
-    baidu_remote_root: str
+    archive_remote_root: str = DEFAULT_ARCHIVE_REMOTE_ROOT
+    meta_remote_root: str = DEFAULT_META_REMOTE_ROOT
     run_id: str | None = None
     remote_live_region: str | None = None
     baidu_app_key: str | None = None

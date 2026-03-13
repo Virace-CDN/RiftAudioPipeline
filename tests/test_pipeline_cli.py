@@ -23,8 +23,10 @@ def test_build_run_config_should_parse_cli_args(tmp_path: Path) -> None:
             str(tmp_path / "output"),
             "--temp-root",
             str(tmp_path / "temp"),
-            "--baidu-remote-root",
-            "/apps/demo",
+            "--archive-remote-root",
+            "/apps/demo-data",
+            "--meta-remote-root",
+            "/apps/demo-meta",
             "--remote-live-region",
             "NA1",
             "--current-version",
@@ -52,6 +54,8 @@ def test_build_run_config_should_parse_cli_args(tmp_path: Path) -> None:
     assert config.output_root == tmp_path / "output"
     assert config.temp_root == tmp_path / "temp"
     assert config.log_root == tmp_path / "output" / "logs"
+    assert config.archive_remote_root == "/apps/demo-data"
+    assert config.meta_remote_root == "/apps/demo-meta"
     assert config.remote_live_region == "NA1"
     assert config.current_version == "16.5"
     assert config.current_lcu_manifest_url == "https://lcu.example/16.5"

@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--state-db-path", type=Path, required=True)
     parser.add_argument("--baidu-token-file", type=Path, required=True)
-    parser.add_argument("--baidu-remote-root", required=True)
+    parser.add_argument("--meta-remote-root", required=True)
     parser.add_argument("--database-file", type=Path, required=True)
     parser.add_argument("--log-root", type=Path)
     parser.add_argument("--relay-state-file", type=Path)
@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         credentials=BaiduCredentials(
             access_token=_require_str(token_payload, "access_token"),
         ),
-        remote_dir=args.baidu_remote_root,
+        remote_dir=args.meta_remote_root,
         token_store=None,
         allow_token_refresh=False,
     )
@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                         {
                             "recorded_at": datetime.now().astimezone().isoformat(),
                             "run_id": args.run_id,
-                            "remote_root": f"{args.baidu_remote_root.rstrip('/')}/logs/{run_log_dir.parent.name}/{args.run_id}",
+                            "remote_root": f"{args.meta_remote_root.rstrip('/')}/logs/{run_log_dir.parent.name}/{args.run_id}",
                             "files": sorted(
                                 str(path.relative_to(run_log_dir))
                                 for path in run_log_dir.rglob("*")
@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             rotate_and_upload_database(
                 client=client,
-                remote_root=args.baidu_remote_root,
+                remote_root=args.meta_remote_root,
                 database_file=args.database_file,
                 history_limit=args.history_limit,
             )

@@ -662,7 +662,7 @@ def _enqueue_archive_upload_tasks_for_run(
     for archive in archives:
         layout = build_archive_publish_layout(
             archive=archive,
-            remote_root=config.baidu_remote_root,
+            remote_root=config.archive_remote_root,
             default_resource_type=default_resource_type,
         )
         enqueue_upload_task(
@@ -999,7 +999,7 @@ def _create_baidu_client(config: PipelineRunConfig) -> BaiduPanClient:
             secret_key=config.baidu_secret_key,
             refresh_token=config.baidu_refresh_token,
         ),
-        remote_dir=config.baidu_remote_root,
+        remote_dir=config.archive_remote_root,
         token_store=resolve_token_store(),
     )
 

@@ -32,9 +32,9 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
         database_path=state_db_path,
         run_id="run-1",
         local_path=str(archive_path),
-        remote_path="/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.5-VO.7z",
+        remote_path="/apps/test/champions/1·annie·黑暗之女·安妮-16.5-VO.7z",
         payload={
-            "remote_relative_path": "VO/champions/1·annie·黑暗之女·安妮-16.5-VO.7z",
+            "remote_relative_path": "champions/1·annie·黑暗之女·安妮-16.5-VO.7z",
             "game_version": "16.5",
         },
     )
@@ -80,7 +80,7 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
             run_id="run-1",
             state_db_path=state_db_path,
             baidu_token_file=baidu_token_file,
-            baidu_remote_root="/apps/test",
+            archive_remote_root="/apps/test",
             worker_id="worker-1",
             delete_local_file_after_upload=True,
             poll_interval_ms=10,
@@ -103,11 +103,11 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
         ).fetchone()
 
     assert upload_calls == [
-        (archive_path, "VO/champions/1·annie·黑暗之女·安妮-16.5-VO.7z")
+        (archive_path, "champions/1·annie·黑暗之女·安妮-16.5-VO.7z")
     ]
     assert task_row == ("done",)
     assert fact_row is not None
-    assert fact_row[0] == "/apps/test/VO/champions/1·annie·黑暗之女·安妮-16.5-VO.7z"
+    assert fact_row[0] == "/apps/test/champions/1·annie·黑暗之女·安妮-16.5-VO.7z"
     assert fact_row[1] == archive_path.name
     assert isinstance(fact_row[2], str) and fact_row[2]
     assert run_control == ("drained",)

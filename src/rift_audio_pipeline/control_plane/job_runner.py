@@ -25,6 +25,8 @@ from rift_audio_pipeline.control_plane.runtime.job_support import start_upload_w
 from rift_audio_pipeline.control_plane.runtime.job_support import wait_for_upload_workers
 from rift_audio_pipeline.control_plane.runtime_init import initialize_runtime
 from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchPayload
+from rift_audio_pipeline.pipeline.models import DEFAULT_ARCHIVE_REMOTE_ROOT
+from rift_audio_pipeline.pipeline.models import DEFAULT_META_REMOTE_ROOT
 
 _REQUEST_STAGE_TO_FLAGS = {
     None: (True, True, False),
@@ -52,7 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-game-region", default="zh_CN")
     parser.add_argument("--default-requested-by", default="github-actions")
     parser.add_argument("--default-log-level", default="INFO")
-    parser.add_argument("--baidu-remote-root", default="/apps/rift-audio-pipeline")
+    parser.add_argument("--archive-remote-root", default=DEFAULT_ARCHIVE_REMOTE_ROOT)
+    parser.add_argument("--meta-remote-root", default=DEFAULT_META_REMOTE_ROOT)
     parser.add_argument("--upload-worker-count", type=int, default=1)
     return parser
 
@@ -67,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     init_result = initialize_runtime(
         run_id=plan.run_id,
         runtime_dir=plan.runtime_root,
-        baidu_remote_root=plan.baidu_remote_root,
+        meta_remote_root=plan.meta_remote_root,
         plane_config=control_plane_config,
         provided_baidu_token_payload=_build_baidu_token_payload(payload),
     )
@@ -78,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         output_root=plan.output_root,
         temp_root=plan.temp_root,
         log_root=plan.log_root,
-        baidu_remote_root=plan.baidu_remote_root,
+        archive_remote_root=plan.archive_remote_root,
+        meta_remote_root=plan.meta_remote_root,
         relay_socket_path=plan.relay_socket_path if relay_enabled else None,
         state_db_path=init_result.state_db_file,
         default_mode=plan.default_mode,
@@ -211,7 +215,8 @@ def build_pipeline_command(
     output_root: Path,
     temp_root: Path,
     log_root: Path,
-    baidu_remote_root: str,
+    archive_remote_root: str,
+    meta_remote_root: str,
     relay_socket_path: Path | None,
     state_db_path: Path,
     default_mode: str,
@@ -239,8 +244,10 @@ def build_pipeline_command(
         run_id,
         "--state-db-path",
         str(state_db_path),
-        "--baidu-remote-root",
-        baidu_remote_root,
+        "--archive-remote-root",
+        archive_remote_root,
+        "--meta-remote-root",
+        meta_remote_root,
         "--log-level",
         inputs.execution.log_level or default_log_level,
     ]

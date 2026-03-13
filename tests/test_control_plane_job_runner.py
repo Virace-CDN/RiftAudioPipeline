@@ -53,7 +53,7 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
     def _fake_download(self, remote_path: str, local_path: Path) -> dict[str, object]:
         downloaded.append((remote_path, local_path))
         local_path.write_text(
-            '{"entries":[{"remote_path":"/apps/test/database.json"}]}', encoding="utf-8"
+            '{"entries":[{"remote_path":"/apps/test-meta/database.json"}]}', encoding="utf-8"
         )
         return {}
 
@@ -65,18 +65,18 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
         result = initialize_runtime(
             run_id="12345",
             runtime_dir=tmp_path / "runtime",
-            baidu_remote_root="/apps/test",
+            meta_remote_root="/apps/test-meta",
             plane_config=ControlPlaneConfig(base_url=server.base_url),
         )
     finally:
         server.close()
 
     assert server.baidu_token_requests == [{}]
-    assert downloaded == [("/apps/test/database.json", result.database_file)]
+    assert downloaded == [("/apps/test-meta/database.json", result.database_file)]
     assert result.token_payload["access_token"] == "plane-access-token"
     assert (
         json.loads(result.database_file.read_text(encoding="utf-8"))["entries"][0]["remote_path"]
-        == "/apps/test/database.json"
+        == "/apps/test-meta/database.json"
     )
     assert result.state_db_file.exists()
     with sqlite3.connect(result.state_db_file) as connection:
@@ -89,7 +89,7 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
             ("12345",),
         ).fetchone()
     assert len(imported_entries) == 1
-    assert imported_entries[0][1] == "/apps/test/database.json"
+    assert imported_entries[0][1] == "/apps/test-meta/database.json"
     assert run_control == (1, "open")
 
 
@@ -121,7 +121,7 @@ def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
         result = initialize_runtime(
             run_id="manual-run",
             runtime_dir=tmp_path / "runtime",
-            baidu_remote_root="/apps/test",
+            meta_remote_root="/apps/test-meta",
             plane_config=ControlPlaneConfig(base_url=server.base_url),
             provided_baidu_token_payload={
                 "access_token": "manual-access-token",
@@ -131,7 +131,7 @@ def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
         server.close()
 
     assert server.baidu_token_requests == []
-    assert downloaded == [("/apps/test/database.json", result.database_file)]
+    assert downloaded == [("/apps/test-meta/database.json", result.database_file)]
     assert result.token_payload == {
         "access_token": "manual-access-token",
     }
@@ -146,7 +146,7 @@ def test_initialize_runtime_should_require_plane_or_dispatch_baidu_token(
         initialize_runtime(
             run_id="manual-run",
             runtime_dir=tmp_path / "runtime",
-            baidu_remote_root="/apps/test",
+            meta_remote_root="/apps/test-meta",
             plane_config=None,
         )
 
@@ -195,7 +195,8 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
         output_root=Path("output"),
         temp_root=Path("temp"),
         log_root=Path("output/logs"),
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
         relay_socket_path=Path("/tmp/rift-audio-pipeline/99887766.sock"),
         state_db_path=Path("runtime/99887766/state.sqlite3"),
         default_mode="remote",
@@ -210,6 +211,10 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
     assert "/tmp/rift-audio-pipeline/99887766.sock" in command
     assert "--state-db-path" in command
     assert "runtime/99887766/state.sqlite3" in command
+    assert "--archive-remote-root" in command
+    assert "/apps/test-data" in command
+    assert "--meta-remote-root" in command
+    assert "/apps/test-meta" in command
     assert "--control-plane-base-url" not in command
     assert "--control-plane-bearer-token" not in command
     assert "--champion-ids" in command
@@ -233,7 +238,8 @@ def test_build_pipeline_command_should_omit_relay_socket_when_relay_disabled() -
         output_root=Path("output"),
         temp_root=Path("temp"),
         log_root=Path("output/logs"),
-        baidu_remote_root="/apps/test",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
         relay_socket_path=None,
         state_db_path=Path("runtime/manual-smoke/state.sqlite3"),
         default_mode="remote",

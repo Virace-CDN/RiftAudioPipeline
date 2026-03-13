@@ -33,7 +33,7 @@ class UploadWorkerConfig:
     run_id: str
     state_db_path: Path
     baidu_token_file: Path
-    baidu_remote_root: str
+    archive_remote_root: str
     worker_id: str
     output_root: Path | None = None
     delete_local_file_after_upload: bool = False
@@ -53,7 +53,7 @@ class UploadWorker:
             credentials=BaiduCredentials(
                 access_token=_require_str(token_payload, "access_token"),
             ),
-            remote_dir=config.baidu_remote_root,
+            remote_dir=config.archive_remote_root,
             token_store=None,
             allow_token_refresh=False,
         )
@@ -218,7 +218,7 @@ class UploadWorker:
                 receipt_path.parent.mkdir(parents=True, exist_ok=True)
                 payload = {
                     "recorded_at": _now(),
-                    "remote_root": self._config.baidu_remote_root,
+                    "remote_root": self._config.archive_remote_root,
                     "archives": [],
                 }
                 if receipt_path.exists():
@@ -275,7 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--state-db-path", type=Path, required=True)
     parser.add_argument("--baidu-token-file", type=Path, required=True)
-    parser.add_argument("--baidu-remote-root", required=True)
+    parser.add_argument("--archive-remote-root", required=True)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--worker-id")
     parser.add_argument(
@@ -293,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id,
             state_db_path=args.state_db_path,
             baidu_token_file=args.baidu_token_file,
-            baidu_remote_root=args.baidu_remote_root,
+            archive_remote_root=args.archive_remote_root,
             worker_id=args.worker_id or f"upload-worker-{uuid.uuid4().hex[:8]}",
             output_root=args.output_root,
             delete_local_file_after_upload=args.delete_local_file_after_upload,
