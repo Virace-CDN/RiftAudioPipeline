@@ -230,6 +230,28 @@ class BaiduPanClient:
             operation="xpanfilecreate(isdir=1)",
         )
 
+    def ensure_directory(self, dir_path: str) -> str:
+        """确保目录存在，不存在时递归创建。"""
+
+        normalized_dir = self._resolve_workdir_path(
+            dir_path,
+            operation="ensure_directory",
+            path_role="dir",
+        )
+        if normalized_dir in {"/", self._remote_dir}:
+            return normalized_dir
+        try:
+            entry = self.get_path_entry(normalized_dir)
+        except FileNotFoundError:
+            parent_dir = str(PurePosixPath(normalized_dir).parent)
+            if parent_dir and parent_dir != normalized_dir:
+                self.ensure_directory(parent_dir)
+            self.create_directory(normalized_dir)
+            return normalized_dir
+        if int(entry.get("isdir", 0)) != 1:
+            raise NotADirectoryError(f"网盘路径已存在但不是目录：{normalized_dir}")
+        return normalized_dir
+
     def rename_path(
         self, source_path: str, new_name: str, ondup: str = "newcopy"
     ) -> dict[str, Any]:
@@ -338,6 +360,7 @@ class BaiduPanClient:
             operation="xpanfilecreate(isdir=0)",
             path_role="remote_path",
         )
+        self.ensure_directory(str(PurePosixPath(normalized_remote_path).parent))
         file_size = local_path.stat().st_size
         block_md5s = _calculate_block_md5s(local_path)
         block_list_json = json.dumps(block_md5s, ensure_ascii=False)
@@ -519,6 +542,7 @@ class BaiduPanClient:
             operation="download",
             path_role="remote_path",
         )
+        self.ensure_directory(str(PurePosixPath(normalized_path).parent))
         version_info = self.get_file_version_info(remote_path=normalized_path)
         access_token = self._ensure_access_token()
         local_path.parent.mkdir(parents=True, exist_ok=True)

@@ -14,7 +14,9 @@ from rift_audio_pipeline.baidu.pan import BaiduPanClient
 from rift_audio_pipeline.simulation import BAIDU_FAILURE_MODE_ENV_VAR
 from rift_audio_pipeline.simulation import MOCK_BAIDU_ENV_VAR
 from rift_audio_pipeline.simulation import SIMULATION_ENV_VAR
-from rift_audio_pipeline.control_plane.state_db import build_database_entries_for_export
+from rift_audio_pipeline.control_plane.state_db import DatabaseArchiveMove
+from rift_audio_pipeline.control_plane.state_db import DatabaseExportPlan
+from rift_audio_pipeline.control_plane.state_db import build_database_export_plan
 from rift_audio_pipeline.control_plane.state_db import build_report_changes
 from rift_audio_pipeline.control_plane.state_db import get_upload_phase_status
 from rift_audio_pipeline.control_plane.state_db import mark_upload_phase_finalized
@@ -27,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--state-db-path", type=Path, required=True)
     parser.add_argument("--baidu-token-file", type=Path, required=True)
+    parser.add_argument("--archive-remote-root", required=True)
     parser.add_argument("--meta-remote-root", required=True)
     parser.add_argument("--database-file", type=Path, required=True)
     parser.add_argument("--log-root", type=Path)
@@ -48,7 +51,15 @@ def main(argv: list[str] | None = None) -> int:
     token_payload = json.loads(args.baidu_token_file.read_text(encoding="utf-8"))
     if not isinstance(token_payload, dict):
         raise ValueError(f"baidu token 文件顶层必须是对象：{args.baidu_token_file}")
-    client = BaiduPanClient(
+    archive_client = BaiduPanClient(
+        credentials=BaiduCredentials(
+            access_token=_require_str(token_payload, "access_token"),
+        ),
+        remote_dir=args.archive_remote_root,
+        token_store=None,
+        allow_token_refresh=False,
+    )
+    meta_client = BaiduPanClient(
         credentials=BaiduCredentials(
             access_token=_require_str(token_payload, "access_token"),
         ),
@@ -57,9 +68,20 @@ def main(argv: list[str] | None = None) -> int:
         allow_token_refresh=False,
     )
     try:
-        payload = build_database_payload(
-            state_db_path=args.state_db_path,
+        export_plan = build_database_export_plan(
+            database_path=args.state_db_path,
             run_id=args.run_id,
+        )
+        if os.getenv(SIMULATION_ENV_VAR) != "1" and os.getenv(MOCK_BAIDU_ENV_VAR) != "1":
+            move_archived_artifacts(
+                client=archive_client,
+                archive_remote_root=args.archive_remote_root,
+                archive_moves=export_plan.archive_moves,
+            )
+        payload = build_database_payload(
+            archive_remote_root=args.archive_remote_root,
+            meta_remote_root=args.meta_remote_root,
+            export_plan=export_plan,
         )
         args.database_file.parent.mkdir(parents=True, exist_ok=True)
         args.database_file.write_text(
@@ -93,13 +115,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
         else:
             rotate_and_upload_database(
-                client=client,
+                client=meta_client,
                 remote_root=args.meta_remote_root,
                 database_file=args.database_file,
                 history_limit=args.history_limit,
             )
     finally:
-        client.close()
+        archive_client.close()
+        meta_client.close()
     if args.relay_state_file is not None and args.relay_socket_path is not None:
         relay_client = LogRelayClient(
             run_id=args.run_id,
@@ -150,15 +173,17 @@ def wait_until_drained(
 
 def build_database_payload(
     *,
-    state_db_path: Path,
-    run_id: str,
+    archive_remote_root: str,
+    meta_remote_root: str,
+    export_plan: DatabaseExportPlan,
 ) -> dict[str, object]:
-    entries = build_database_entries_for_export(database_path=state_db_path, run_id=run_id)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "updated_at": datetime.now().astimezone().isoformat(),
-        "entry_count": len(entries),
-        "entries": entries,
+        "archive_remote_root": _normalize_remote_root(archive_remote_root),
+        "meta_remote_root": _normalize_remote_root(meta_remote_root),
+        "entry_count": len(export_plan.entries),
+        "entries": export_plan.entries,
     }
 
 
@@ -183,7 +208,7 @@ def rotate_and_upload_database(
     database_file: Path,
     history_limit: int,
 ) -> None:
-    listing = client.list_files("")
+    listing = _list_database_directory(client)
     remote_entries = listing.get("list")
     if not isinstance(remote_entries, list):
         remote_entries = []
@@ -212,6 +237,28 @@ def rotate_and_upload_database(
         client.delete_paths(history_paths[history_limit:])
 
 
+def move_archived_artifacts(
+    *,
+    client: BaiduPanClient,
+    archive_remote_root: str,
+    archive_moves: tuple[DatabaseArchiveMove, ...],
+) -> None:
+    archive_root = archive_remote_root.rstrip("/")
+    for item in archive_moves:
+        destination_dir = f"{archive_root}/_old_versions/{item.target_group}"
+        client.ensure_directory(destination_dir)
+        client.move_path(
+            source_path=item.remote_path,
+            destination_dir=destination_dir,
+            new_name=item.remote_name,
+        )
+
+
+def _list_database_directory(client: BaiduPanClient) -> dict[str, object]:
+    client.ensure_directory("")
+    return client.list_files("")
+
+
 def _require_str(payload: dict[str, object], field_name: str) -> str:
     value = payload.get(field_name)
     if not isinstance(value, str) or not value.strip():
@@ -224,6 +271,13 @@ def _find_run_log_dir(log_root: Path, run_id: str) -> Path:
     if not candidates:
         raise FileNotFoundError(f"未找到 run_id 对应日志目录：{run_id}")
     return candidates[0]
+
+
+def _normalize_remote_root(remote_root: str) -> str:
+    stripped = remote_root.rstrip("/")
+    if not stripped:
+        return "/"
+    return f"{stripped}/"
 
 
 if __name__ == "__main__":

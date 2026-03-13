@@ -351,6 +351,8 @@ def run_finalize_worker(
         str(init_result.state_db_file),
         "--baidu-token-file",
         str(init_result.baidu_token_file),
+        "--archive-remote-root",
+        plan.archive_remote_root,
         "--meta-remote-root",
         plan.meta_remote_root,
         "--database-file",

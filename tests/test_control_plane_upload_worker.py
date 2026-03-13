@@ -23,7 +23,14 @@ def test_upload_worker_should_drain_queue_and_record_file_fact(
     bootstrap_state_database(
         database_path=state_db_path,
         run_id="run-1",
-        remote_database_payload={},
+        remote_database_payload={
+            "schema_version": 2,
+            "updated_at": "2026-03-14T00:00:00+08:00",
+            "archive_remote_root": "/apps/test/",
+            "meta_remote_root": "/apps/test-meta/",
+            "entry_count": 0,
+            "entries": {},
+        },
     )
     audio_dir = tmp_path / "output" / "audios" / "16.5" / "1·annie·黑暗之女·安妮"
     audio_dir.mkdir(parents=True, exist_ok=True)

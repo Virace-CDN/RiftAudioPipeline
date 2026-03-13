@@ -441,6 +441,20 @@ def test_create_directory_should_block_path_traversal(monkeypatch: pytest.Monkey
         client.create_directory("../escape-dir")
 
 
+def test_ensure_directory_should_create_missing_nested_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """递归确保目录时，应逐级创建缺失的父目录。"""
+
+    client, runtime = _build_client(monkeypatch)
+
+    normalized = client.ensure_directory("history/champions")
+
+    assert normalized == "/apps/rift-audio-pipeline/history/champions"
+    assert [call["path"] for call in runtime.fileupload_api.create_calls[-2:]] == [
+        "/apps/rift-audio-pipeline/history",
+        "/apps/rift-audio-pipeline/history/champions",
+    ]
+
+
 def test_move_path_should_warn_when_destination_outside_work_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -79,13 +79,31 @@ def run_mock_control_plane_smoke(config: MockSmokeConfig) -> MockSmokeResult:
             encoding="utf-8",
         )
         (runtime_root / "database.json").write_text(
-            json.dumps({"schema_version": 1, "entry_count": 0, "entries": []}, ensure_ascii=False, indent=2),
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "updated_at": datetime.now().astimezone().isoformat(),
+                    "archive_remote_root": f"{config.archive_remote_root.rstrip('/')}/",
+                    "meta_remote_root": f"{config.meta_remote_root.rstrip('/')}/",
+                    "entry_count": 0,
+                    "entries": {},
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding="utf-8",
         )
         state_db_result = bootstrap_state_database(
             database_path=runtime_root / "state.sqlite3",
             run_id=run_id,
-            remote_database_payload={"schema_version": 1, "entry_count": 0, "entries": []},
+            remote_database_payload={
+                "schema_version": 2,
+                "updated_at": datetime.now().astimezone().isoformat(),
+                "archive_remote_root": f"{config.archive_remote_root.rstrip('/')}/",
+                "meta_remote_root": f"{config.meta_remote_root.rstrip('/')}/",
+                "entry_count": 0,
+                "entries": {},
+            },
         )
         runtime_config = PipelineRunConfig(
             mode=PipelineMode.REMOTE,

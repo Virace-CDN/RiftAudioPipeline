@@ -35,6 +35,7 @@ def initialize_runtime(
     *,
     run_id: str,
     runtime_dir: Path,
+    archive_remote_root: str,
     meta_remote_root: str,
     plane_config: ControlPlaneConfig | None,
     provided_baidu_token_payload: dict[str, object] | None = None,
@@ -44,6 +45,7 @@ def initialize_runtime(
     Args:
         run_id: 当前运行 ID。
         runtime_dir: 当前运行的本地工作目录。
+        archive_remote_root: 百度远端产物根目录。
         meta_remote_root: 百度远端数据库与日志根目录。
         plane_config: control plane 访问配置；仅在需要向 plane 拉百度凭据时使用。
         provided_baidu_token_payload: dispatch payload 中显式提供的百度 access token。
@@ -69,6 +71,7 @@ def initialize_runtime(
     database_file = runtime_dir / "database.json"
     _download_or_initialize_database(
         token_payload=token_payload,
+        archive_remote_root=archive_remote_root,
         meta_remote_root=meta_remote_root,
         database_file=database_file,
     )
@@ -97,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="初始化 GitHub Actions 运行前上下文。")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--runtime-dir", type=Path, required=True)
+    parser.add_argument("--archive-remote-root", required=True)
     parser.add_argument("--meta-remote-root", required=True)
     parser.add_argument("--plane-base-url", required=True)
     parser.add_argument("--plane-bearer-token")
@@ -113,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     result = initialize_runtime(
         run_id=args.run_id,
         runtime_dir=args.runtime_dir,
+        archive_remote_root=args.archive_remote_root,
         meta_remote_root=args.meta_remote_root,
         plane_config=ControlPlaneConfig(
             base_url=args.plane_base_url,
@@ -178,17 +183,17 @@ def _validate_baidu_token_payload(payload: dict[str, object], *, source_label: s
 def _download_or_initialize_database(
     *,
     token_payload: dict[str, object],
+    archive_remote_root: str,
     meta_remote_root: str,
     database_file: Path,
 ) -> None:
     if os.getenv(SIMULATION_ENV_VAR) == "1" or os.getenv(MOCK_BAIDU_ENV_VAR) == "1":
         database_file.write_text(
             json.dumps(
-                {
-                    "schema_version": 1,
-                    "updated_at": datetime.now().astimezone().isoformat(),
-                    "entries": [],
-                },
+                _build_empty_database_payload(
+                    archive_remote_root=archive_remote_root,
+                    meta_remote_root=meta_remote_root,
+                ),
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -205,15 +210,15 @@ def _download_or_initialize_database(
     )
     remote_database_path = f"{meta_remote_root.rstrip('/')}/database.json"
     try:
+        client.ensure_directory("")
         client.download_file(remote_database_path, database_file)
     except FileNotFoundError:
         database_file.write_text(
             json.dumps(
-                {
-                    "schema_version": 1,
-                    "updated_at": datetime.now().astimezone().isoformat(),
-                    "entries": [],
-                },
+                _build_empty_database_payload(
+                    archive_remote_root=archive_remote_root,
+                    meta_remote_root=meta_remote_root,
+                ),
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -221,6 +226,28 @@ def _download_or_initialize_database(
         )
     finally:
         client.close()
+
+
+def _build_empty_database_payload(
+    *,
+    archive_remote_root: str,
+    meta_remote_root: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "updated_at": datetime.now().astimezone().isoformat(),
+        "archive_remote_root": _normalize_remote_root(archive_remote_root),
+        "meta_remote_root": _normalize_remote_root(meta_remote_root),
+        "entry_count": 0,
+        "entries": {},
+    }
+
+
+def _normalize_remote_root(remote_root: str) -> str:
+    stripped = remote_root.rstrip("/")
+    if not stripped:
+        return "/"
+    return f"{stripped}/"
 
 
 if __name__ == "__main__":

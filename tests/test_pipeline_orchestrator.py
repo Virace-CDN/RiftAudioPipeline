@@ -38,7 +38,14 @@ def _build_remote_config(tmp_path: Path) -> PipelineRunConfig:
     bootstrap_state_database(
         database_path=state_db_path,
         run_id="run-test",
-        remote_database_payload={"entries": []},
+        remote_database_payload={
+            "schema_version": 2,
+            "updated_at": "2026-03-14T00:00:00+08:00",
+            "archive_remote_root": "/apps/test-data/",
+            "meta_remote_root": "/apps/test-meta/",
+            "entry_count": 0,
+            "entries": {},
+        },
     )
     return config
 

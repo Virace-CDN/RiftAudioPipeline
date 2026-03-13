@@ -1,164 +1,149 @@
 # RiftAudioPipeline
 
-当前仓库已经具备 GitHub Actions `workflow_dispatch -> job_runner -> runtime_init -> pipeline-main -> upload_worker -> finalize_worker` 的主路径。手动触发 workflow 时，`inputs.payload` 必须是一个 JSON 字符串；Python 侧会再把它解析为结构化对象。
+`RiftAudioPipeline` 是一个围绕《英雄联盟》音频资源处理的 Python 项目。当前仓库已经具备一条可落地的远端执行主线：
 
-更细的协议说明见 `docs/control_plane/faker_github_api.md`，本页只保留直接可用的变量、命令和手动调用方式。
+`workflow_dispatch -> job_runner -> runtime_init -> pipeline-main -> upload_worker -> finalize_worker`
+
+这条主线同时覆盖两种运行模式：
+
+- 带 control plane 的完整 relay 模式
+- 不带 control plane 的纯 pipeline smoke 模式
+
+当前稳定事实是：
+
+- workflow 手动触发时，`inputs.payload` 必须是 JSON 字符串
+- 执行线程当前只要求百度 `access_token`
+- runtime 初始化、上传、收尾、`database.json` 重建、历史文件迁移都已经在 Python 侧闭环
+- `database.json` 当前按 v2 结构导出，不再默认兼容旧 schema
+
+## 仓库结构
+
+| 路径 | 作用 |
+| --- | --- |
+| `src/rift_audio_pipeline/baidu/` | 百度 OAuth、网盘 API 适配层 |
+| `src/rift_audio_pipeline/control_plane/` | workflow dispatch、runtime init、job runner、relay、upload、finalize |
+| `src/rift_audio_pipeline/pipeline/` | 核心 pipeline CLI、实体处理、打包与日志输出 |
+| `src/rift_localdev/` | 本地联调工具，包括 fake GitHub、mock plane、mock smoke、e2e harness |
+| `docs/control_plane/` | control plane / runtime worker / v2 数据库与网盘布局文档 |
+| `docs/pipeline/` | pipeline 模块边界与真实数据测试文档 |
+| `tests/` | 单测与本地回归测试 |
+| `temp/` | 临时设计稿与草案，不作为正式文档入口 |
+
+## 当前脚本入口
+
+`pyproject.toml` 当前公开这些入口：
+
+- `rift-baidu-oauth`
+- `rift-audio-pipeline`
+- `rift-faker-github`
+- `rift-control-plane-init`
+- `rift-control-plane-job`
+- `rift-control-plane-log-worker`
+- `rift-control-plane-upload-worker`
+- `rift-control-plane-finalize-worker`
+- `rift-mock-control-plane`
+- `rift-mock-smoke`
+- `rift-control-plane-e2e`
+
+## 运行主线
+
+### 1. workflow dispatch
+
+- 入口：`rift_audio_pipeline.control_plane.workflow_dispatch`
+- 责任：解析 `inputs.payload`，把结构化 payload 翻译成 `job_runner` 命令
+- 文档：`docs/control_plane/faker_github_api.md`
+
+### 2. runtime init
+
+- 入口：`rift_audio_pipeline.control_plane.runtime_init`
+- 责任：
+  - 获取百度 `access_token`
+  - 下载或初始化 v2 `database.json`
+  - 初始化 `state.sqlite3`
+  - 在下载前先确保远端 `meta_remote_root` 目录存在
+
+### 3. pipeline-main
+
+- 入口：`rift_audio_pipeline.pipeline.cli`
+- 责任：
+  - 解析 manifests / targets
+  - 执行下载、提取、比对与打包准备
+  - 生成 upload task 和日志产物
+
+### 4. upload worker
+
+- 入口：`rift_audio_pipeline.control_plane.upload_worker`
+- 责任：
+  - 消费 `state.sqlite3` 中的上传任务
+  - 打包 archive 并上传到 `archive_remote_root`
+  - 上传前先确保远端父目录存在
+  - 成功后写入 `new_file_facts`
+
+### 5. finalize worker
+
+- 入口：`rift_audio_pipeline.control_plane.finalize_worker`
+- 责任：
+  - 等待 upload phase drained
+  - 基于 `remote_database_entries + new_file_facts` 生成 v2 `database.json`
+  - 当本轮新 `ALL` 覆盖旧单类型时，把旧 `VO / SFX / MUSIC` 移到 `_old_versions/`
+  - 上传并轮转 `meta_remote_root/database.json`
+  - 在创建、列目录、移动前先确保目标远端目录存在
+
+## `database.json` v2
+
+当前正式数据库与网盘布局说明见：
+
+- `docs/control_plane/database_v2_and_netdisk_layout.md`
+
+关键规则摘要：
+
+- active archive 统一放在 `archive_remote_root/{champions,maps}/`
+- `database.json`、日志、收据、轮转快照统一放在 `meta_remote_root/`
+- 新 `ALL` 出现时，只迁移同实体、版本更低的旧 `VO / SFX / MUSIC`
+- 旧 `ALL` 之后出现更新版本的单类型时，两者都保留 active
+- `_old_versions/` 只作为历史归档目录，不再计入 active `database.json`
 
 ## GitHub Actions 变量
 
-`/.github/workflows/pipeline.yml` 当前会读取以下 GitHub Actions variables / secrets：
+`/.github/workflows/pipeline.yml` 当前依赖这些 Actions variables / secrets：
 
 | 名称 | 类型 | 是否当前必需 | 作用 |
 | --- | --- | --- | --- |
-| `RIFT_CONTROL_PLANE_BASE_URL` | Actions variable | 条件必需 | 提供后启用完整 control-plane relay；留空则进入纯 pipeline smoke 模式 |
+| `RIFT_CONTROL_PLANE_BASE_URL` | Actions variable | 条件必需 | 提供后启用完整 relay；留空则进入纯 pipeline smoke |
 | `RIFT_CONTROL_PLANE_BEARER_TOKEN` | Actions secret | 否 | plane Bearer token |
 | `RIFT_CONTROL_PLANE_ACCESS_CLIENT_ID` | Actions secret | 否 | Cloudflare Access client id |
 | `RIFT_CONTROL_PLANE_ACCESS_CLIENT_SECRET` | Actions secret | 否 | Cloudflare Access client secret |
 
-说明：
+补充说明：
 
-- 若提供 `RIFT_CONTROL_PLANE_BASE_URL`，workflow 会启用完整 relay，并继续向 plane 发送 `bootstrap / heartbeat / logs / report`。
-- 若留空 `RIFT_CONTROL_PLANE_BASE_URL`，`job_runner` 会跳过 relay，只跑 `runtime_init + pipeline-main + upload_worker + finalize_worker` 的纯 pipeline 主线。
-- 当 relay 关闭时，必须在 `inputs.payload.baidu` 中显式提供 `access_token`，否则 `runtime_init` 无法访问百度网盘固定工作目录。
+- relay 关闭时，必须在 `inputs.payload.baidu` 中显式提供 `access_token`
+- 若提供 plane base URL 且未提供 `baidu`，`runtime_init` 会请求 `GET /api/baidu/token`
 
-## 手动触发用法
+## 阅读顺序
 
-### GitHub UI
+如果你是第一次接手当前仓库，推荐顺序：
 
-1. 打开 `Actions -> Pipeline Dispatch -> Run workflow`。
-2. `payload` 输入框里填入一个 JSON 字符串，而不是 JSON object。
-3. 若只想绕过 plane 的百度凭据接口，可在这个字符串里带上 `baidu.access_token`。
-
-### GitHub CLI
-
-先在本地生成 `payload` 字符串：
-
-```bash
-payload="$(
-  jq -cn \
-    --arg current_version "16.5.7519084" \
-    --arg current_lcu "https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest" \
-    --arg current_game "https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest" \
-    --arg previous_version "16.4.7423123" \
-    --arg previous_lcu "https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest" \
-    --arg previous_game "https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest" \
-    --arg baidu_access_token "$BAIDU_ACCESS_TOKEN" \
-    '{
-      schema_version: "2026-03-12",
-      request: {
-        mode: "remote",
-        stage: "extract"
-      },
-      game: {
-        region: "oc1"
-      },
-      manifests: {
-        current: {
-          version: $current_version,
-          lcu_url: $current_lcu,
-          game_url: $current_game
-        },
-        previous: {
-          version: $previous_version,
-          lcu_url: $previous_lcu,
-          game_url: $previous_game
-        }
-      },
-      targets: {
-        champions: {
-          ids: [266, 103]
-        },
-        maps: {
-          ids: [11]
-        }
-      },
-      baidu: {
-        access_token: $baidu_access_token
-      },
-      execution: {
-        force_update: false,
-        max_workers: 8,
-        download_retry_attempts: 5,
-        entity_retry_attempts: 2,
-        log_level: "INFO"
-      },
-      metadata: {
-        requested_by: "manual-gh"
-      }
-    }'
-)"
-```
-
-然后触发 workflow：
-
-```bash
-gh workflow run pipeline.yml --ref main -f payload="$payload"
-```
-
-不要把完整 object 直接贴到 GitHub CLI / UI 的 `payload` 字段里；这个字段本身要求的是字符串。最稳的做法就是先用 `jq -cn` 生成一整个 JSON 字符串，再作为 `-f payload=...` 传入。
-
-## `inputs.payload` 完整 schema
-
-当前支持的结构如下：
-
-```json
-{
-  "schema_version": "2026-03-12",
-  "request": {
-    "mode": "remote",
-    "stage": "update"
-  },
-  "game": {
-    "region": "oc1"
-  },
-  "manifests": {
-    "current": {
-      "version": "16.5.7519084",
-      "lcu_url": "https://example/current-lcu.manifest",
-      "game_url": "https://example/current-game.manifest"
-    },
-    "previous": {
-      "version": "16.4.7423123",
-      "lcu_url": "https://example/previous-lcu.manifest",
-      "game_url": "https://example/previous-game.manifest"
-    }
-  },
-  "targets": {
-    "champions": {
-      "ids": [266, 103]
-    },
-    "maps": {
-      "ids": [11, 12]
-    }
-  },
-  "baidu": {
-    "access_token": "manual-access-token"
-  },
-  "execution": {
-    "force_update": false,
-    "max_workers": 8,
-    "download_retry_attempts": 5,
-    "entity_retry_attempts": 2,
-    "log_level": "INFO",
-    "archive_password": "optional-archive-password"
-  },
-  "metadata": {
-    "requested_by": "manual-gh"
-  }
-}
-```
-
-字段说明：
-
-- `request.stage` 当前只支持 `update` / `extract` / `mapping`。
-- `targets.*.ids` 支持 JSON 数组，也支持逗号分隔字符串。
-- `baidu` 整体可选；若提供，当前执行线程只要求 `access_token` 为非空字符串。
-- 若不提供 `baidu`，`runtime_init` 会回退到 plane `GET /api/baidu/token`。
-- `schema_version` 目前主要用于日志与收据，不直接影响 CLI 参数。
+1. `docs/README.md`
+2. `docs/control_plane/README.md`
+3. `docs/control_plane/faker_github_api.md`
+4. `docs/control_plane/database_v2_and_netdisk_layout.md`
+5. `docs/control_plane/plane_required_interfaces_current.md`
+6. `docs/pipeline/README.md`
 
 ## 本地验证
 
-这次变更相关的最小验证命令：
+当前高价值的最小验证命令：
+
+```bash
+uv run pytest tests/test_baidu_pan.py \
+  tests/test_control_plane_state_db.py \
+  tests/test_control_plane_finalize_worker.py \
+  tests/test_control_plane_upload_worker.py \
+  tests/test_control_plane_job_runner.py \
+  tests/test_pipeline_orchestrator.py -q
+```
+
+如果只验证 workflow dispatch / inputs 协议：
 
 ```bash
 uv run pytest tests/test_faker_github.py tests/test_github_actions_workflow.py tests/test_control_plane_job_runner.py -q

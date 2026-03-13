@@ -53,7 +53,34 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
     def _fake_download(self, remote_path: str, local_path: Path) -> dict[str, object]:
         downloaded.append((remote_path, local_path))
         local_path.write_text(
-            '{"entries":[{"remote_path":"/apps/test-meta/database.json"}]}', encoding="utf-8"
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "updated_at": "2026-03-14T00:00:00+08:00",
+                    "archive_remote_root": "/apps/test-data/",
+                    "meta_remote_root": "/apps/test-meta/",
+                    "entry_count": 1,
+                    "entries": {
+                        "11·sr·召唤师峡谷": {
+                            "id": 11,
+                            "alias": None,
+                            "artifacts": [
+                                {
+                                    "type": "ALL",
+                                    "version": "16.5",
+                                    "remote_path": "/apps/test-meta/database.json",
+                                    "remote_name": "11·sr·召唤师峡谷-16.5-ALL.7z",
+                                    "sha256": "db-hash",
+                                    "packaged_at": "2026-03-14T00:00:00+08:00",
+                                    "uploaded_at": "2026-03-14T00:00:00+08:00",
+                                }
+                            ],
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
         )
         return {}
 
@@ -65,6 +92,7 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
         result = initialize_runtime(
             run_id="12345",
             runtime_dir=tmp_path / "runtime",
+            archive_remote_root="/apps/test-data",
             meta_remote_root="/apps/test-meta",
             plane_config=ControlPlaneConfig(base_url=server.base_url),
         )
@@ -75,7 +103,7 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
     assert downloaded == [("/apps/test-meta/database.json", result.database_file)]
     assert result.token_payload["access_token"] == "plane-access-token"
     assert (
-        json.loads(result.database_file.read_text(encoding="utf-8"))["entries"][0]["remote_path"]
+        json.loads(result.database_file.read_text(encoding="utf-8"))["entries"]["11·sr·召唤师峡谷"]["artifacts"][0]["remote_path"]
         == "/apps/test-meta/database.json"
     )
     assert result.state_db_file.exists()
@@ -110,7 +138,20 @@ def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
 
     def _fake_download(self, remote_path: str, local_path: Path) -> dict[str, object]:
         downloaded.append((remote_path, local_path))
-        local_path.write_text('{"entries":[]}', encoding="utf-8")
+        local_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "updated_at": "2026-03-14T00:00:00+08:00",
+                    "archive_remote_root": "/apps/test-data/",
+                    "meta_remote_root": "/apps/test-meta/",
+                    "entry_count": 0,
+                    "entries": {},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         return {}
 
     monkeypatch.setattr(
@@ -121,6 +162,7 @@ def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
         result = initialize_runtime(
             run_id="manual-run",
             runtime_dir=tmp_path / "runtime",
+            archive_remote_root="/apps/test-data",
             meta_remote_root="/apps/test-meta",
             plane_config=ControlPlaneConfig(base_url=server.base_url),
             provided_baidu_token_payload={
@@ -146,6 +188,7 @@ def test_initialize_runtime_should_require_plane_or_dispatch_baidu_token(
         initialize_runtime(
             run_id="manual-run",
             runtime_dir=tmp_path / "runtime",
+            archive_remote_root="/apps/test-data",
             meta_remote_root="/apps/test-meta",
             plane_config=None,
         )

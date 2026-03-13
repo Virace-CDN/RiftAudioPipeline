@@ -70,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     init_result = initialize_runtime(
         run_id=plan.run_id,
         runtime_dir=plan.runtime_root,
+        archive_remote_root=plan.archive_remote_root,
         meta_remote_root=plan.meta_remote_root,
         plane_config=control_plane_config,
         provided_baidu_token_payload=_build_baidu_token_payload(payload),
