@@ -88,6 +88,10 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
         "rift_audio_pipeline.control_plane.runtime_init.BaiduPanClient.download_file",
         _fake_download,
     )
+    monkeypatch.setattr(
+        "rift_audio_pipeline.control_plane.runtime_init.BaiduPanClient.ensure_directory",
+        lambda self, dir_path: self.remote_dir if dir_path == "" else dir_path,
+    )
     try:
         result = initialize_runtime(
             run_id="12345",
@@ -157,6 +161,10 @@ def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(
     monkeypatch.setattr(
         "rift_audio_pipeline.control_plane.runtime_init.BaiduPanClient.download_file",
         _fake_download,
+    )
+    monkeypatch.setattr(
+        "rift_audio_pipeline.control_plane.runtime_init.BaiduPanClient.ensure_directory",
+        lambda self, dir_path: self.remote_dir if dir_path == "" else dir_path,
     )
     try:
         result = initialize_runtime(

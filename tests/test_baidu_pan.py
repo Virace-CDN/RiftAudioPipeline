@@ -455,6 +455,27 @@ def test_ensure_directory_should_create_missing_nested_dir(monkeypatch: pytest.M
     ]
 
 
+def test_ensure_directory_should_create_missing_work_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """工作目录本身缺失时，也应先创建工作目录。"""
+
+    client, runtime = _build_client(monkeypatch)
+    list_calls = {"count": 0}
+
+    def _missing_root(dir_path: str, limit: int = 1000, start: int = 0):
+        del limit, start
+        assert dir_path == ""
+        list_calls["count"] += 1
+        raise BaiduPanApiError("missing dir", errno=-9)
+
+    monkeypatch.setattr(client, "list_files", _missing_root)
+
+    normalized = client.ensure_directory("")
+
+    assert normalized == "/apps/rift-audio-pipeline"
+    assert list_calls["count"] == 1
+    assert runtime.fileupload_api.create_calls[-1]["path"] == "/apps/rift-audio-pipeline"
+
+
 def test_move_path_should_warn_when_destination_outside_work_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

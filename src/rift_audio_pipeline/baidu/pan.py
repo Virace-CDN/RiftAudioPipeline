@@ -238,14 +238,23 @@ class BaiduPanClient:
             operation="ensure_directory",
             path_role="dir",
         )
-        if normalized_dir in {"/", self._remote_dir}:
+        if normalized_dir == "/":
+            return normalized_dir
+        if normalized_dir == self._remote_dir:
+            try:
+                self.list_files("")
+            except BaiduPanApiError as error:
+                if error.errno != -9:
+                    raise
+                self.create_directory(normalized_dir)
             return normalized_dir
         try:
             entry = self.get_path_entry(normalized_dir)
         except FileNotFoundError:
-            parent_dir = str(PurePosixPath(normalized_dir).parent)
-            if parent_dir and parent_dir != normalized_dir:
-                self.ensure_directory(parent_dir)
+            if normalized_dir != self._remote_dir:
+                parent_dir = str(PurePosixPath(normalized_dir).parent)
+                if parent_dir and parent_dir != normalized_dir:
+                    self.ensure_directory(parent_dir)
             self.create_directory(normalized_dir)
             return normalized_dir
         if int(entry.get("isdir", 0)) != 1:
