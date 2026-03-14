@@ -145,9 +145,12 @@ class BaiduPanClient:
 
         ensure_official_sdk_path()
         self._openapi_client = load_openapi_client_module()
-        configuration = self._openapi_client.Configuration()
-        configuration.retries = False
-        self._api_client = self._openapi_client.ApiClient(configuration=configuration)
+        self._api_client = self._openapi_client.ApiClient()
+        download_configuration = self._openapi_client.Configuration()
+        download_configuration.retries = False
+        self._download_api_client = self._openapi_client.ApiClient(
+            configuration=download_configuration
+        )
 
         fileinfo_api_module = importlib.import_module("openapi_client.api.fileinfo_api")
         filemanager_api_module = importlib.import_module("openapi_client.api.filemanager_api")
@@ -179,6 +182,7 @@ class BaiduPanClient:
         """关闭内部连接池。"""
 
         self._api_client.close()
+        self._download_api_client.close()
 
     def refresh_access_token(self) -> str:
         """刷新 access token 并返回最新值。"""
@@ -746,7 +750,7 @@ class BaiduPanClient:
         """通过官方 ApiClient.call_api 下载文件流。"""
 
         try:
-            return self._api_client.call_api(
+            return self._download_api_client.call_api(
                 resource_path="/rest/2.0/pcs/file?method=download",
                 method="GET",
                 query_params=[
@@ -788,7 +792,7 @@ class BaiduPanClient:
         """跟随百度下载接口返回的 302 Location 并继续读取文件流。"""
 
         try:
-            return self._api_client.rest_client.request(
+            return self._download_api_client.rest_client.request(
                 "GET",
                 redirect_location,
                 headers={"User-Agent": "pan.baidu.com"},

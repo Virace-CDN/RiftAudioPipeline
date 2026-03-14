@@ -65,6 +65,7 @@ class _FakeRuntime:
     """承载测试期运行态。"""
 
     api_client: Any = None
+    download_api_client: Any = None
     fileinfo_api: Any = None
     filemanager_api: Any = None
     fileupload_api: Any = None
@@ -110,7 +111,10 @@ def _build_client(
             self.download_chunks: list[bytes] = [b"mock-download-data"]
             self.call_api_failures = 0
             self.configuration = configuration
-            runtime.api_client = self
+            if runtime.api_client is None:
+                runtime.api_client = self
+            else:
+                runtime.download_api_client = self
 
         def call_api(self, **kwargs: Any) -> _FakeHttpResponse:
             """模拟 call_api 下载接口。"""
@@ -677,15 +681,15 @@ def test_download_file_should_retry_and_write_local_file(
         "errno": 0,
         "list": [{"size": 6, "md5": "ignored", "dlink": "https://example.test/download"}],
     }
-    runtime.api_client.call_api_failures = 1
-    runtime.api_client.download_chunks = [b"abc", b"def"]
+    runtime.download_api_client.call_api_failures = 1
+    runtime.download_api_client.download_chunks = [b"abc", b"def"]
 
     local_file = tmp_path / "downloaded.txt"
     payload = client.download_file(remote_path="work/download.txt", local_path=local_file)
 
     assert payload["path"] == "/apps/rift-audio-pipeline/work/download.txt"
     assert local_file.read_bytes() == b"abcdef"
-    assert len(runtime.api_client.call_api_calls) == 2
+    assert len(runtime.download_api_client.call_api_calls) == 2
 
 
 def test_download_file_should_forward_custom_timeout_settings(
@@ -714,7 +718,7 @@ def test_download_file_should_forward_custom_timeout_settings(
         "errno": 0,
         "list": [{"size": 200 * 1024, "md5": "ignored", "dlink": "https://example.test/download"}],
     }
-    runtime.api_client.download_chunks = [b"abc"]
+    runtime.download_api_client.download_chunks = [b"abc"]
 
     local_file = tmp_path / "downloaded.txt"
     client.download_file(remote_path="work/download.txt", local_path=local_file)
@@ -722,16 +726,19 @@ def test_download_file_should_forward_custom_timeout_settings(
     assert local_file.read_bytes() == b"abc"
     assert runtime.fileinfo_api.calls[-1]["_request_timeout"] == (12.5, 15.0)
     assert runtime.multimedia_api.calls[-1]["_request_timeout"] == (12.5, 15.0)
-    assert runtime.api_client.call_api_calls[0]["_request_timeout"] == (12.5, 20.0)
+    assert runtime.download_api_client.call_api_calls[0]["_request_timeout"] == (12.5, 20.0)
 
 
-def test_client_should_disable_sdk_internal_retries(monkeypatch: pytest.MonkeyPatch) -> None:
-    """客户端应关闭 urllib3 的隐式重试，避免外层重试叠加放大耗时。"""
+def test_client_should_disable_sdk_internal_retries_only_for_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """仅下载链路应关闭 urllib3 隐式重试，避免削弱共享 SDK client。"""
 
     client, runtime = _build_client(monkeypatch)
 
     assert client is not None
-    assert runtime.api_client.configuration.retries is False
+    assert runtime.api_client.configuration is None
+    assert runtime.download_api_client.configuration.retries is False
 
 
 def test_get_path_entry_should_return_work_dir_dir_entry(
@@ -767,7 +774,7 @@ def test_invoke_sdk_call_api_should_translate_sdk_exception(
     """下载底层 SDK 异常应转换为 BaiduPanApiError。"""
 
     client, runtime = _build_client(monkeypatch)
-    runtime.api_client.call_api_failures = 1
+    runtime.download_api_client.call_api_failures = 1
 
     with pytest.raises(BaiduPanApiError, match="官方 SDK 下载调用失败"):
         client._invoke_sdk_call_api(
@@ -790,17 +797,17 @@ def test_invoke_sdk_call_api_should_follow_302_redirect(
     redirect_error.headers = {
         "Location": "https://redirect.example.test/file/database.json?sign=secret-signature"
     }
-    runtime.api_client.call_api_failures = 1
-    runtime.api_client.download_chunks = [b"redirected-data"]
+    runtime.download_api_client.call_api_failures = 1
+    runtime.download_api_client.download_chunks = [b"redirected-data"]
 
-    original_call_api = runtime.api_client.call_api
+    original_call_api = runtime.download_api_client.call_api
 
     def _redirect_once(**kwargs: Any) -> _FakeHttpResponse:
-        runtime.api_client.call_api_calls.append(kwargs)
-        runtime.api_client.call_api_failures -= 1
+        runtime.download_api_client.call_api_calls.append(kwargs)
+        runtime.download_api_client.call_api_failures -= 1
         raise redirect_error
 
-    runtime.api_client.call_api = _redirect_once
+    runtime.download_api_client.call_api = _redirect_once
     try:
         response = client._invoke_sdk_call_api(
             access_token="access-token",
@@ -808,13 +815,15 @@ def test_invoke_sdk_call_api_should_follow_302_redirect(
             read_timeout=15.0,
         )
     finally:
-        runtime.api_client.call_api = original_call_api
+        runtime.download_api_client.call_api = original_call_api
 
     assert response.read(1024) == b"redirected-data"
-    assert runtime.api_client.call_api_calls[-1]["url"].startswith(
+    assert runtime.download_api_client.call_api_calls[-1]["url"].startswith(
         "https://redirect.example.test/file/database.json"
     )
-    assert runtime.api_client.call_api_calls[-1]["headers"] == {"User-Agent": "pan.baidu.com"}
+    assert runtime.download_api_client.call_api_calls[-1]["headers"] == {
+        "User-Agent": "pan.baidu.com"
+    }
 
 
 def test_extract_api_exception_message_should_redact_access_token() -> None:
