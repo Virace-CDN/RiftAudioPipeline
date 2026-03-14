@@ -38,6 +38,7 @@ from rift_audio_pipeline.control_plane.workflow_dispatch import DispatchTargetsI
 def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """初始化脚本应向 plane 拉取百度凭据并准备本地 database 与 state.sqlite3。"""
 
@@ -123,6 +124,10 @@ def test_initialize_runtime_should_fetch_baidu_token_and_prepare_database(
     assert len(imported_entries) == 1
     assert imported_entries[0][1] == "/apps/test-meta/database.json"
     assert run_control == (1, "open")
+    stdout = capsys.readouterr().out
+    assert "[runtime_init] run_id=12345 runtime_dir=" in stdout
+    assert "[runtime_init] run_id=12345 baidu_token_source=plane /api/baidu/token" in stdout
+    assert "[runtime_init] database_download_success remote_path=/apps/test-meta/database.json" in stdout
 
 
 def test_initialize_runtime_should_prefer_dispatch_baidu_token_payload(

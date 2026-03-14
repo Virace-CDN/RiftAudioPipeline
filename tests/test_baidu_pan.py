@@ -94,6 +94,7 @@ def _make_token(
 def _build_client(
     monkeypatch: pytest.MonkeyPatch,
     remote_dir: str = "/apps/rift-audio-pipeline",
+    **client_kwargs: Any,
 ) -> tuple[BaiduPanClient, _FakeRuntime]:
     """构建可离线测试的 BaiduPanClient。"""
 
@@ -102,11 +103,12 @@ def _build_client(
     class _FakeApiClient:
         """模拟官方 ApiClient。"""
 
-        def __init__(self) -> None:
+        def __init__(self, configuration: Any = None) -> None:
             self.closed = False
             self.call_api_calls: list[dict[str, Any]] = []
             self.download_chunks: list[bytes] = [b"mock-download-data"]
             self.call_api_failures = 0
+            self.configuration = configuration
             runtime.api_client = self
 
         def call_api(self, **kwargs: Any) -> _FakeHttpResponse:
@@ -334,6 +336,7 @@ def _build_client(
             extra: str,
             dlink: str,
             needmedia: int,
+            **kwargs: Any,
         ) -> dict[str, Any]:
             """模拟 filemetas 接口。"""
 
@@ -345,6 +348,7 @@ def _build_client(
                     "extra": extra,
                     "dlink": dlink,
                     "needmedia": needmedia,
+                    **kwargs,
                 }
             )
             return self.response
@@ -389,7 +393,10 @@ def _build_client(
     monkeypatch.setattr(
         pan_module,
         "load_openapi_client_module",
-        lambda: SimpleNamespace(ApiClient=_FakeApiClient),
+        lambda: SimpleNamespace(
+            ApiClient=_FakeApiClient,
+            Configuration=lambda: SimpleNamespace(retries=None),
+        ),
     )
     monkeypatch.setattr(pan_module.importlib, "import_module", _fake_import_module)
 
@@ -401,6 +408,7 @@ def _build_client(
         ),
         remote_dir=remote_dir,
         token_store=None,
+        **client_kwargs,
     )
     client._oauth_token = _make_token()
     return client, runtime
@@ -667,6 +675,52 @@ def test_download_file_should_retry_and_write_local_file(
     assert len(runtime.api_client.call_api_calls) == 2
 
 
+def test_download_file_should_forward_custom_timeout_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """下载接口应按文件大小动态计算读取超时。"""
+
+    client, runtime = _build_client(
+        monkeypatch,
+        download_connect_timeout=12.5,
+        download_read_timeout=345.0,
+        download_max_attempts=2,
+    )
+    runtime.fileinfo_api.listing_by_dir["/apps/rift-audio-pipeline/work"] = {
+        "errno": 0,
+        "list": [
+            {
+                "path": "/apps/rift-audio-pipeline/work/download.txt",
+                "isdir": 0,
+                "fs_id": 70001,
+            }
+        ],
+    }
+    runtime.multimedia_api.response = {
+        "errno": 0,
+        "list": [{"size": 200 * 1024, "md5": "ignored", "dlink": "https://example.test/download"}],
+    }
+    runtime.api_client.download_chunks = [b"abc"]
+
+    local_file = tmp_path / "downloaded.txt"
+    client.download_file(remote_path="work/download.txt", local_path=local_file)
+
+    assert local_file.read_bytes() == b"abc"
+    assert runtime.fileinfo_api.calls[-1]["_request_timeout"] == (12.5, 15.0)
+    assert runtime.multimedia_api.calls[-1]["_request_timeout"] == (12.5, 15.0)
+    assert runtime.api_client.call_api_calls[0]["_request_timeout"] == (12.5, 20.0)
+
+
+def test_client_should_disable_sdk_internal_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """客户端应关闭 urllib3 的隐式重试，避免外层重试叠加放大耗时。"""
+
+    client, runtime = _build_client(monkeypatch)
+
+    assert client is not None
+    assert runtime.api_client.configuration.retries is False
+
+
 def test_get_path_entry_should_return_work_dir_dir_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -706,7 +760,28 @@ def test_invoke_sdk_call_api_should_translate_sdk_exception(
         client._invoke_sdk_call_api(
             access_token="access-token",
             remote_path="/apps/rift-audio-pipeline/work/file.txt",
+            read_timeout=15.0,
         )
+
+
+def test_extract_api_exception_message_should_redact_access_token() -> None:
+    """异常消息中的 access_token 应被脱敏。"""
+
+    error = _FakeApiException(
+        "https://d.pcs.baidu.com/file/demo?access_token=secret-token-123&foo=bar"
+    )
+    error.reason = (
+        "HTTPSConnectionPool(host='d.pcs.baidu.com', port=443): "
+        "Max retries exceeded with url: /file/demo?access_token=secret-token-123"
+    )
+    error.body = '{"access_token":"secret-token-123","client_secret":"another-secret"}'
+
+    message = pan_module._extract_api_exception_message(error)
+
+    assert "secret-token-123" not in message
+    assert "another-secret" not in message
+    assert "access_token=<redacted>" in message
+    assert '"client_secret":"<redacted>"' in message
 
 
 def test_ensure_access_token_should_refresh_when_expired(monkeypatch: pytest.MonkeyPatch) -> None:

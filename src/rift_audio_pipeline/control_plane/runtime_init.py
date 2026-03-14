@@ -11,11 +11,18 @@ from pathlib import Path
 
 from rift_audio_pipeline.baidu.pan import BaiduCredentials
 from rift_audio_pipeline.baidu.pan import BaiduPanClient
+from rift_audio_pipeline.baidu.pan import DOWNLOAD_CONNECT_TIMEOUT
+from rift_audio_pipeline.baidu.pan import DOWNLOAD_MAX_ATTEMPTS
+from rift_audio_pipeline.baidu.pan import DOWNLOAD_READ_TIMEOUT
 from rift_audio_pipeline.control_plane.client import ControlPlaneClient
 from rift_audio_pipeline.control_plane.models import ControlPlaneConfig
 from rift_audio_pipeline.control_plane.state_db import bootstrap_state_database
 from rift_audio_pipeline.simulation import MOCK_BAIDU_ENV_VAR
 from rift_audio_pipeline.simulation import SIMULATION_ENV_VAR
+
+DOWNLOAD_CONNECT_TIMEOUT_ENV_VAR = "RIFT_BAIDU_DOWNLOAD_CONNECT_TIMEOUT_SECONDS"
+DOWNLOAD_READ_TIMEOUT_ENV_VAR = "RIFT_BAIDU_DOWNLOAD_READ_TIMEOUT_SECONDS"
+DOWNLOAD_MAX_ATTEMPTS_ENV_VAR = "RIFT_BAIDU_DOWNLOAD_MAX_ATTEMPTS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,17 +65,23 @@ def initialize_runtime(
     """
 
     runtime_dir.mkdir(parents=True, exist_ok=True)
+    _emit_runtime_log(f"run_id={run_id} runtime_dir={runtime_dir}")
     token_payload, token_source = _resolve_baidu_token_payload(
         plane_config=plane_config,
         provided_baidu_token_payload=provided_baidu_token_payload,
     )
     _validate_baidu_token_payload(token_payload, source_label=token_source)
+    _emit_runtime_log(
+        f"run_id={run_id} baidu_token_source={token_source} token_fields={','.join(sorted(token_payload.keys()))}"
+    )
     baidu_token_file = runtime_dir / "baidu-token.json"
     baidu_token_file.write_text(
         json.dumps(token_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    _emit_runtime_log(f"run_id={run_id} baidu_token_file={baidu_token_file}")
     database_file = runtime_dir / "database.json"
+    _emit_runtime_log(f"run_id={run_id} database_file={database_file}")
     _download_or_initialize_database(
         token_payload=token_payload,
         archive_remote_root=archive_remote_root,
@@ -82,6 +95,9 @@ def initialize_runtime(
         database_path=runtime_dir / "state.sqlite3",
         run_id=run_id,
         remote_database_payload=database_payload,
+    )
+    _emit_runtime_log(
+        f"run_id={run_id} state_db_file={state_db_result.database_path} imported_remote_entries={state_db_result.imported_remote_entries}"
     )
     return RuntimeInitializationResult(
         run_id=run_id,
@@ -188,6 +204,7 @@ def _download_or_initialize_database(
     database_file: Path,
 ) -> None:
     if os.getenv(SIMULATION_ENV_VAR) == "1" or os.getenv(MOCK_BAIDU_ENV_VAR) == "1":
+        _emit_runtime_log("simulation_mode=1 database.json will be initialized locally")
         database_file.write_text(
             json.dumps(
                 _build_empty_database_payload(
@@ -200,6 +217,18 @@ def _download_or_initialize_database(
             encoding="utf-8",
         )
         return
+    download_connect_timeout = _read_positive_float_env(
+        DOWNLOAD_CONNECT_TIMEOUT_ENV_VAR,
+        default=DOWNLOAD_CONNECT_TIMEOUT,
+    )
+    download_read_timeout = _read_positive_float_env(
+        DOWNLOAD_READ_TIMEOUT_ENV_VAR,
+        default=DOWNLOAD_READ_TIMEOUT,
+    )
+    download_max_attempts = _read_positive_int_env(
+        DOWNLOAD_MAX_ATTEMPTS_ENV_VAR,
+        default=DOWNLOAD_MAX_ATTEMPTS,
+    )
     client = BaiduPanClient(
         credentials=BaiduCredentials(
             access_token=str(token_payload["access_token"]),
@@ -207,12 +236,27 @@ def _download_or_initialize_database(
         remote_dir=meta_remote_root,
         token_store=None,
         allow_token_refresh=False,
+        download_connect_timeout=download_connect_timeout,
+        download_read_timeout=download_read_timeout,
+        download_max_attempts=download_max_attempts,
+        download_log=_emit_runtime_log,
     )
     remote_database_path = f"{meta_remote_root.rstrip('/')}/database.json"
+    _emit_runtime_log(
+        "download_database "
+        f"remote_path={remote_database_path} "
+        f"connect_timeout={download_connect_timeout}s "
+        f"max_read_timeout={download_read_timeout}s "
+        f"max_attempts={download_max_attempts}"
+    )
     try:
         client.ensure_directory("")
         client.download_file(remote_database_path, database_file)
+        _emit_runtime_log(f"database_download_success remote_path={remote_database_path}")
     except FileNotFoundError:
+        _emit_runtime_log(
+            f"database_missing remote_path={remote_database_path}; initialize empty database.json"
+        )
         database_file.write_text(
             json.dumps(
                 _build_empty_database_payload(
@@ -226,6 +270,32 @@ def _download_or_initialize_database(
         )
     finally:
         client.close()
+
+
+def _emit_runtime_log(message: str) -> None:
+    """把 runtime_init 关键阶段直接输出到 stdout。"""
+
+    print(f"[runtime_init] {message}", flush=True)
+
+
+def _read_positive_float_env(name: str, *, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return float(default)
+    value = float(raw_value)
+    if value <= 0:
+        raise ValueError(f"{name} 必须大于 0，当前值：{raw_value}")
+    return value
+
+
+def _read_positive_int_env(name: str, *, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return int(default)
+    value = int(raw_value)
+    if value <= 0:
+        raise ValueError(f"{name} 必须大于 0，当前值：{raw_value}")
+    return value
 
 
 def _build_empty_database_payload(

@@ -13,6 +13,7 @@ from pathlib import Path
 from pathlib import PurePath
 from pathlib import PurePosixPath
 import posixpath
+import re
 from typing import Any
 from typing import Callable
 from typing import Iterable
@@ -32,6 +33,14 @@ TOKEN_EXPIRY_SAFETY_SECONDS = 120
 UPLOAD_PRECREATE_TIMEOUT = (30, 180)
 UPLOAD_PART_TIMEOUT = (30, 180)
 UPLOAD_CREATE_TIMEOUT = (30, 180)
+DOWNLOAD_CONNECT_TIMEOUT = 8.0
+DOWNLOAD_READ_TIMEOUT = 900.0
+DOWNLOAD_MIN_READ_TIMEOUT = 15.0
+DOWNLOAD_TIMEOUT_MARGIN_SECONDS = 10.0
+DOWNLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND = 20 * 1024
+DOWNLOAD_UNKNOWN_SIZE_READ_TIMEOUT = 60.0
+DOWNLOAD_METADATA_READ_TIMEOUT = 15.0
+DOWNLOAD_MAX_ATTEMPTS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +88,10 @@ class BaiduPanClient:
         remote_dir: str,
         token_store: LocalBaiduTokenStore | None = None,
         allow_token_refresh: bool = True,
+        download_connect_timeout: float = DOWNLOAD_CONNECT_TIMEOUT,
+        download_read_timeout: float = DOWNLOAD_READ_TIMEOUT,
+        download_max_attempts: int = DOWNLOAD_MAX_ATTEMPTS,
+        download_log: Callable[[str], None] | None = None,
     ) -> None:
         """初始化客户端。
 
@@ -87,6 +100,10 @@ class BaiduPanClient:
             remote_dir: 网盘工作目录。
             token_store: 本地 token 存储（可选）。
             allow_token_refresh: 是否允许在 access token 失效时自动刷新。
+            download_connect_timeout: 下载阶段连接超时秒数。
+            download_read_timeout: 下载阶段读取超时上限秒数。
+            download_max_attempts: 下载阶段最大尝试次数。
+            download_log: 下载阶段高层日志回调。
 
         Raises:
             ValueError: 缺少执行当前模式所需的 token。
@@ -96,8 +113,19 @@ class BaiduPanClient:
         self._remote_dir = _normalize_remote_path(remote_dir)
         self._token_store = token_store
         self._allow_token_refresh = allow_token_refresh
+        self._download_connect_timeout = float(download_connect_timeout)
+        self._download_read_timeout = float(download_read_timeout)
+        self._download_max_attempts = int(download_max_attempts)
+        self._download_log = download_log
         self._oauth_token: BaiduOAuthToken | None = None
         self._access_token = credentials.access_token.strip() if credentials.access_token else None
+
+        if self._download_connect_timeout <= 0:
+            raise ValueError("初始化 BaiduPanClient 失败：download_connect_timeout 必须大于 0。")
+        if self._download_read_timeout <= 0:
+            raise ValueError("初始化 BaiduPanClient 失败：download_read_timeout 必须大于 0。")
+        if self._download_max_attempts <= 0:
+            raise ValueError("初始化 BaiduPanClient 失败：download_max_attempts 必须大于 0。")
 
         self._refresh_token = credentials.refresh_token.strip() if credentials.refresh_token else ""
         if token_store is not None and self._allow_token_refresh:
@@ -116,7 +144,9 @@ class BaiduPanClient:
 
         ensure_official_sdk_path()
         self._openapi_client = load_openapi_client_module()
-        self._api_client = self._openapi_client.ApiClient()
+        configuration = self._openapi_client.Configuration()
+        configuration.retries = False
+        self._api_client = self._openapi_client.ApiClient(configuration=configuration)
 
         fileinfo_api_module = importlib.import_module("openapi_client.api.fileinfo_api")
         filemanager_api_module = importlib.import_module("openapi_client.api.filemanager_api")
@@ -204,6 +234,7 @@ class BaiduPanClient:
                 desc=0,
                 web="1",
                 showempty=1,
+                _request_timeout=self._build_metadata_timeout(),
             ),
             operation="xpanfilelist",
         )
@@ -528,6 +559,7 @@ class BaiduPanClient:
                 extra="1",
                 dlink="1",
                 needmedia=1,
+                _request_timeout=self._build_metadata_timeout(),
             ),
             operation="xpanmultimediafilemetas",
         )
@@ -552,18 +584,35 @@ class BaiduPanClient:
             path_role="remote_path",
         )
         self.ensure_directory(str(PurePosixPath(normalized_path).parent))
+        self._emit_download_log(
+            "prepare_metadata "
+            f"path={normalized_path} "
+            f"connect_timeout={self._download_connect_timeout}s "
+            f"read_timeout={self._download_read_timeout}s "
+            f"max_attempts={self._download_max_attempts}"
+        )
         version_info = self.get_file_version_info(remote_path=normalized_path)
+        file_size = _as_int(version_info.get("size"))
+        read_timeout = self._resolve_download_read_timeout(file_size=file_size)
+        self._emit_download_log(
+            "metadata_ready "
+            f"path={normalized_path} "
+            f"size={file_size if file_size is not None else 'unknown'} "
+            f"read_timeout={read_timeout}s"
+        )
         access_token = self._ensure_access_token()
         local_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = local_path.with_suffix(f"{local_path.suffix}.part")
 
-        max_attempts = 3
+        max_attempts = self._download_max_attempts
         for attempt in range(1, max_attempts + 1):
             raw_response = None
             try:
+                self._emit_download_log(f"attempt_start path={normalized_path} attempt={attempt}/{max_attempts}")
                 raw_response = self._invoke_sdk_call_api(
                     access_token=access_token,
                     remote_path=normalized_path,
+                    read_timeout=read_timeout,
                 )
                 with temp_path.open("wb") as file_obj:
                     while True:
@@ -572,10 +621,17 @@ class BaiduPanClient:
                             break
                         file_obj.write(chunk)
                 temp_path.replace(local_path)
+                self._emit_download_log(f"download_success path={normalized_path} attempt={attempt}/{max_attempts}")
                 break
             except Exception as error:
                 if temp_path.exists():
                     temp_path.unlink(missing_ok=True)
+                self._emit_download_log(
+                    "attempt_failed "
+                    f"path={normalized_path} "
+                    f"attempt={attempt}/{max_attempts} "
+                    f"error={_sanitize_sensitive_text(f'{type(error).__name__}: {error}')}"
+                )
                 if attempt == max_attempts:
                     raise BaiduPanApiError(
                         message=(
@@ -685,7 +741,7 @@ class BaiduPanClient:
             )
         return payload
 
-    def _invoke_sdk_call_api(self, access_token: str, remote_path: str) -> Any:
+    def _invoke_sdk_call_api(self, access_token: str, remote_path: str, read_timeout: float) -> Any:
         """通过官方 ApiClient.call_api 下载文件流。"""
 
         try:
@@ -699,7 +755,7 @@ class BaiduPanClient:
                 ],
                 _return_http_data_only=True,
                 _preload_content=False,
-                _request_timeout=(30, 180),
+                _request_timeout=(self._download_connect_timeout, read_timeout),
                 _host=PCS_API_HOST,
                 _check_type=False,
             )
@@ -707,6 +763,34 @@ class BaiduPanClient:
             raise BaiduPanApiError(
                 message=f"官方 SDK 下载调用失败：{_extract_api_exception_message(error)}"
             ) from error
+
+    def _emit_download_log(self, message: str) -> None:
+        """输出下载阶段高层日志。"""
+
+        if self._download_log is None:
+            return
+        self._download_log(f"[baidu.download] {message}")
+
+    def _resolve_download_read_timeout(self, *, file_size: int | None) -> float:
+        """按文件大小动态计算下载读取超时。"""
+
+        if file_size is None:
+            return min(self._download_read_timeout, DOWNLOAD_UNKNOWN_SIZE_READ_TIMEOUT)
+        estimated_transfer_seconds = (
+            float(file_size) / float(DOWNLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND)
+        ) + DOWNLOAD_TIMEOUT_MARGIN_SECONDS
+        return min(
+            self._download_read_timeout,
+            max(DOWNLOAD_MIN_READ_TIMEOUT, estimated_transfer_seconds),
+        )
+
+    def _build_metadata_timeout(self) -> tuple[float, float]:
+        """为列表和 filemetas 阶段构建较短超时。"""
+
+        return (
+            self._download_connect_timeout,
+            min(self._download_read_timeout, DOWNLOAD_METADATA_READ_TIMEOUT),
+        )
 
     def _ensure_access_token(self) -> str:
         """确保存在可用 access token。"""
@@ -804,10 +888,26 @@ def _payload_to_dict(payload: Any) -> dict[str, Any]:
 def _extract_api_exception_message(error: Exception) -> str:
     """提取官方 SDK 异常可读信息。"""
 
-    reason = getattr(error, "reason", None)
-    body = getattr(error, "body", None)
+    reason = _sanitize_sensitive_text(str(getattr(error, "reason", None)))
+    body = _sanitize_sensitive_text(str(getattr(error, "body", None)))
     status = getattr(error, "status", None)
     return f"status={status}, reason={reason}, body={body}"
+
+
+def _sanitize_sensitive_text(text: str) -> str:
+    """脱敏 access token / refresh token / secret 文本。"""
+
+    sanitized = text
+    patterns = (
+        (r"(?i)(access_token=)([^&\s)]+)", r"\1<redacted>"),
+        (r"(?i)(refresh_token=)([^&\s)]+)", r"\1<redacted>"),
+        (r'(?i)("access_token"\s*:\s*")([^"]+)(")', r"\1<redacted>\3"),
+        (r'(?i)("refresh_token"\s*:\s*")([^"]+)(")', r"\1<redacted>\3"),
+        (r'(?i)("client_secret"\s*:\s*")([^"]+)(")', r"\1<redacted>\3"),
+    )
+    for pattern, replacement in patterns:
+        sanitized = re.sub(pattern, replacement, sanitized)
+    return sanitized
 
 
 def _normalize_remote_path(path: str) -> str:
