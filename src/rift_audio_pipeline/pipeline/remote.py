@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -180,35 +181,75 @@ def run_remote_pipeline(
                 )
             return collected_artifacts
 
+        runtime_config = config
         update_options = (
             build_remote_operation_options(
-                config=config,
-                champion_ids=config.champion_ids,
-                map_ids=config.map_ids,
+                config=runtime_config,
+                champion_ids=runtime_config.champion_ids,
+                map_ids=runtime_config.map_ids,
             )
-            if config.run_update
+            if runtime_config.run_update
             else None
         )
         extract_options = (
             build_remote_operation_options(
-                config=config,
-                champion_ids=config.champion_ids,
-                map_ids=config.map_ids,
+                config=runtime_config,
+                champion_ids=runtime_config.champion_ids,
+                map_ids=runtime_config.map_ids,
                 integrate_data=False,
             )
-            if config.run_extract
+            if runtime_config.run_extract
             else None
         )
         mapping_options = (
             build_remote_operation_options(
-                config=config,
-                champion_ids=config.champion_ids,
-                map_ids=config.map_ids,
-                integrate_data=config.integrate_data,
+                config=runtime_config,
+                champion_ids=runtime_config.champion_ids,
+                map_ids=runtime_config.map_ids,
+                integrate_data=runtime_config.integrate_data,
             )
-            if config.run_mapping
+            if runtime_config.run_mapping
             else None
         )
+        if _should_prepare_full_fallback(runtime_config):
+            if update_options is not None:
+                app.update(update_options, target="all")
+                update_options = None
+            post_update_work_item_count = _preview_remote_work_item_count(
+                app=app,
+                extract_options=extract_options,
+                mapping_options=mapping_options,
+                config=runtime_config,
+            )
+            if post_update_work_item_count in {None, 0}:
+                runtime_config = _materialize_remote_target_config(
+                    app=app,
+                    config=runtime_config,
+                )
+                if not _has_explicit_remote_targets(runtime_config):
+                    raise RuntimeError(
+                        "remote 全量模式在 update 后仍未生成任何实体工作项，无法继续按实体下载 WAD 并执行解包。"
+                    )
+                extract_options = (
+                    build_remote_operation_options(
+                        config=runtime_config,
+                        champion_ids=runtime_config.champion_ids,
+                        map_ids=runtime_config.map_ids,
+                        integrate_data=False,
+                    )
+                    if runtime_config.run_extract
+                    else None
+                )
+                mapping_options = (
+                    build_remote_operation_options(
+                        config=runtime_config,
+                        champion_ids=runtime_config.champion_ids,
+                        map_ids=runtime_config.map_ids,
+                        integrate_data=runtime_config.integrate_data,
+                    )
+                    if runtime_config.run_mapping
+                    else None
+                )
 
         def _on_entity_complete(raw_payload: object) -> None:
             artifacts = convert_remote_payload(raw_payload)
@@ -244,7 +285,7 @@ def run_remote_pipeline(
             app=app,
             extract_options=extract_options,
             mapping_options=mapping_options,
-            config=config,
+            config=runtime_config,
         )
         emit_event(
             log_ctx,
@@ -255,8 +296,8 @@ def run_remote_pipeline(
                 message="remote 单位循环开始",
                 payload={
                     "work_item_count": work_item_count,
-                    "run_extract": config.run_extract,
-                    "run_mapping": config.run_mapping,
+                    "run_extract": runtime_config.run_extract,
+                    "run_mapping": runtime_config.run_mapping,
                 },
                 created_at=datetime.now().astimezone().isoformat(),
                 status_hint="running",
@@ -268,13 +309,13 @@ def run_remote_pipeline(
             update_target="all",
             extract_options=extract_options,
             mapping_options=mapping_options,
-            extract_include_champions=config.include_champions,
-            extract_include_maps=config.include_maps,
-            mapping_include_champions=config.include_champions,
-            mapping_include_maps=config.include_maps,
+            extract_include_champions=runtime_config.include_champions,
+            extract_include_maps=runtime_config.include_maps,
+            mapping_include_champions=runtime_config.include_champions,
+            mapping_include_maps=runtime_config.include_maps,
             on_entity_complete=_on_entity_complete,
-            download_retry_attempts=config.download_retry_attempts,
-            entity_retry_attempts=config.entity_retry_attempts,
+            download_retry_attempts=runtime_config.download_retry_attempts,
+            entity_retry_attempts=runtime_config.entity_retry_attempts,
         )
         emit_event(
             log_ctx,
@@ -490,6 +531,62 @@ def _preview_remote_work_item_count(
     except Exception:  # noqa: BLE001
         return None
     return len(cast(list[object], work_items))
+
+
+def _should_prepare_full_fallback(config: PipelineRunConfig) -> bool:
+    """判断当前 remote 配置是否处于“无显式 IDs 的全量 fallback”场景。"""
+
+    if _has_explicit_remote_targets(config):
+        return False
+    return config.include_champions or config.include_maps
+
+
+def _has_explicit_remote_targets(config: PipelineRunConfig) -> bool:
+    """判断当前配置是否已携带显式实体 ID。"""
+
+    return bool(config.champion_ids) or bool(config.map_ids)
+
+
+def _materialize_remote_target_config(
+    *,
+    app: object,
+    config: PipelineRunConfig,
+) -> PipelineRunConfig:
+    """基于当前 `data.msgpack` 物化 remote 全量模式的显式实体 ID。"""
+
+    create_reader = getattr(app, "_create_reader", None)
+    if not callable(create_reader):
+        return config
+    reader = create_reader()
+    champion_ids = config.champion_ids
+    map_ids = config.map_ids
+    if champion_ids is None and config.include_champions:
+        champion_ids = _collect_reader_entity_ids(getattr(reader, "get_champions", None))
+    if map_ids is None and config.include_maps:
+        map_ids = _collect_reader_entity_ids(getattr(reader, "get_maps", None))
+    if not champion_ids and not map_ids:
+        return config
+    return replace(
+        config,
+        champion_ids=champion_ids or None,
+        map_ids=map_ids or None,
+    )
+
+
+def _collect_reader_entity_ids(get_entities: object) -> tuple[int, ...]:
+    """从 `DataReader` 的实体迭代结果提取稳定 ID 列表。"""
+
+    if not callable(get_entities):
+        return tuple()
+    entity_ids: list[int] = []
+    for entity in get_entities():
+        if not isinstance(entity, dict):
+            continue
+        entity_id = entity.get("id")
+        if entity_id is None:
+            continue
+        entity_ids.append(int(entity_id))
+    return tuple(entity_ids)
 
 
 def _emit_remote_phase_event(

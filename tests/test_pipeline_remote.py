@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
@@ -245,3 +246,207 @@ def test_run_remote_pipeline_should_collect_callback_artifacts(
         "remote_entity_complete",
         "remote_entity_loop_finished",
     ]
+
+
+def test_run_remote_pipeline_should_materialize_full_fallback_targets_after_update(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """全量 remote fallback 应在 update 后物化实体 ID，并进入单位循环。"""
+
+    class _FakeReader:
+        def get_champions(self) -> list[dict[str, int]]:
+            return [{"id": 1}, {"id": 103}]
+
+        def get_maps(self) -> list[dict[str, int]]:
+            return [{"id": 11}]
+
+    class _FakeRemoteSnapshotPreparer:
+        def prepare_lcu_game_data(self) -> object:
+            return SimpleNamespace(
+                manifest_cache_path=tmp_path / "cache" / "lcu.manifest",
+                description_cache_path=tmp_path / "cache" / "description.json",
+                bundle_cache_paths=(tmp_path / "cache" / "bundle.wad",),
+                prepared_lcu_root=tmp_path / "prepared_lcu",
+            )
+
+        def prepare_bin_inputs(self, **kwargs) -> object:
+            return SimpleNamespace(extracted_file_count=0, kwargs=kwargs)
+
+    class _FakeOperationOptions:
+        def __init__(self, **kwargs) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    def _fake_setup_app(*, dev_mode: bool, log_level: str, cli_overrides: dict[str, object]) -> object:
+        del dev_mode, log_level, cli_overrides
+        return object()
+
+    update_calls: list[tuple[object, str]] = []
+    workflow_calls: list[dict[str, object]] = []
+
+    class _FakeApp:
+        def __init__(self, ctx: object) -> None:
+            self.ctx = ctx
+
+        def _create_reader(self) -> _FakeReader:
+            return _FakeReader()
+
+        def build_remote_entity_work_items(self, **kwargs) -> list[object]:
+            del kwargs
+            return []
+
+        def update(self, opts: object, *, target: str = "all") -> None:
+            update_calls.append((opts, target))
+
+        def run_remote_entity_workflow(self, **kwargs) -> None:
+            workflow_calls.append(kwargs)
+            callback = kwargs["on_entity_complete"]
+            callback(
+                SimpleNamespace(
+                    entity_type="champion",
+                    entity_id=1,
+                    audio_output_paths=(tmp_path / "audios" / "annie",),
+                    mapping_output_path=None,
+                )
+            )
+
+    remote_preparer_module = ModuleType("lol_audio_unpack.remote_preparer")
+    remote_preparer_module.RemoteSnapshotPreparer = _FakeRemoteSnapshotPreparer
+    monkeypatch.setitem(sys.modules, "lol_audio_unpack.remote_preparer", remote_preparer_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "lol_audio_unpack",
+        SimpleNamespace(
+            setup_app=_fake_setup_app,
+            OperationOptions=_FakeOperationOptions,
+            LolAudioUnpackApp=_FakeApp,
+        ),
+    )
+
+    config = replace(
+        _build_config(tmp_path),
+        champion_ids=None,
+        map_ids=None,
+        include_champions=True,
+        include_maps=True,
+        run_mapping=False,
+    )
+    pair = ManifestPairRef(
+        version="16.5",
+        lcu_manifest_url="https://lcu.example",
+        game_manifest_url="https://game.example",
+        match_mode="ignore_revision",
+        match_reason="ok",
+    )
+    log_ctx = initialize_run_logging(config)
+
+    artifacts = run_remote_pipeline(config, pair, log_ctx)
+    event_payloads = [
+        json.loads(line)
+        for line in log_ctx.events_file.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert len(update_calls) == 1
+    assert getattr(update_calls[0][0], "champion_ids") is None
+    assert getattr(update_calls[0][0], "map_ids") is None
+    assert update_calls[0][1] == "all"
+    assert len(workflow_calls) == 1
+    assert workflow_calls[0]["update_options"] is None
+    assert getattr(workflow_calls[0]["extract_options"], "champion_ids") == (1, 103)
+    assert getattr(workflow_calls[0]["extract_options"], "map_ids") == (11,)
+    assert artifacts[0].entity_id == 1
+    assert event_payloads[1]["event_type"] == "remote_update_started"
+    assert event_payloads[-2]["event_type"] == "remote_entity_complete"
+    assert event_payloads[-1]["payload"]["work_item_count"] == 3
+
+
+def test_run_remote_pipeline_should_keep_upstream_full_scan_when_work_items_exist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """若 update 后上游已能生成全量 work items，则不应强制物化 IDs。"""
+
+    class _FakeRemoteSnapshotPreparer:
+        def prepare_lcu_game_data(self) -> object:
+            return SimpleNamespace(
+                manifest_cache_path=tmp_path / "cache" / "lcu.manifest",
+                description_cache_path=tmp_path / "cache" / "description.json",
+                bundle_cache_paths=(tmp_path / "cache" / "bundle.wad",),
+                prepared_lcu_root=tmp_path / "prepared_lcu",
+            )
+
+        def prepare_bin_inputs(self, **kwargs) -> object:
+            return SimpleNamespace(extracted_file_count=0, kwargs=kwargs)
+
+    class _FakeOperationOptions:
+        def __init__(self, **kwargs) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    def _fake_setup_app(*, dev_mode: bool, log_level: str, cli_overrides: dict[str, object]) -> object:
+        del dev_mode, log_level, cli_overrides
+        return object()
+
+    update_calls: list[tuple[object, str]] = []
+    workflow_calls: list[dict[str, object]] = []
+
+    class _FakeApp:
+        def __init__(self, ctx: object) -> None:
+            self.ctx = ctx
+            self.updated = False
+
+        def build_remote_entity_work_items(self, **kwargs) -> list[object]:
+            del kwargs
+            if not self.updated:
+                raise FileNotFoundError("核心数据文件不存在")
+            return [
+                SimpleNamespace(entity_type="champion", entity_id=1),
+                SimpleNamespace(entity_type="champion", entity_id=103),
+                SimpleNamespace(entity_type="map", entity_id=11),
+            ]
+
+        def update(self, opts: object, *, target: str = "all") -> None:
+            self.updated = True
+            update_calls.append((opts, target))
+
+        def run_remote_entity_workflow(self, **kwargs) -> None:
+            workflow_calls.append(kwargs)
+
+    remote_preparer_module = ModuleType("lol_audio_unpack.remote_preparer")
+    remote_preparer_module.RemoteSnapshotPreparer = _FakeRemoteSnapshotPreparer
+    monkeypatch.setitem(sys.modules, "lol_audio_unpack.remote_preparer", remote_preparer_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "lol_audio_unpack",
+        SimpleNamespace(
+            setup_app=_fake_setup_app,
+            OperationOptions=_FakeOperationOptions,
+            LolAudioUnpackApp=_FakeApp,
+        ),
+    )
+
+    config = replace(
+        _build_config(tmp_path),
+        champion_ids=None,
+        map_ids=None,
+        include_champions=True,
+        include_maps=True,
+        run_mapping=False,
+    )
+    pair = ManifestPairRef(
+        version="16.5",
+        lcu_manifest_url="https://lcu.example",
+        game_manifest_url="https://game.example",
+        match_mode="ignore_revision",
+        match_reason="ok",
+    )
+    log_ctx = initialize_run_logging(config)
+
+    run_remote_pipeline(config, pair, log_ctx)
+
+    assert len(update_calls) == 1
+    assert len(workflow_calls) == 1
+    assert workflow_calls[0]["update_options"] is None
+    assert getattr(workflow_calls[0]["extract_options"], "champion_ids") is None
+    assert getattr(workflow_calls[0]["extract_options"], "map_ids") is None
