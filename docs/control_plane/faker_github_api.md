@@ -174,6 +174,12 @@ uv run rift-faker-github \
 }
 ```
 
+说明：
+
+- 这只是 HTTP 层最小合法 body，用于验证路由和鉴权
+- 它不代表“最小可运行的业务 payload”
+- 真正要触发 pipeline，请至少提供后文的 `inputs.payload` 示例之一
+
 ### 推荐请求体
 
 ```json
@@ -184,6 +190,12 @@ uv run rift-faker-github \
   }
 }
 ```
+
+说明：
+
+- 推荐请求体应优先显式提供 `targets`，或者至少提供完整 `manifests.previous`
+- `remote` 模式下如果既没有 `targets`，也无法从 `previous/current` diff 收敛到目标，当前实现会回退为全量 remote 执行
+- 这条全量 fallback 路径是兼容性入口，不建议常态依赖；常规 workflow 仍应尽量提供精确 targets
 
 ## 7. `inputs.payload` schema
 
@@ -270,7 +282,95 @@ uv run rift-faker-github \
 | --- | --- | --- |
 | `requested_by` | `string` | 请求来源 |
 
-### 7.3 校验规则
+### 7.3 最小可运行 `inputs.payload` 示例
+
+以下示例是“最小可运行的 remote extract payload”。
+
+它依赖当前 manifest 信息，不提供 `targets`，因此会走 remote 全量 fallback。该路径可用，但不建议作为常规调用方式。
+
+```json
+{
+  "schema_version": "2026-03-12",
+  "request": {
+    "mode": "remote",
+    "stage": "extract"
+  },
+  "game": {
+    "region": "zh_CN"
+  },
+  "manifests": {
+    "current": {
+      "version": "16.5",
+      "lcu_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest",
+      "game_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest"
+    }
+  }
+}
+```
+
+补充说明：
+
+- 若当前 runtime 无法从 plane 获取百度 token，请额外提供 `baidu.access_token`
+- 若你希望只处理增量目标，优先提供 `targets` 或完整 `manifests.previous`
+
+### 7.4 完整 `inputs.payload` 示例
+
+以下示例覆盖当前 schema 的主要业务字段，适合作为手动 workflow dispatch 的完整模板：
+
+```json
+{
+  "schema_version": "2026-03-12",
+  "request": {
+    "mode": "remote",
+    "stage": "extract"
+  },
+  "game": {
+    "region": "zh_CN"
+  },
+  "manifests": {
+    "current": {
+      "version": "16.5",
+      "lcu_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/016B6D1E48010262.manifest",
+      "game_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/EA8D7D67B326E12E.manifest"
+    },
+    "previous": {
+      "version": "16.4",
+      "lcu_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest",
+      "game_url": "https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest"
+    }
+  },
+  "targets": {
+    "champions": {
+      "ids": [
+        266,
+        103
+      ]
+    },
+    "maps": {
+      "ids": [
+        11,
+        12
+      ]
+    }
+  },
+  "baidu": {
+    "access_token": "manual-access-token"
+  },
+  "execution": {
+    "force_update": false,
+    "max_workers": 8,
+    "download_retry_attempts": 5,
+    "entity_retry_attempts": 2,
+    "log_level": "INFO",
+    "archive_password": "zip-secret"
+  },
+  "metadata": {
+    "requested_by": "manual-gh-3plus1"
+  }
+}
+```
+
+### 7.5 校验规则
 
 - 未知字段直接报错，不做静默忽略
 - 不再接受扁平 `inputs`
@@ -284,7 +384,7 @@ uv run rift-faker-github \
   - 逗号分隔字符串，例如 `"266,103"`
 - 若提供 `baidu`，其内部字段必须都是非空字符串
 
-### 7.4 明确拒绝的输入
+### 7.6 明确拒绝的输入
 
 以下内容会触发 `422 validation_failed`：
 
@@ -295,6 +395,13 @@ uv run rift-faker-github \
 - 运行时配置或机密，例如 `worker_url`、`worker_token`
 
 ## 8. `inputs` 到 pipeline CLI 的映射
+
+补充约束：
+
+- 当 `targets` 缺失时，`job_runner` 不会附加 `--champion-ids/--map-ids`
+- 当前 remote orchestrator 会优先尝试显式 targets 或 `manifests.previous -> manifest diff` 收敛目标
+- 若两者都没有收敛出目标，且 `include_champions/include_maps` 仍为默认开启，runtime 会继续走 remote 全量 fallback
+- 该 fallback 只作为兼容路径保留，不建议替代显式 targets 或完整 previous manifests
 
 ### 8.1 当前会下沉到 CLI 的字段
 

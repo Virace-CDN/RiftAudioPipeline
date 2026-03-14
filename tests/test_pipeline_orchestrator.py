@@ -336,6 +336,44 @@ def test_resolve_remote_targets_should_infer_map_ids_from_previous_pair(
     assert decision.previous_version == "16.4"
 
 
+def test_resolve_remote_targets_should_fallback_to_full_remote_when_no_targets_resolved(
+    tmp_path: Path,
+) -> None:
+    """未提供 targets 且无法做 diff 收敛时，应保留 remote 全量执行入口。"""
+
+    config = PipelineRunConfig(
+        mode=PipelineMode.REMOTE,
+        game_region="zh_CN",
+        output_root=tmp_path / "output",
+        temp_root=tmp_path / "temp",
+        log_root=tmp_path / "output" / "logs",
+        archive_remote_root="/apps/test-data",
+        meta_remote_root="/apps/test-meta",
+    )
+    current_pair = ManifestPairRef(
+        version="16.5",
+        lcu_manifest_url="https://lcu.example/16.5",
+        game_manifest_url="https://game.example/16.5",
+        match_mode="ignore_revision",
+        match_reason="ok",
+    )
+
+    targets, effective_config, decision = orchestrator._resolve_remote_targets(
+        config=config,
+        run_id="run-1",
+        current_pair=current_pair,
+    )
+
+    assert targets == tuple()
+    assert effective_config == config
+    assert effective_config.include_champions is True
+    assert effective_config.include_maps is True
+    assert decision.target_source == "implicit_full_remote_fallback"
+    assert decision.remote_execution_skipped is False
+    assert decision.reason is not None
+    assert "不建议" in decision.reason
+
+
 def test_resolve_current_manifest_pair_should_prefer_explicit_runtime_config(tmp_path: Path) -> None:
     """显式 current pair 存在时应直接采用运行配置。"""
 
@@ -459,13 +497,15 @@ def test_run_pipeline_should_run_remote_and_upload_archives(
     assert decision_payload["target_source"] == "unit_test"
 
 
-def test_run_pipeline_should_skip_remote_execution_when_no_targets_resolved(
+def test_run_pipeline_should_run_remote_full_fallback_when_no_targets_resolved(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """未解析到目标时应安全跳过 remote 执行，避免误跑全量。"""
+    """未解析到目标时，应允许 remote 走全量 fallback。"""
 
     config = _build_remote_config(tmp_path)
+    audio_dir = tmp_path / "audios" / "full-fallback"
+    audio_dir.mkdir(parents=True, exist_ok=True)
     remote_calls: list[PipelineRunConfig] = []
 
     monkeypatch.setattr(
@@ -484,19 +524,27 @@ def test_run_pipeline_should_skip_remote_execution_when_no_targets_resolved(
         "_resolve_remote_targets",
         lambda config, run_id, current_pair: (
             tuple(),
-            replace(config, include_champions=False, include_maps=False),
+            config,
             orchestrator.PipelineDecisionSnapshot(
                 run_id=run_id,
-                target_source="none",
+                target_source="implicit_full_remote_fallback",
                 target_count=0,
-                remote_execution_skipped=True,
+                reason="允许全量 remote fallback，但不建议常态依赖。",
             ),
         ),
     )
     monkeypatch.setattr(
         orchestrator,
         "run_remote_pipeline",
-        lambda config, pair, log_ctx: remote_calls.append(config) or [],
+        lambda config, pair, log_ctx, on_entity_complete=None: (
+            remote_calls.append(config),
+            on_entity_complete(
+                EntityArtifacts(entity_type="champion", entity_id=1, audio_output_paths=(audio_dir,))
+            )
+            if on_entity_complete is not None
+            else None,
+            [EntityArtifacts(entity_type="champion", entity_id=1, audio_output_paths=(audio_dir,))],
+        )[-1],
     )
 
     summary = orchestrator.run_pipeline(config)
@@ -514,11 +562,17 @@ def test_run_pipeline_should_skip_remote_execution_when_no_targets_resolved(
         summary.log_dir.joinpath("decision.json").read_text(encoding="utf-8")
     )
     assert summary.status == "success"
-    assert summary.processed_targets == 0
-    assert remote_calls == []
-    assert upload_task_count == (0,)
+    assert summary.processed_targets == 1
+    assert len(remote_calls) == 1
+    assert remote_calls[0].champion_ids is None
+    assert remote_calls[0].map_ids is None
+    assert remote_calls[0].include_champions is True
+    assert remote_calls[0].include_maps is True
+    assert upload_task_count == (1,)
     assert run_control == (0, "success")
-    assert decision_payload["remote_execution_skipped"] is True
+    assert decision_payload["target_source"] == "implicit_full_remote_fallback"
+    assert decision_payload["remote_execution_skipped"] is False
+    assert "不建议" in decision_payload["reason"]
     assert decision_payload["schema_version"] == 1
 
 

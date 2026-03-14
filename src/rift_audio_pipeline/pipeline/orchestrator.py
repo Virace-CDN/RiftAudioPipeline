@@ -112,15 +112,28 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
                 run_id=log_ctx.run_id,
                 current_pair=pair,
             )
+            should_execute_remote = bool(targets) or effective_config.include_champions or effective_config.include_maps
+            target_event_type = (
+                "targets_built"
+                if targets
+                else "targets_defaulted_to_full"
+                if should_execute_remote
+                else "targets_skipped"
+            )
+            target_message = (
+                "processing targets 已生成"
+                if targets
+                else "未显式解析到 processing targets，将按 include_* 配置执行 remote 全量处理（不建议常态依赖）"
+                if should_execute_remote
+                else "未解析到 processing targets，本轮跳过 remote 执行"
+            )
             emit_event(
                 log_ctx,
                 PipelineEvent(
                     run_id=log_ctx.run_id,
                     stage=PipelineStage.BUILD_TARGETS,
-                    event_type="targets_built" if targets else "targets_skipped",
-                    message="processing targets 已生成"
-                    if targets
-                    else "未解析到 processing targets，本轮跳过 remote 执行",
+                    event_type=target_event_type,
+                    message=target_message,
                     payload={
                         "targets": _serialize_targets(targets),
                         "decision": asdict(decision_payload),
@@ -165,7 +178,7 @@ def run_pipeline(config: PipelineRunConfig) -> PipelineRunSummary:
                     log_ctx=log_ctx,
                     on_entity_complete=_on_remote_entity_complete,
                 )
-                if targets
+                if should_execute_remote
                 else []
             )
         else:
@@ -354,19 +367,39 @@ def _resolve_remote_targets(
                 ),
             )
 
+    if config.include_champions or config.include_maps:
+        return (
+            tuple(),
+            config,
+            PipelineDecisionSnapshot(
+                run_id=run_id,
+                target_source="implicit_full_remote_fallback",
+                current_version=current_pair.version,
+                previous_version=previous_pair.version if previous_pair is not None else None,
+                target_count=0,
+                selected_champion_ids=config.champion_ids or tuple(),
+                selected_map_ids=config.map_ids or tuple(),
+                reason=(
+                    "当前 remote 决策未显式收敛到可执行 targets；"
+                    "将按 include_champions/include_maps 配置执行全量 remote。"
+                    "该回退路径可用，但不建议工作流常态依赖。"
+                ),
+            ),
+        )
+
     return (
         tuple(),
         safe_config,
         PipelineDecisionSnapshot(
             run_id=run_id,
-            target_source="pending_runtime_diff_integration",
+            target_source="no_remote_targets",
             current_version=current_pair.version,
             previous_version=previous_pair.version if previous_pair is not None else None,
             target_count=0,
             remote_execution_skipped=True,
             reason=(
-                "当前 remote diff 决策未能收敛到可执行目标；"
-                "若未提供 previous_pair，请先由 Worker 提供权威 previous-version 基线。"
+                "当前 remote 决策未能收敛到可执行目标，且 include_champions/include_maps "
+                "均已关闭；本轮跳过 remote 执行。"
             ),
         ),
     )

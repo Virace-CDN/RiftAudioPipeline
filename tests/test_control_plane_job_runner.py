@@ -202,10 +202,10 @@ def test_initialize_runtime_should_require_plane_or_dispatch_baidu_token(
         )
 
 
-def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_run_id(
+def test_build_pipeline_command_should_accept_complete_dispatch_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pipeline 主线命令应只保留业务入参与本地 run_id。"""
+    """完整 inputs.payload 应被完整翻译为 pipeline 主线命令。"""
 
     monkeypatch.setenv("GITHUB_RUN_ID", "99887766")
     assert _resolve_run_id(None) == "99887766"
@@ -222,7 +222,11 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
                         lcu_url="https://lcu.example/16.5",
                         game_url="https://game.example/16.5",
                     ),
-                    previous=DispatchManifestInputs(version="16.4"),
+                    previous=DispatchManifestInputs(
+                        version="16.4",
+                        lcu_url="https://lcu.example/16.4",
+                        game_url="https://game.example/16.4",
+                    ),
                 ),
                 targets=DispatchTargetsInputs(
                     champions=DispatchIdTargets(ids=(1, 103)),
@@ -268,14 +272,35 @@ def test_build_pipeline_command_should_exclude_control_plane_flags_and_use_env_r
     assert "/apps/test-meta" in command
     assert "--control-plane-base-url" not in command
     assert "--control-plane-bearer-token" not in command
+    assert "--current-version" in command
+    assert "16.5" in command
+    assert "--current-lcu-manifest-url" in command
+    assert "https://lcu.example/16.5" in command
+    assert "--current-game-manifest-url" in command
+    assert "https://game.example/16.5" in command
+    assert "--previous-version" in command
+    assert "16.4" in command
+    assert "--previous-lcu-manifest-url" in command
+    assert "https://lcu.example/16.4" in command
+    assert "--previous-game-manifest-url" in command
+    assert "https://game.example/16.4" in command
     assert "--champion-ids" in command
     assert "1,103" in command
+    assert "--map-ids" in command
+    assert "11" in command
+    assert "--max-workers" in command
+    assert "8" in command
+    assert "--download-retry-attempts" in command
+    assert "5" in command
+    assert "--entity-retry-attempts" in command
+    assert "2" in command
+    assert "--no-force-update" in command
     assert "--archive-password" in command
     assert "zip-secret" in command
 
 
-def test_build_pipeline_command_should_omit_relay_socket_when_relay_disabled() -> None:
-    """无 plane 场景下，pipeline 主线不应再收到 relay socket 参数。"""
+def test_build_pipeline_command_should_accept_minimal_remote_extract_inputs() -> None:
+    """最小 inputs.payload 应保留 remote extract 全量 fallback 所需信息。"""
 
     command = build_pipeline_command(
         payload=DispatchPayload(
@@ -283,6 +308,13 @@ def test_build_pipeline_command_should_omit_relay_socket_when_relay_disabled() -
             inputs=DispatchInputs(
                 request=DispatchRequestInputs(mode="remote", stage="extract"),
                 game=DispatchGameInputs(region="zh_CN"),
+                manifests=DispatchManifestsInputs(
+                    current=DispatchManifestInputs(
+                        version="16.5",
+                        lcu_url="https://lcu.example/16.5",
+                        game_url="https://game.example/16.5",
+                    )
+                ),
             ),
         ),
         run_id="manual-smoke",
@@ -298,7 +330,21 @@ def test_build_pipeline_command_should_omit_relay_socket_when_relay_disabled() -
         default_log_level="INFO",
     )
 
+    assert command[:3] == [sys.executable, "-m", "rift_audio_pipeline.pipeline.cli"]
+    assert "--mode" in command
+    assert "remote" in command
+    assert "--run-update" in command
+    assert "--run-extract" in command
+    assert "--no-run-mapping" in command
+    assert "--current-version" in command
+    assert "16.5" in command
+    assert "--current-lcu-manifest-url" in command
+    assert "https://lcu.example/16.5" in command
+    assert "--current-game-manifest-url" in command
+    assert "https://game.example/16.5" in command
     assert "--relay-socket-path" not in command
+    assert "--champion-ids" not in command
+    assert "--map-ids" not in command
 
 
 def test_build_runtime_plan_should_derive_runtime_paths(tmp_path: Path) -> None:
