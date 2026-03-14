@@ -43,6 +43,7 @@ def build_local_app_context(config: PipelineRunConfig) -> object:
         "GAME_PATH": str(config.game_path),
         "OUTPUT_PATH": str(config.output_root),
         "GAME_REGION": config.game_region,
+        "WITH_BP_VO": True,
     }
     if config.wwiser_path is not None:
         cli_overrides["WWISER_PATH"] = str(config.wwiser_path)

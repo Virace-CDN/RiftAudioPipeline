@@ -107,6 +107,7 @@ def test_build_pipeline_command_should_map_dispatch_inputs() -> None:
     assert "plane-scheduler" in command
     assert "--default-log-level" in command
     assert "DEBUG" in command
+    assert "--run-update" not in command
 
 
 def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path: Path) -> None:
@@ -200,6 +201,7 @@ def test_faker_github_server_should_accept_dispatch_and_record_receipt(tmp_path:
         assert dispatch_inputs_payload["manifests"]["current"]["version"] == "16.5"
         assert dispatch_inputs_payload["baidu"]["access_token"] == "manual-access-token"
         assert dispatch_inputs_payload["execution"]["archive_password"] == "zip-secret"
+        assert "--run-update" not in launched_command
     finally:
         server.close()
 
@@ -467,6 +469,25 @@ def test_build_pipeline_command_should_reject_unsupported_stage() -> None:
                 ref="main",
                 inputs=DispatchInputs(
                     request=DispatchRequestInputs(mode="remote", stage="upload"),
+                ),
+            ),
+            dispatch_inputs_file=Path("temp/test-faker-github/dispatch-payload.json"),
+        )
+
+
+def test_build_pipeline_command_should_reject_legacy_update_stage() -> None:
+    """`update` 阶段不再作为独立 pipeline 选项暴露。"""
+
+    with pytest.raises(ValueError, match="stage"):
+        build_job_runner_command(
+            config=WorkflowDispatchCommandConfig(
+                storage_root=Path("temp/test-faker-github"),
+                control_plane_base_url="http://localhost:5173",
+            ),
+            payload=DispatchPayload(
+                ref="main",
+                inputs=DispatchInputs(
+                    request=DispatchRequestInputs(mode="remote", stage="update"),
                 ),
             ),
             dispatch_inputs_file=Path("temp/test-faker-github/dispatch-payload.json"),

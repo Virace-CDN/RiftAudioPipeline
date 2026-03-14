@@ -30,7 +30,6 @@ from rift_audio_pipeline.pipeline.models import DEFAULT_META_REMOTE_ROOT
 
 _REQUEST_STAGE_TO_FLAGS = {
     None: (True, True, False),
-    "update": (True, False, False),
     "extract": (True, True, False),
     "mapping": (True, True, True),
 }
@@ -289,8 +288,7 @@ def _append_stage_flags(command: list[str], *, stage: str | None) -> None:
     if stage not in _REQUEST_STAGE_TO_FLAGS:
         supported = ", ".join(sorted(key for key in _REQUEST_STAGE_TO_FLAGS if key is not None))
         raise ValueError(f"stage 仅支持: {supported}。")
-    run_update, run_extract, run_mapping = _REQUEST_STAGE_TO_FLAGS[stage]
-    command.append("--run-update" if run_update else "--no-run-update")
+    _, run_extract, run_mapping = _REQUEST_STAGE_TO_FLAGS[stage]
     command.append("--run-extract" if run_extract else "--no-run-extract")
     command.append("--run-mapping" if run_mapping else "--no-run-mapping")
 

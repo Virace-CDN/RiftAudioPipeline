@@ -101,6 +101,7 @@ def test_build_remote_app_context_should_pass_cli_overrides(
     assert overrides["SOURCE_MODE"] == "remote_snapshot"
     assert overrides["REMOTE_VERSION"] == "16.5"
     assert overrides["REMOTE_LCU_MANIFEST_URL"] == "https://lcu.example"
+    assert overrides["WITH_BP_VO"] is True
     assert overrides["WWISER_PATH"] == str((tmp_path / "wwiser.pyz"))
 
 

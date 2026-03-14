@@ -62,6 +62,7 @@ def test_build_run_config_should_parse_cli_args(tmp_path: Path) -> None:
     assert config.current_game_manifest_url == "https://game.example/16.5"
     assert config.champion_ids == (1, 103)
     assert config.map_ids == (11,)
+    assert config.run_update is True
     assert config.run_mapping is True
     assert config.integrate_data is True
     assert config.max_workers == 8

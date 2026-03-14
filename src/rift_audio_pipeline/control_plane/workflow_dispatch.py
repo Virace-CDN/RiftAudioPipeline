@@ -50,7 +50,6 @@ _SENSITIVE_BAIDU_FIELDS = frozenset({"access_token", "app_key", "secret_key", "r
 _REDACTED_SECRET = "***REDACTED***"
 _REQUEST_STAGE_TO_FLAGS = {
     None: (True, True, False),
-    "update": (True, False, False),
     "extract": (True, True, False),
     "mapping": (True, True, True),
 }

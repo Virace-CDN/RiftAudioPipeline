@@ -445,8 +445,7 @@ def _append_stage_flags(command: list[str], *, stage: str | None) -> None:
     if flags is None:
         supported = ", ".join(sorted(_REQUEST_STAGE_TO_FLAGS))
         raise ValueError(f"stage 仅支持: {supported}。")
-    run_update, run_extract, run_mapping = flags
-    _append_bool_flag(command, "run-update", run_update)
+    _, run_extract, run_mapping = flags
     _append_bool_flag(command, "run-extract", run_extract)
     _append_bool_flag(command, "run-mapping", run_mapping)
 

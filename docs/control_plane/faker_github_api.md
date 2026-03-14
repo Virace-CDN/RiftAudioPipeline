@@ -186,7 +186,7 @@ uv run rift-faker-github \
 {
   "ref": "main",
   "inputs": {
-    "payload": "{\"schema_version\":\"2026-03-12\",\"request\":{\"mode\":\"remote\",\"stage\":\"update\"},\"game\":{\"region\":\"oc1\"},\"manifests\":{\"current\":{\"version\":\"16.5.7519084\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest\"},\"previous\":{\"version\":\"16.4.7423123\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest\"}},\"targets\":{\"champions\":{\"ids\":[266,103]},\"maps\":{\"ids\":[11,12]}},\"baidu\":{\"access_token\":\"manual-access-token\"},\"execution\":{\"force_update\":false,\"max_workers\":8,\"download_retry_attempts\":5,\"entity_retry_attempts\":2,\"log_level\":\"INFO\"},\"metadata\":{\"requested_by\":\"scheduler\"}}"
+    "payload": "{\"schema_version\":\"2026-03-12\",\"request\":{\"mode\":\"remote\",\"stage\":\"extract\"},\"game\":{\"region\":\"oc1\"},\"manifests\":{\"current\":{\"version\":\"16.5.7519084\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/current-game.manifest\"},\"previous\":{\"version\":\"16.4.7423123\",\"lcu_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-lcu.manifest\",\"game_url\":\"https://lol.secure.dyn.riotcdn.net/channels/public/releases/previous-game.manifest\"}},\"targets\":{\"champions\":{\"ids\":[266,103]},\"maps\":{\"ids\":[11,12]}},\"baidu\":{\"access_token\":\"manual-access-token\"},\"execution\":{\"force_update\":false,\"max_workers\":8,\"download_retry_attempts\":5,\"entity_retry_attempts\":2,\"log_level\":\"INFO\"},\"metadata\":{\"requested_by\":\"scheduler\"}}"
   }
 }
 ```
@@ -227,7 +227,12 @@ uv run rift-faker-github \
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `mode` | `string` | pipeline 模式 |
-| `stage` | `string` | 执行阶段意图；当前支持 `update` / `extract` / `mapping` |
+| `stage` | `string` | 执行阶段意图；当前支持 `extract` / `mapping` |
+
+说明：
+
+- `update` 不再作为独立对外 stage 暴露
+- 当前 pipeline 会始终先执行 update，再按 `stage` 决定是否继续 extract / mapping
 
 #### `game`
 
@@ -408,9 +413,8 @@ uv run rift-faker-github \
 | 结构化路径 | 对应 CLI 参数 |
 | --- | --- |
 | `request.mode` | `--mode` |
-| `request.stage=update` | `--run-update --no-run-extract --no-run-mapping` |
-| `request.stage=extract` | `--run-update --run-extract --no-run-mapping` |
-| `request.stage=mapping` | `--run-update --run-extract --run-mapping` |
+| `request.stage=extract` | `--run-extract --no-run-mapping` |
+| `request.stage=mapping` | `--run-extract --run-mapping` |
 | `game.region` | `--game-region` |
 | `manifests.current.version` | `--current-version` |
 | `manifests.current.lcu_url` | `--current-lcu-manifest-url` |
@@ -427,6 +431,11 @@ uv run rift-faker-github \
 | `execution.entity_retry_attempts` | `--entity-retry-attempts` |
 | `execution.force_update=true` | `--force-update` |
 | `execution.force_update=false` | `--no-force-update` |
+
+补充说明：
+
+- `job_runner` 不再向 pipeline CLI 传递 `--run-update`
+- pipeline CLI 内部会固定开启 update，把它作为 extract / mapping 的隐式前置步骤
 
 ### 8.2 当前仅保留在 payload/收据的字段
 

@@ -51,6 +51,30 @@ def test_build_local_app_context_should_require_game_path(tmp_path: Path) -> Non
         build_local_app_context(config)
 
 
+def test_build_local_app_context_should_enable_bp_vo_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """local 上下文应默认启用大厅 BP 语音。"""
+
+    calls: dict[str, object] = {}
+
+    def _fake_setup_app(*, dev_mode: bool, log_level: str, cli_overrides: dict[str, object]) -> object:
+        calls["dev_mode"] = dev_mode
+        calls["log_level"] = log_level
+        calls["cli_overrides"] = cli_overrides
+        return object()
+
+    monkeypatch.setitem(sys.modules, "lol_audio_unpack", types.SimpleNamespace(setup_app=_fake_setup_app))
+
+    build_local_app_context(_build_local_config(tmp_path))
+
+    overrides = calls["cli_overrides"]
+    assert isinstance(overrides, dict)
+    assert overrides["SOURCE_MODE"] == "local_path"
+    assert overrides["WITH_BP_VO"] is True
+
+
 def test_run_local_pipeline_should_collect_scanned_artifacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

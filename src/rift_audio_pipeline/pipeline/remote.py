@@ -352,6 +352,7 @@ def _build_remote_cli_overrides(
         "REMOTE_LCU_MANIFEST_URL": pair.lcu_manifest_url,
         "REMOTE_GAME_MANIFEST_URL": pair.game_manifest_url,
         "CLEANUP_REMOTE": config.cleanup_remote,
+        "WITH_BP_VO": True,
     }
     if config.game_path is not None:
         overrides["GAME_PATH"] = str(config.game_path)

@@ -62,7 +62,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-update", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--include-champions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--include-maps", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--run-update", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--run-extract", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--run-mapping", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--integrate-data", action=argparse.BooleanOptionalAction, default=False)
@@ -115,7 +114,7 @@ def build_run_config(args: argparse.Namespace) -> PipelineRunConfig:
         include_maps=args.include_maps,
         champion_ids=_parse_id_list(args.champion_ids),
         map_ids=_parse_id_list(args.map_ids),
-        run_update=args.run_update,
+        run_update=True,
         run_extract=args.run_extract,
         run_mapping=args.run_mapping,
         integrate_data=args.integrate_data,

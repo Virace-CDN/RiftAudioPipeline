@@ -338,7 +338,6 @@ def test_build_pipeline_command_should_accept_minimal_remote_extract_inputs() ->
     assert command[:3] == [sys.executable, "-m", "rift_audio_pipeline.pipeline.cli"]
     assert "--mode" in command
     assert "remote" in command
-    assert "--run-update" in command
     assert "--run-extract" in command
     assert "--no-run-mapping" in command
     assert "--current-version" in command
