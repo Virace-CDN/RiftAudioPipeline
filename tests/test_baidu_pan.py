@@ -32,6 +32,7 @@ class _FakeApiException(Exception):
         self.status = 500
         self.reason = "mock-error"
         self.body = message
+        self.headers: dict[str, Any] | None = None
 
 
 class _FakeHttpResponse:
@@ -124,6 +125,18 @@ def _build_client(
             """模拟关闭连接池。"""
 
             self.closed = True
+
+        @property
+        def rest_client(self) -> Any:
+            """暴露与官方 ApiClient 一致的 rest_client 接口。"""
+
+            return SimpleNamespace(request=self._rest_request)
+
+        def _rest_request(self, method: str, url: str, **kwargs: Any) -> _FakeHttpResponse:
+            """模拟跟随 302 后的直接下载请求。"""
+
+            self.call_api_calls.append({"method": method, "url": url, **kwargs})
+            return _FakeHttpResponse(chunks=self.download_chunks)
 
     class _FakeFileinfoApi:
         """模拟 fileinfo API。"""
@@ -764,6 +777,46 @@ def test_invoke_sdk_call_api_should_translate_sdk_exception(
         )
 
 
+def test_invoke_sdk_call_api_should_follow_302_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """下载接口返回 302 时应跟随 Location 继续下载。"""
+
+    client, runtime = _build_client(monkeypatch)
+    redirect_error = _FakeApiException("redirect")
+    redirect_error.status = 302
+    redirect_error.reason = "Found"
+    redirect_error.body = '{"error_code":302,"request_id":123}'
+    redirect_error.headers = {
+        "Location": "https://redirect.example.test/file/database.json?sign=secret-signature"
+    }
+    runtime.api_client.call_api_failures = 1
+    runtime.api_client.download_chunks = [b"redirected-data"]
+
+    original_call_api = runtime.api_client.call_api
+
+    def _redirect_once(**kwargs: Any) -> _FakeHttpResponse:
+        runtime.api_client.call_api_calls.append(kwargs)
+        runtime.api_client.call_api_failures -= 1
+        raise redirect_error
+
+    runtime.api_client.call_api = _redirect_once
+    try:
+        response = client._invoke_sdk_call_api(
+            access_token="access-token",
+            remote_path="/apps/rift-audio-pipeline/work/file.txt",
+            read_timeout=15.0,
+        )
+    finally:
+        runtime.api_client.call_api = original_call_api
+
+    assert response.read(1024) == b"redirected-data"
+    assert runtime.api_client.call_api_calls[-1]["url"].startswith(
+        "https://redirect.example.test/file/database.json"
+    )
+    assert runtime.api_client.call_api_calls[-1]["headers"] == {"User-Agent": "pan.baidu.com"}
+
+
 def test_extract_api_exception_message_should_redact_access_token() -> None:
     """异常消息中的 access_token 应被脱敏。"""
 
@@ -782,6 +835,16 @@ def test_extract_api_exception_message_should_redact_access_token() -> None:
     assert "another-secret" not in message
     assert "access_token=<redacted>" in message
     assert '"client_secret":"<redacted>"' in message
+
+
+def test_extract_redirect_location_should_return_header_value() -> None:
+    """302 异常应能提取 Location 头。"""
+
+    error = _FakeApiException("redirect")
+    error.status = 302
+    error.headers = {"Location": "https://redirect.example.test/file/demo.bin"}
+
+    assert pan_module._extract_redirect_location(error) == "https://redirect.example.test/file/demo.bin"
 
 
 def test_ensure_access_token_should_refresh_when_expired(monkeypatch: pytest.MonkeyPatch) -> None:

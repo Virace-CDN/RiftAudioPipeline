@@ -18,6 +18,7 @@ from typing import Any
 from typing import Callable
 from typing import Iterable
 from typing import Mapping
+from urllib.parse import urlparse
 import warnings
 
 from rift_audio_pipeline.baidu.oauth import BaiduAppCredentials
@@ -730,7 +731,7 @@ class BaiduPanClient:
         except self._api_exception_cls as error:  # type: ignore[misc]
             raise BaiduPanApiError(
                 message=f"百度 SDK 调用失败：{operation}，{_extract_api_exception_message(error)}"
-            ) from error
+            ) from None
         payload = _payload_to_dict(raw_payload)
         errno = _as_int(payload.get("errno"))
         if errno not in (None, 0):
@@ -760,9 +761,21 @@ class BaiduPanClient:
                 _check_type=False,
             )
         except self._api_exception_cls as error:  # type: ignore[misc]
+            redirect_location = _extract_redirect_location(error)
+            if redirect_location:
+                parsed_location = urlparse(redirect_location)
+                self._emit_download_log(
+                    "redirect_follow "
+                    f"path={remote_path} "
+                    f"host={parsed_location.netloc or 'unknown'}"
+                )
+                return self._download_from_redirect_location(
+                    redirect_location=redirect_location,
+                    read_timeout=read_timeout,
+                )
             raise BaiduPanApiError(
                 message=f"官方 SDK 下载调用失败：{_extract_api_exception_message(error)}"
-            ) from error
+            ) from None
 
     def _emit_download_log(self, message: str) -> None:
         """输出下载阶段高层日志。"""
@@ -770,6 +783,22 @@ class BaiduPanClient:
         if self._download_log is None:
             return
         self._download_log(f"[baidu.download] {message}")
+
+    def _download_from_redirect_location(self, *, redirect_location: str, read_timeout: float) -> Any:
+        """跟随百度下载接口返回的 302 Location 并继续读取文件流。"""
+
+        try:
+            return self._api_client.rest_client.request(
+                "GET",
+                redirect_location,
+                headers={"User-Agent": "pan.baidu.com"},
+                _preload_content=False,
+                _request_timeout=(self._download_connect_timeout, read_timeout),
+            )
+        except self._api_exception_cls as error:  # type: ignore[misc]
+            raise BaiduPanApiError(
+                message=f"302 跳转下载失败：{_extract_api_exception_message(error)}"
+            ) from None
 
     def _resolve_download_read_timeout(self, *, file_size: int | None) -> float:
         """按文件大小动态计算下载读取超时。"""
@@ -892,6 +921,25 @@ def _extract_api_exception_message(error: Exception) -> str:
     body = _sanitize_sensitive_text(str(getattr(error, "body", None)))
     status = getattr(error, "status", None)
     return f"status={status}, reason={reason}, body={body}"
+
+
+def _extract_redirect_location(error: Exception) -> str | None:
+    """从 SDK 异常头部中提取 302 Location。"""
+
+    if getattr(error, "status", None) != 302:
+        return None
+    headers = getattr(error, "headers", None)
+    if headers is None:
+        return None
+    if hasattr(headers, "get"):
+        location = headers.get("Location")
+        if isinstance(location, str) and location.strip():
+            return location.strip()
+    if isinstance(headers, Mapping):
+        location = headers.get("Location")
+        if isinstance(location, str) and location.strip():
+            return location.strip()
+    return None
 
 
 def _sanitize_sensitive_text(text: str) -> str:
